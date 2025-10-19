@@ -3,11 +3,17 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/WormW/auto-rss/internal/api/router"
 	"github.com/WormW/auto-rss/internal/config"
 	"github.com/WormW/auto-rss/internal/pkg/database"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
+	"github.com/WormW/auto-rss/internal/repository"
+	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/gin-gonic/gin"
 )
 
@@ -39,6 +45,19 @@ func main() {
 	}
 	logger.Info("Database migration completed")
 
+	// 从数据库加载配置并覆盖默认配置
+	if err := cfg.LoadFromDB(db); err != nil {
+		logger.Warn("Failed to load config from database", "error", err)
+	} else {
+		logger.Info("Configuration loaded from database")
+	}
+
+	// 重新初始化日志以包含数据库写入
+	if err := logger.InitWithDB(cfg.LogLevel, db); err != nil {
+		log.Fatalf("Failed to reinit logger with DB: %v", err)
+	}
+	logger.Info("Logger initialized with database writer")
+
 	// 设置 Gin 模式
 	if cfg.LogLevel == "debug" {
 		gin.SetMode(gin.DebugMode)
@@ -46,14 +65,66 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	// 初始化路由
-	r := router.Setup(db, cfg)
+	// 初始化 repository
+	downloadRepo := repository.NewDownloadRepository(db)
+	subscriptionRepo := repository.NewSubscriptionRepository(db)
+	configRepo := repository.NewConfigRepository(db)
 
-	// 启动服务器
+	// 初始化 qBittorrent 客户端
+	qbClient := downloader.NewQBittorrentClient()
+	logger.Info("Attempting to connect to qBittorrent",
+		"host", cfg.QBHost,
+		"username", cfg.QBUsername,
+		"password_length", len(cfg.QBPassword))
+	if err := qbClient.Login(cfg.QBHost, cfg.QBUsername, cfg.QBPassword); err != nil {
+		logger.Warn("Failed to login to qBittorrent, download monitor will retry", "error", err)
+	} else {
+		logger.Info("Connected to qBittorrent", "host", cfg.QBHost)
+	}
+
+	// 获取重命名模板配置
+	renameTemplate := "${title}/Season ${season}/${title} S${seasonFormat}E${episodeFormat}"
+	if templateConfig, err := configRepo.Get("rename_template"); err == nil && templateConfig != nil {
+		renameTemplate = templateConfig.Value
+		logger.Info("Loaded rename template from config", "template", renameTemplate)
+	}
+
+	// 初始化下载监控服务
+	downloadMonitor := downloader.NewDownloadMonitor(
+		qbClient,
+		downloadRepo,
+		subscriptionRepo,
+		renameTemplate,
+	)
+
+	// 启动下载监控（30秒检查一次）
+	downloadMonitor.Start(30 * time.Second)
+	logger.Info("Download monitor started", "interval", "30s", "category", "AutoRss")
+
+	// 初始化路由（传递 qBittorrent 客户端）
+	r := router.Setup(db, cfg, qbClient)
+
+	// 优雅关闭
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	// 启动服务器（非阻塞）
 	addr := fmt.Sprintf(":%d", cfg.ServerPort)
 	logger.Info("Server starting", "address", addr)
 
-	if err := r.Run(addr); err != nil {
-		logger.Fatal("Failed to start server", "error", err)
-	}
+	go func() {
+		if err := r.Run(addr); err != nil {
+			logger.Fatal("Failed to start server", "error", err)
+		}
+	}()
+
+	// 等待退出信号
+	<-quit
+	logger.Info("Shutting down server...")
+
+	// 停止下载监控
+	downloadMonitor.Stop()
+	logger.Info("Download monitor stopped")
+
+	logger.Info("Server exited")
 }

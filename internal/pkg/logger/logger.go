@@ -1,14 +1,22 @@
 package logger
 
 import (
+	"os"
+
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"gorm.io/gorm"
 )
 
 var log *zap.SugaredLogger
 
 // Init 初始化日志
 func Init(level string) error {
+	return InitWithDB(level, nil)
+}
+
+// InitWithDB 初始化日志(带数据库写入)
+func InitWithDB(level string, db *gorm.DB) error {
 	var zapLevel zapcore.Level
 	switch level {
 	case "debug":
@@ -23,15 +31,33 @@ func Init(level string) error {
 		zapLevel = zapcore.InfoLevel
 	}
 
-	config := zap.NewProductionConfig()
-	config.Level = zap.NewAtomicLevelAt(zapLevel)
-	config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-	config.Encoding = "json"
+	encoderConfig := zap.NewProductionEncoderConfig()
+	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	encoder := zapcore.NewJSONEncoder(encoderConfig)
 
-	logger, err := config.Build()
-	if err != nil {
-		return err
+	// 标准输出
+	consoleCore := zapcore.NewCore(
+		encoder,
+		zapcore.AddSync(os.Stderr),
+		zapLevel,
+	)
+
+	cores := []zapcore.Core{consoleCore}
+
+	// 如果提供了数据库连接,添加数据库写入器
+	if db != nil {
+		dbWriter := NewDBWriter(db)
+		dbCore := zapcore.NewCore(
+			encoder,
+			zapcore.AddSync(dbWriter),
+			zapLevel,
+		)
+		cores = append(cores, dbCore)
 	}
+
+	// 创建多核心logger
+	core := zapcore.NewTee(cores...)
+	logger := zap.New(core, zap.AddCaller())
 
 	log = logger.Sugar()
 	return nil

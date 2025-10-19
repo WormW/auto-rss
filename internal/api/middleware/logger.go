@@ -16,6 +16,11 @@ func Logger() gin.HandlerFunc {
 
 		c.Next()
 
+		// Skip logging for log API endpoints to avoid circular dependency
+		if path == "/api/v1/logs" || path == "/api/v1/logs/clear" {
+			return
+		}
+
 		latency := time.Since(start)
 		statusCode := c.Writer.Status()
 		clientIP := c.ClientIP()

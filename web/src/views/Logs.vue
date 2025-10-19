@@ -30,9 +30,11 @@
 
 <script setup lang="ts">
 import { ref, onMounted, h } from 'vue'
-import { NButton, NDataTable, NSelect, NSpace, NCard, NTag, useMessage } from 'naive-ui'
+import { NButton, NDataTable, NSelect, NSpace, NCard, NTag, useMessage, useDialog } from 'naive-ui'
+import { api } from '@/api'
 
 const message = useMessage()
+const dialog = useDialog()
 const loading = ref(false)
 const logs = ref<any[]>([])
 const levelFilter = ref('')
@@ -69,14 +71,14 @@ const getLevelTag = (level: string) => {
     warn: { type: 'warning', text: 'WARN' },
     error: { type: 'error', text: 'ERROR' }
   }
-  const config = levelMap[level.toLowerCase()] || { type: 'info', text: level }
+  const config = levelMap[level.toLowerCase()] || { type: 'info', text: level.toUpperCase() }
   return h(NTag, { type: config.type, size: 'small' }, { default: () => config.text })
 }
 
 const columns = [
   {
     title: '时间',
-    key: 'timestamp',
+    key: 'created_at',
     width: 180,
     render: (row: any) => {
       const date = new Date(row.created_at)
@@ -104,11 +106,22 @@ const columns = [
     }
   },
   {
-    title: '来源',
-    key: 'source',
-    width: 150,
+    title: '上下文',
+    key: 'context',
+    width: 200,
     ellipsis: {
       tooltip: true
+    },
+    render: (row: any) => {
+      if (!row.context || row.context === '{}') return '-'
+      try {
+        const ctx = JSON.parse(row.context)
+        const keys = Object.keys(ctx)
+        if (keys.length === 0) return '-'
+        return keys.slice(0, 3).map(k => `${k}=${JSON.stringify(ctx[k])}`).join(', ')
+      } catch {
+        return row.context
+      }
     }
   }
 ]
@@ -116,29 +129,23 @@ const columns = [
 const loadLogs = async () => {
   loading.value = true
   try {
-    // TODO: 实现日志查询 API
-    // 模拟数据
-    const mockLogs = Array.from({ length: 100 }, (_, i) => ({
-      id: i + 1,
-      level: ['debug', 'info', 'warn', 'error'][Math.floor(Math.random() * 4)],
-      message: `这是第 ${i + 1} 条日志消息`,
-      source: ['RSS Parser', 'Downloader', 'Scheduler', 'API'][Math.floor(Math.random() * 4)],
-      created_at: new Date(Date.now() - Math.random() * 86400000 * 7).toISOString()
-    }))
+    const response: any = await api.get('/logs', {
+      params: {
+        page: pagination.value.page,
+        page_size: pagination.value.pageSize,
+        level: levelFilter.value || undefined
+      }
+    })
 
-    // 根据级别过滤
-    let filteredLogs = mockLogs
-    if (levelFilter.value) {
-      filteredLogs = mockLogs.filter(log => log.level === levelFilter.value)
+    if (response.code === 0) {
+      logs.value = response.data.list || []
+      pagination.value.itemCount = response.data.total || 0
+    } else {
+      message.error('加载日志失败: ' + response.message)
     }
-
-    // 分页
-    const start = (pagination.value.page - 1) * pagination.value.pageSize
-    const end = start + pagination.value.pageSize
-    logs.value = filteredLogs.slice(start, end)
-    pagination.value.itemCount = filteredLogs.length
-  } catch (error) {
-    message.error('加载日志失败')
+  } catch (error: any) {
+    message.error('加载日志失败: ' + (error.message || '未知错误'))
+    console.error('Failed to load logs:', error)
   } finally {
     loading.value = false
   }
@@ -150,8 +157,25 @@ const handleRefresh = () => {
 }
 
 const handleClear = () => {
-  // TODO: 实现清空日志功能
-  message.info('清空日志功能待实现')
+  dialog.warning({
+    title: '确认清空日志',
+    content: '此操作将删除7天前的所有日志记录,是否继续?',
+    positiveText: '确定',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      try {
+        const response: any = await api.post('/logs/clear')
+        if (response.code === 0) {
+          message.success('日志已清空')
+          loadLogs()
+        } else {
+          message.error('清空日志失败: ' + response.message)
+        }
+      } catch (error: any) {
+        message.error('清空日志失败: ' + (error.message || '未知错误'))
+      }
+    }
+  })
 }
 
 onMounted(() => {
