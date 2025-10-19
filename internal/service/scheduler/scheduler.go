@@ -118,7 +118,7 @@ func (s *scheduler) checkRSSFeeds() {
 
 		// 处理每个 RSS 条目
 		for _, item := range items {
-			// 检查是否已存在
+			// 检查是否已存在相同 hash
 			existing, _ := s.downloadRepo.GetByHash(item.TorrentHash)
 			if existing != nil {
 				continue
@@ -127,6 +127,35 @@ func (s *scheduler) checkRSSFeeds() {
 			// 应用关键词过滤
 			if !s.matchesFilter(&sub, item.Title) {
 				continue
+			}
+
+			// 检查同一订阅的同一集数是否已存在
+			if item.Episode > 0 {
+				existingEpisode, _ := s.downloadRepo.GetBySubscriptionAndEpisode(sub.ID, item.Episode)
+				if existingEpisode != nil {
+					// 删除旧的下载任务（通常是非V2版本）
+					logger.Info("Found duplicate episode, removing old version",
+						"subscription", sub.Name,
+						"episode", item.Episode,
+						"old_title", existingEpisode.Title,
+						"new_title", item.Title)
+
+					// 如果旧任务有 qBittorrent hash，尝试删除种子
+					if existingEpisode.TorrentHash != "" {
+						if err := s.qbClient.DeleteTorrent(existingEpisode.TorrentHash, true); err != nil {
+							logger.Error("Failed to delete old torrent from qBittorrent",
+								"hash", existingEpisode.TorrentHash,
+								"error", err)
+						}
+					}
+
+					// 删除数据库记录
+					if err := s.downloadRepo.Delete(existingEpisode.ID); err != nil {
+						logger.Error("Failed to delete old download record",
+							"id", existingEpisode.ID,
+							"error", err)
+					}
+				}
 			}
 
 			// 创建下载任务

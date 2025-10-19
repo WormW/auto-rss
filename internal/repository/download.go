@@ -12,6 +12,7 @@ type DownloadRepository interface {
 	Delete(id uint) error
 	GetByID(id uint) (*model.Download, error)
 	GetByHash(hash string) (*model.Download, error)
+	GetBySubscriptionAndEpisode(subscriptionID uint, episode int) (*model.Download, error)
 	List(offset, limit int, status string) ([]model.Download, int64, error)
 	ListBySubscriptionID(subscriptionID uint) ([]model.Download, error)
 	UpdateStatus(id uint, status string) error
@@ -78,6 +79,16 @@ func (r *downloadRepository) List(offset, limit int, status string) ([]model.Dow
 	err := query.Preload("Subscription").Offset(offset).Limit(limit).
 		Order("created_at DESC").Find(&downloads).Error
 	return downloads, total, err
+}
+
+// GetBySubscriptionAndEpisode 根据订阅 ID 和集数获取下载任务
+func (r *downloadRepository) GetBySubscriptionAndEpisode(subscriptionID uint, episode int) (*model.Download, error) {
+	var download model.Download
+	err := r.db.Where("subscription_id = ? AND episode = ?", subscriptionID, episode).First(&download).Error
+	if err != nil {
+		return nil, err
+	}
+	return &download, nil
 }
 
 // ListBySubscriptionID 根据订阅 ID 获取下载任务列表
