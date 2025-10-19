@@ -4,11 +4,15 @@ WORKDIR /build
 COPY web/package*.json ./
 RUN npm install
 COPY web/ ./
-RUN npm run build
+RUN npx vite build
 
 # 构建后端
-FROM golang:1.21-alpine AS go-builder
+FROM golang:1.23-alpine AS go-builder
 WORKDIR /build
+# 安装构建依赖
+RUN apk add --no-cache gcc musl-dev sqlite-dev
+# 设置Go代理加速下载
+ENV GOPROXY=https://goproxy.cn,direct
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . ./
