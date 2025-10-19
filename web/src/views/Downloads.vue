@@ -17,6 +17,7 @@
       :data="downloads"
       :loading="loading"
       :pagination="pagination"
+      :remote="true"
     />
   </div>
 </template>
@@ -43,9 +44,17 @@ const statusOptions = [
 const pagination = ref({
   page: 1,
   pageSize: 20,
+  pageCount: 1,
   itemCount: 0,
+  showSizePicker: true,
+  pageSizes: [10, 20, 50, 100],
   onChange: (page: number) => {
     pagination.value.page = page
+    loadDownloads()
+  },
+  onUpdatePageSize: (pageSize: number) => {
+    pagination.value.pageSize = pageSize
+    pagination.value.page = 1
     loadDownloads()
   }
 })
@@ -97,6 +106,7 @@ const loadDownloads = async () => {
     const res: any = await downloadApi.list(pagination.value.page, pagination.value.pageSize, statusFilter.value)
     downloads.value = res.data?.list || []
     pagination.value.itemCount = res.data?.total || 0
+    pagination.value.pageCount = Math.ceil((res.data?.total || 0) / pagination.value.pageSize)
   } catch (error) {
     message.error('加载下载列表失败')
     downloads.value = []

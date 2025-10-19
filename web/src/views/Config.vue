@@ -72,6 +72,62 @@
       </n-form>
     </n-card>
 
+    <n-card title="文件重命名规则" style="margin-top: 16px">
+      <n-form label-placement="left" label-width="120">
+        <n-form-item label="模板预设">
+          <n-select
+            v-model:value="selectedPreset"
+            :options="presetOptions"
+            placeholder="选择预设模板"
+            @update:value="handlePresetChange"
+          />
+        </n-form-item>
+        <n-form-item label="自定义模板">
+          <n-input
+            v-model:value="renameTemplate"
+            type="textarea"
+            placeholder="${title}/Season ${season}/${title} S${seasonFormat}E${episodeFormat}"
+            :autosize="{
+              minRows: 2,
+              maxRows: 4
+            }"
+            @update:value="handleTemplateChange"
+          />
+        </n-form-item>
+        <n-form-item label="可用变量">
+          <n-space style="flex-wrap: wrap">
+            <n-tag
+              v-for="(desc, variable) in templateVariables"
+              :key="variable"
+              type="info"
+              size="small"
+              style="cursor: pointer"
+              @click="insertVariable(variable)"
+            >
+              {{ variable }} - {{ desc }}
+            </n-tag>
+          </n-space>
+        </n-form-item>
+        <n-form-item label="预览效果">
+          <n-alert v-if="previewPath" type="success" style="margin-bottom: 12px">
+            <div style="font-family: monospace">{{ previewPath }}</div>
+            <template #header>
+              预览结果
+            </template>
+          </n-alert>
+          <n-text depth="3" style="font-size: 12px">
+            示例：{{ previewSample }}
+          </n-text>
+        </n-form-item>
+        <n-form-item>
+          <n-space>
+            <n-button type="primary" @click="saveRenameTemplate">保存模板</n-button>
+            <n-button @click="previewRename">实时预览</n-button>
+          </n-space>
+        </n-form-item>
+      </n-form>
+    </n-card>
+
     <n-card title="操作" style="margin-top: 16px">
       <n-space>
         <n-button type="info" @click="handleManualRefresh">手动刷新 RSS</n-button>
@@ -82,7 +138,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import {
   NCard,
   NForm,
@@ -93,6 +149,9 @@ import {
   NSpace,
   NSwitch,
   NSelect,
+  NTag,
+  NAlert,
+  NText,
   useMessage
 } from 'naive-ui'
 import { configApi, rssApi } from '@/api'
@@ -123,6 +182,128 @@ const logLevelOptions = [
   { label: 'Error', value: 'error' }
 ]
 
+// 重命名模板相关
+const renameTemplate = ref('${title}/Season ${season}/${title} S${seasonFormat}E${episodeFormat}')
+const selectedPreset = ref('media_library')
+const presetOptions = ref<Array<{ label: string; value: string }>>([])
+const templateVariables = ref<Record<string, string>>({})
+const previewPath = ref('')
+const previewSample = ref('葬送的芙莉莲 S01E03')
+
+// 加载重命名模板预设
+const loadRenamePresets = async () => {
+  try {
+    const res: any = await configApi.getRenamePresets()
+    if (res.code === 0 && res.data) {
+      // 构建预设选项
+      const presets = res.data.presets || {}
+      presetOptions.value = Object.entries(presets).map(([key, value]) => ({
+        label: getPresetLabel(key),
+        value: key
+      }))
+
+      // 保存变量说明
+      templateVariables.value = res.data.variables || {}
+    }
+  } catch (error) {
+    console.error('加载重命名模板预设失败:', error)
+  }
+}
+
+// 获取预设的中文标签
+const getPresetLabel = (key: string): string => {
+  const labels: Record<string, string> = {
+    'media_library': '媒体库标准格式 (Plex/Jellyfin)',
+    'media_library_fansub': '媒体库 + 字幕组',
+    'media_library_full': '媒体库完整信息',
+    'simple': '简洁格式',
+    'fansub_style': '字幕组风格',
+    'detailed': '详细信息格式'
+  }
+  return labels[key] || key
+}
+
+// 处理预设选择
+const handlePresetChange = async (value: string) => {
+  try {
+    const res: any = await configApi.getRenamePresets()
+    if (res.code === 0 && res.data) {
+      const presets = res.data.presets || {}
+      if (presets[value]) {
+        renameTemplate.value = presets[value]
+        await previewRename()
+      }
+    }
+  } catch (error) {
+    message.error('切换预设失败')
+  }
+}
+
+// 插入变量
+const insertVariable = (variable: string) => {
+  renameTemplate.value += variable
+  previewRename()
+}
+
+// 模板变化时实时预览
+const handleTemplateChange = () => {
+  // 可以添加防抖逻辑
+  previewRename()
+}
+
+// 预览重命名效果
+const previewRename = async () => {
+  if (!renameTemplate.value) {
+    previewPath.value = ''
+    return
+  }
+
+  try {
+    const res: any = await configApi.previewRenameTemplate(renameTemplate.value)
+    if (res.code === 0 && res.data) {
+      previewPath.value = res.data.preview
+      // 更新示例数据显示
+      if (res.data.sample) {
+        const s = res.data.sample
+        previewSample.value = `${s.title} S${String(s.season).padStart(2, '0')}E${String(s.episode).padStart(2, '0')}`
+      }
+    }
+  } catch (error: any) {
+    const errorMsg = error?.response?.data?.message || '预览失败'
+    message.warning(errorMsg)
+    previewPath.value = ''
+  }
+}
+
+// 保存重命名模板
+const saveRenameTemplate = async () => {
+  if (!renameTemplate.value) {
+    message.warning('请输入重命名模板')
+    return
+  }
+
+  try {
+    await configApi.saveRenameTemplate(renameTemplate.value)
+    message.success('重命名模板保存成功')
+  } catch (error: any) {
+    const errorMsg = error?.response?.data?.message || '保存模板失败'
+    message.error(errorMsg)
+  }
+}
+
+// 加载当前重命名模板
+const loadRenameTemplate = async () => {
+  try {
+    const res: any = await configApi.getRenameTemplate()
+    if (res.code === 0 && res.data) {
+      renameTemplate.value = res.data.template
+      await previewRename()
+    }
+  } catch (error) {
+    console.error('加载重命名模板失败:', error)
+  }
+}
+
 const loadConfig = async () => {
   try {
     const res: any = await configApi.getAll()
@@ -132,6 +313,15 @@ const loadConfig = async () => {
       if (!config.key || !config.value) return
 
       switch (config.key) {
+        case 'qbittorrent_host':
+          qbConfig.value.host = config.value
+          break
+        case 'qbittorrent_username':
+          qbConfig.value.username = config.value
+          break
+        case 'qbittorrent_password':
+          qbConfig.value.password = config.value
+          break
         case 'qb_host':
           qbConfig.value.host = config.value
           break
@@ -161,15 +351,21 @@ const loadConfig = async () => {
 }
 
 const saveQBConfig = async () => {
+  if (!qbConfig.value.host || !qbConfig.value.username || !qbConfig.value.password) {
+    message.warning('请填写完整的 qBittorrent 配置信息')
+    return
+  }
+
   try {
-    await configApi.update('qb_host', qbConfig.value.host)
-    await configApi.update('qb_username', qbConfig.value.username)
-    if (qbConfig.value.password) {
-      await configApi.update('qb_password', qbConfig.value.password)
-    }
+    await configApi.saveQBittorrent(
+      qbConfig.value.host,
+      qbConfig.value.username,
+      qbConfig.value.password
+    )
     message.success('qBittorrent 配置保存成功')
-  } catch (error) {
-    message.error('保存配置失败')
+  } catch (error: any) {
+    const errorMsg = error?.response?.data?.message || '保存配置失败'
+    message.error(errorMsg)
   }
 }
 
@@ -195,8 +391,25 @@ const saveSystemConfig = async () => {
 }
 
 const testConnection = async () => {
-  // TODO: 实现连接测试
-  message.info('连接测试功能待实现')
+  if (!qbConfig.value.host || !qbConfig.value.username || !qbConfig.value.password) {
+    message.warning('请填写完整的 qBittorrent 配置信息')
+    return
+  }
+
+  try {
+    message.loading('正在测试连接...', { duration: 0, key: 'test-qb' })
+    await configApi.testQBittorrent(
+      qbConfig.value.host,
+      qbConfig.value.username,
+      qbConfig.value.password
+    )
+    message.destroyAll()
+    message.success('qBittorrent 连接测试成功')
+  } catch (error: any) {
+    message.destroyAll()
+    const errorMsg = error?.response?.data?.message || '连接测试失败'
+    message.error(errorMsg)
+  }
 }
 
 const handleManualRefresh = async () => {
@@ -215,5 +428,7 @@ const handleClearCache = () => {
 
 onMounted(() => {
   loadConfig()
+  loadRenamePresets()
+  loadRenameTemplate()
 })
 </script>

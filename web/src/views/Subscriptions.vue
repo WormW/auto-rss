@@ -21,11 +21,11 @@
     <!-- 订阅列表 - 按星期分组的卡片展示 -->
     <n-spin :show="loading">
       <div v-for="week in weekList" :key="week.day" style="margin-bottom: 24px">
-        <div v-if="getSubscriptionsByWeekday(week.day).length > 0">
+        <div v-if="getActiveSubscriptionsByWeekday(week.day).length > 0">
           <h3 style="margin: 16px 0 12px 4px;">{{ week.label }}</h3>
           <div class="grid-container">
             <n-card
-              v-for="sub in getSubscriptionsByWeekday(week.day)"
+              v-for="sub in getActiveSubscriptionsByWeekday(week.day)"
               :key="sub.id"
               hoverable
               style="cursor: default;"
@@ -33,7 +33,14 @@
               <div style="display: flex; gap: 12px;">
                 <!-- 封面图 -->
                 <div style="flex-shrink: 0;">
+                  <img
+                    v-if="sub.bangumi_cover_local"
+                    :src="`http://localhost:7892/covers/${sub.bangumi_cover_local}`"
+                    :alt="sub.name"
+                    style="width: 92px; height: 130px; object-fit: cover; border-radius: 4px;"
+                  />
                   <div
+                    v-else
                     style="width: 92px; height: 130px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 4px; display: flex; align-items: center; justify-content: center; color: white; font-size: 24px; font-weight: bold;"
                   >
                     {{ sub.name[0] }}
@@ -42,6 +49,11 @@
 
                 <!-- 内容区 -->
                 <div style="flex: 1; min-width: 0; position: relative;">
+                  <!-- Bangumi评分 - 右上角 -->
+                  <div v-if="sub.bangumi_score && sub.bangumi_score > 0" style="position: absolute; top: 0; right: 0; background: linear-gradient(135deg, #f6d365 0%, #fda085 100%); color: white; padding: 4px 10px; border-radius: 12px; font-size: 13px; font-weight: 600; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                    ⭐ {{ sub.bangumi_score.toFixed(1) }}
+                  </div>
+
                   <div>
                     <!-- 标题 -->
                     <n-ellipsis style="max-width: 250px; font-weight: 500; font-size: 16px; margin-bottom: 8px;">
@@ -55,6 +67,10 @@
 
                     <!-- 标签组 -->
                     <n-space :size="4" style="margin-bottom: 8px;">
+                      <!-- 年份季度标签 -->
+                      <n-tag v-if="sub.air_year" size="small" type="primary">
+                        {{ getYearSeasonLabel(sub.air_year, sub.air_date) }}
+                      </n-tag>
                       <n-tag size="small">第 {{ sub.season }} 季</n-tag>
                       <n-tag size="small" :type="sub.enabled ? 'success' : 'default'">
                         {{ sub.enabled ? '已启用' : '未启用' }}
@@ -62,9 +78,24 @@
                       <n-tag size="small" type="info" v-if="sub.fansub">
                         {{ sub.fansub }}
                       </n-tag>
-                      <n-tag size="small" type="warning" v-if="sub.current_episode || sub.total_episodes">
-                        {{ sub.current_episode || 0 }} / {{ sub.total_episodes || '*' }}
-                      </n-tag>
+                      <n-tooltip trigger="hover" v-if="sub.current_episode || sub.total_episodes">
+                        <template #trigger>
+                          <n-tag size="small" type="warning">
+                            {{ sub.current_episode || 0 }} / {{ sub.total_episodes || '*' }}
+                          </n-tag>
+                        </template>
+                        <div v-if="sub.downloading_count !== undefined">
+                          <div>当前集数: {{ sub.current_episode || 0 }}</div>
+                          <div>总集数: {{ sub.total_episodes || '未知' }}</div>
+                          <div style="margin-top: 4px; color: #18a058;">
+                            下载中: {{ sub.downloading_count }} 个资源
+                          </div>
+                        </div>
+                        <div v-else>
+                          <div>当前集数: {{ sub.current_episode || 0 }}</div>
+                          <div>总集数: {{ sub.total_episodes || '未知' }}</div>
+                        </div>
+                      </n-tooltip>
                     </n-space>
 
                     <!-- 最后下载时间 -->
@@ -73,8 +104,173 @@
                     </div>
                   </div>
 
-                  <!-- 操作按钮 -->
-                  <div style="position: absolute; right: 0; bottom: 0; display: flex; flex-direction: column; gap: 4px;">
+                  <!-- 操作区域 -->
+                  <div style="position: absolute; right: 0; bottom: 0; display: flex; gap: 8px; align-items: flex-end;">
+                    <!-- 控制按钮组 -->
+                    <div style="display: flex; flex-direction: column; gap: 4px;">
+                      <n-tooltip trigger="hover">
+                        <template #trigger>
+                          <n-button text @click="handleEnrichBangumi(sub.id)">
+                            <template #icon>
+                              <n-icon><ReloadOutlined /></n-icon>
+                            </template>
+                          </n-button>
+                        </template>
+                        补全番剧信息
+                      </n-tooltip>
+                      <n-tooltip trigger="hover">
+                        <template #trigger>
+                          <n-button text @click="handleCollectEpisodes(sub.id)">
+                            <template #icon>
+                              <n-icon><DownloadOutlined /></n-icon>
+                            </template>
+                          </n-button>
+                        </template>
+                        收集剧集
+                      </n-tooltip>
+                      <n-switch
+                        :value="sub.enabled"
+                        @update:value="(val) => handleToggle(sub.id, val)"
+                        size="small"
+                      />
+                    </div>
+
+                    <!-- 编辑删除按钮 -->
+                    <div style="display: flex; flex-direction: column; gap: 4px;">
+                      <n-button text @click="handleEdit(sub)">
+                        <template #icon>
+                          <n-icon><EditOutlined /></n-icon>
+                        </template>
+                      </n-button>
+                      <n-button text type="error" @click="handleDelete(sub.id)">
+                        <template #icon>
+                          <n-icon><DeleteOutlined /></n-icon>
+                        </template>
+                      </n-button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </n-card>
+          </div>
+        </div>
+      </div>
+
+      <!-- 已完结番剧 -->
+      <div v-if="completedSubscriptions.length > 0" style="margin-top: 32px;">
+        <h3 style="margin: 16px 0 12px 4px;">已完结</h3>
+        <div class="grid-container">
+          <n-card
+            v-for="sub in completedSubscriptions"
+            :key="sub.id"
+            hoverable
+            style="cursor: default;"
+          >
+            <div style="display: flex; gap: 12px;">
+              <!-- 封面图 -->
+              <div style="flex-shrink: 0;">
+                <img
+                  v-if="sub.bangumi_cover_local"
+                  :src="`http://localhost:7892/covers/${sub.bangumi_cover_local}`"
+                  :alt="sub.name"
+                  style="width: 92px; height: 130px; object-fit: cover; border-radius: 4px;"
+                />
+                <div
+                  v-else
+                  style="width: 92px; height: 130px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 4px; display: flex; align-items: center; justify-content: center; color: white; font-size: 24px; font-weight: bold;"
+                >
+                  {{ sub.name[0] }}
+                </div>
+              </div>
+
+              <!-- 内容区 -->
+              <div style="flex: 1; min-width: 0; position: relative;">
+                <!-- Bangumi评分 - 右上角 -->
+                <div v-if="sub.bangumi_score && sub.bangumi_score > 0" style="position: absolute; top: 0; right: 0; background: linear-gradient(135deg, #f6d365 0%, #fda085 100%); color: white; padding: 4px 10px; border-radius: 12px; font-size: 13px; font-weight: 600; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                  ⭐ {{ sub.bangumi_score.toFixed(1) }}
+                </div>
+
+                <div>
+                  <!-- 标题 -->
+                  <n-ellipsis style="max-width: 250px; font-weight: 500; font-size: 16px; margin-bottom: 8px;">
+                    {{ sub.name }}
+                  </n-ellipsis>
+
+                  <!-- RSS 地址 -->
+                  <n-ellipsis :line-clamp="2" style="font-size: 12px; color: var(--n-text-color-2); margin-bottom: 12px;">
+                    {{ sub.rss_url }}
+                  </n-ellipsis>
+
+                  <!-- 标签组 -->
+                  <n-space :size="4" style="margin-bottom: 8px;">
+                    <!-- 年份季度标签 -->
+                    <n-tag v-if="sub.air_year" size="small" type="primary">
+                      {{ getYearSeasonLabel(sub.air_year, sub.air_date) }}
+                    </n-tag>
+                    <n-tag size="small">第 {{ sub.season }} 季</n-tag>
+                    <n-tag size="small" type="default">已完结</n-tag>
+                    <n-tag size="small" type="info" v-if="sub.fansub">
+                      {{ sub.fansub }}
+                    </n-tag>
+                    <n-tooltip trigger="hover" v-if="sub.current_episode || sub.total_episodes">
+                      <template #trigger>
+                        <n-tag size="small" type="success">
+                          {{ sub.current_episode || 0 }} / {{ sub.total_episodes || '*' }}
+                        </n-tag>
+                      </template>
+                      <div v-if="sub.downloading_count !== undefined">
+                        <div>当前集数: {{ sub.current_episode || 0 }}</div>
+                        <div>总集数: {{ sub.total_episodes || '未知' }}</div>
+                        <div style="margin-top: 4px; color: #18a058;">
+                          下载中: {{ sub.downloading_count }} 个资源
+                        </div>
+                      </div>
+                      <div v-else>
+                        <div>当前集数: {{ sub.current_episode || 0 }}</div>
+                        <div>总集数: {{ sub.total_episodes || '未知' }}</div>
+                      </div>
+                    </n-tooltip>
+                  </n-space>
+
+                  <!-- 最后下载时间 -->
+                  <div v-if="sub.last_download_at" style="font-size: 12px; color: var(--n-text-color-3);">
+                    {{ formatTime(sub.last_download_at) }}
+                  </div>
+                </div>
+
+                <!-- 操作区域 -->
+                <div style="position: absolute; right: 0; bottom: 0; display: flex; gap: 8px; align-items: flex-end;">
+                  <!-- 控制按钮组 -->
+                  <div style="display: flex; flex-direction: column; gap: 4px;">
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <n-button text @click="handleEnrichBangumi(sub.id)">
+                          <template #icon>
+                            <n-icon><ReloadOutlined /></n-icon>
+                          </template>
+                        </n-button>
+                      </template>
+                      补全番剧信息
+                    </n-tooltip>
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <n-button text @click="handleCollectEpisodes(sub.id)">
+                          <template #icon>
+                            <n-icon><DownloadOutlined /></n-icon>
+                          </template>
+                        </n-button>
+                      </template>
+                      收集剧集
+                    </n-tooltip>
+                    <n-switch
+                      :value="sub.enabled"
+                      @update:value="(val) => handleToggle(sub.id, val)"
+                      size="small"
+                    />
+                  </div>
+
+                  <!-- 编辑删除按钮 -->
+                  <div style="display: flex; flex-direction: column; gap: 4px;">
                     <n-button text @click="handleEdit(sub)">
                       <template #icon>
                         <n-icon><EditOutlined /></n-icon>
@@ -88,8 +284,8 @@
                   </div>
                 </div>
               </div>
-            </n-card>
-          </div>
+            </div>
+          </n-card>
         </div>
       </div>
 
@@ -252,7 +448,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import {
   NButton,
   NCard,
@@ -271,12 +467,14 @@ import {
   NSpin,
   NEmpty,
   NIcon,
+  NTooltip,
   useMessage,
   useDialog
 } from 'naive-ui'
 import { subscriptionApi, type Subscription } from '@/api'
+import { api } from '@/api'
 import { useRoute, useRouter } from 'vue-router'
-import { EditOutlined, DeleteOutlined, SearchOutlined } from '@vicons/antd'
+import { EditOutlined, DeleteOutlined, SearchOutlined, ReloadOutlined, DownloadOutlined } from '@vicons/antd'
 import AnimeSearch from '@/components/AnimeSearch.vue'
 
 const route = useRoute()
@@ -327,13 +525,19 @@ const formData = ref({
   source_type: 'manual'
 })
 
-// 按星期分组获取订阅
-const getSubscriptionsByWeekday = (day: number) => {
+// 按星期分组获取连载中的订阅
+const getActiveSubscriptionsByWeekday = (day: number) => {
   return subscriptions.value.filter(sub => {
+    if (isCompleted(sub)) return false  // 已完结的不显示在这里
     if (!sub.update_day) return day === 0 // 未设置更新日的放在星期日
     return parseInt(sub.update_day) === day
   })
 }
+
+// 已完结的订阅
+const completedSubscriptions = computed(() => {
+  return subscriptions.value.filter(sub => isCompleted(sub))
+})
 
 // 格式化时间
 const formatTime = (time: string) => {
@@ -353,6 +557,31 @@ const formatTime = (time: string) => {
   if (days === 1) return '昨天'
   if (days < 7) return `${days} 天前`
   return date.toLocaleDateString()
+}
+
+// 生成年份+季度标签
+const getYearSeasonLabel = (year: number, airDate?: string) => {
+  let season = '未知'
+
+  // 从 air_date 提取月份判断季度
+  if (airDate && airDate.length >= 7) {
+    const month = parseInt(airDate.substring(5, 7))
+    if (month >= 1 && month <= 3) season = '冬'
+    else if (month >= 4 && month <= 6) season = '春'
+    else if (month >= 7 && month <= 9) season = '夏'
+    else if (month >= 10 && month <= 12) season = '秋'
+  }
+
+  return `${year}${season}`
+}
+
+// 判断番剧是否已完结
+const isCompleted = (sub: Subscription) => {
+  // 如果有总集数且当前集数等于总集数，认为已完结
+  if (sub.total_episodes && sub.total_episodes > 0 && sub.current_episode && sub.current_episode >= sub.total_episodes) {
+    return true
+  }
+  return false
 }
 
 // 显示添加对话框
@@ -504,6 +733,61 @@ const handleDelete = (id: number) => {
       }
     }
   })
+}
+
+// 切换订阅启用状态
+const handleToggle = async (id: number, enabled: boolean) => {
+  try {
+    const response: any = await api.post(`/subscriptions/${id}/toggle`)
+    if (response.code === 0) {
+      message.success(enabled ? '已启用' : '已禁用')
+      loadSubscriptions()
+    } else {
+      message.error(response.message || '操作失败')
+    }
+  } catch (error: any) {
+    message.error(error.message || '操作失败')
+  }
+}
+
+// 手动补全Bangumi数据
+const handleEnrichBangumi = async (id: number) => {
+  try {
+    message.loading('正在补全番剧信息...', { duration: 0 })
+    const response: any = await api.post(`/subscriptions/${id}/enrich-bangumi`)
+    message.destroyAll()
+
+    if (response.code === 0) {
+      message.success('补全成功')
+      loadSubscriptions()
+    } else {
+      message.error(response.message || '补全失败')
+    }
+  } catch (error: any) {
+    message.destroyAll()
+    message.error(error.message || '补全失败')
+  }
+}
+
+// 手动收集剧集
+const handleCollectEpisodes = async (id: number) => {
+  try {
+    message.loading('正在收集剧集...', { duration: 0 })
+    const response: any = await api.post(`/subscriptions/${id}/collect-episodes`)
+    message.destroyAll()
+
+    if (response.code === 0) {
+      const collected = response.data?.collected || 0
+      const total = response.data?.total_rss_items || 0
+      message.success(`收集完成！新增 ${collected} 个下载任务（RSS共 ${total} 项）`)
+      loadSubscriptions()
+    } else {
+      message.error(response.message || '收集失败')
+    }
+  } catch (error: any) {
+    message.destroyAll()
+    message.error(error.message || '收集失败')
+  }
 }
 
 // 处理从RSS源页面跳转过来的情况
