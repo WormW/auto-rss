@@ -1,0 +1,95 @@
+.PHONY: all build clean run test docker-build docker-run web-install web-build web-dev
+
+# 默认目标
+all: build
+
+# 构建后端
+build:
+	@echo "Building backend..."
+	@go build -ldflags="-s -w" -o bin/auto-rss ./cmd/server
+
+# 构建用于生产的静态链接二进制
+build-static:
+	@echo "Building static binary..."
+	@CGO_ENABLED=1 go build -ldflags="-s -w -extldflags '-static'" -o bin/auto-rss ./cmd/server
+
+# 清理构建产物
+clean:
+	@echo "Cleaning..."
+	@rm -rf bin/
+	@rm -rf web/dist/
+	@rm -rf data/
+
+# 运行后端
+run: build
+	@echo "Running backend..."
+	@./bin/auto-rss
+
+# 运行测试
+test:
+	@echo "Running tests..."
+	@go test -v ./...
+
+# 安装前端依赖
+web-install:
+	@echo "Installing frontend dependencies..."
+	@cd web && npm install
+
+# 构建前端
+web-build: web-install
+	@echo "Building frontend..."
+	@cd web && npm run build
+
+# 运行前端开发服务器
+web-dev: web-install
+	@echo "Starting frontend dev server..."
+	@cd web && npm run dev
+
+# 构建 Docker 镜像
+docker-build:
+	@echo "Building Docker image..."
+	@docker build -t wormw/auto-rss:latest .
+
+# 运行 Docker 容器
+docker-run: docker-build
+	@echo "Running Docker container..."
+	@docker-compose up -d
+
+# 停止 Docker 容器
+docker-stop:
+	@echo "Stopping Docker container..."
+	@docker-compose down
+
+# 格式化代码
+fmt:
+	@echo "Formatting code..."
+	@go fmt ./...
+
+# 代码检查
+lint:
+	@echo "Linting code..."
+	@golangci-lint run
+
+# 更新依赖
+deps:
+	@echo "Updating dependencies..."
+	@go mod tidy
+	@cd web && npm update
+
+# 帮助信息
+help:
+	@echo "Available targets:"
+	@echo "  make build         - Build backend"
+	@echo "  make build-static  - Build static binary"
+	@echo "  make clean         - Clean build artifacts"
+	@echo "  make run           - Run backend"
+	@echo "  make test          - Run tests"
+	@echo "  make web-install   - Install frontend dependencies"
+	@echo "  make web-build     - Build frontend"
+	@echo "  make web-dev       - Run frontend dev server"
+	@echo "  make docker-build  - Build Docker image"
+	@echo "  make docker-run    - Run Docker container"
+	@echo "  make docker-stop   - Stop Docker container"
+	@echo "  make fmt           - Format code"
+	@echo "  make lint          - Lint code"
+	@echo "  make deps          - Update dependencies"

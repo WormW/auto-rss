@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  auto-rss:
+    image: wormw/auto-rss:latest
+    container_name: auto-rss
+    restart: unless-stopped
+    ports:
+      - "7892:7892"
+    volumes:
+      - ./data:/app/data
+      - ./downloads:/downloads
+    environment:
+      - DB_PATH=/app/data/auto-rss.db
+      - QB_HOST=http://qbittorrent:8080
+      - QB_USERNAME=admin
+      - QB_PASSWORD=adminpass
+      - RSS_INTERVAL=30m
+      - LOG_LEVEL=info
+      - SERVER_PORT=7892
+      - DOWNLOAD_PATH=/downloads
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:7892/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3

@@ -1,0 +1,43 @@
+# 二进制文件
+bin/
+auto-rss
+
+# 数据目录
+data/
+*.db
+
+# 下载目录
+downloads/
+
+# 日志文件
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 测试覆盖率
+*.out
+coverage.txt
+
+# 前端
+web/node_modules/
+web/dist/
+web/.DS_Store
+
+# 环境变量
+.env
+.env.local
+
+# macOS
+.DS_Store
