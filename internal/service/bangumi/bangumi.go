@@ -75,11 +75,11 @@ type Subject struct {
 	Eps     int         `json:"eps"`      // 集数
 
 	// 扩展字段
-	Score       float64 `json:"score"`        // 评分(方便前端使用)
-	TotalEps    int     `json:"total_eps"`    // 总集数
-	AirDate     string  `json:"air_date"`     // 开播日期
-	AirWeekday  int     `json:"air_weekday"`  // 开播星期
-	Season      int     `json:"season"`       // 季度(从名称或infobox提取)
+	Score       float64 `json:"score"`           // 评分(方便前端使用)
+	TotalEps    int     `json:"total_episodes"`  // 总集数（修正为 total_episodes）
+	AirDate     string  `json:"air_date"`        // 开播日期
+	AirWeekday  int     `json:"air_weekday"`     // 开播星期
+	Season      int     `json:"season"`          // 季度(从名称或infobox提取)
 }
 
 // Images 图片信息
@@ -258,7 +258,8 @@ func (s *BangumiService) enrichSubject(subject *Subject) {
 			}
 		case "放送开始":
 			if val, ok := info.Value.(string); ok {
-				subject.AirDate = val
+				// 解析并转换中文日期格式
+				subject.AirDate = parseChineseDate(val)
 			}
 		case "放送星期":
 			if val, ok := info.Value.(string); ok {
@@ -294,6 +295,41 @@ func parseWeekday(s string) int {
 	}
 
 	return -1 // 未知
+}
+
+// parseChineseDate 解析中文日期格式并转换为 ISO 格式
+// 输入: "2025年4月6日" 或 "2023年9月29日"
+// 输出: "2025-04-06" 或 "2023-09-29"
+func parseChineseDate(s string) string {
+	s = strings.TrimSpace(s)
+
+	// 如果已经是ISO格式,直接返回
+	if matched, _ := regexp.MatchString(`^\d{4}-\d{2}-\d{2}$`, s); matched {
+		return s
+	}
+
+	// 解析中文日期格式: YYYY年MM月DD日
+	re := regexp.MustCompile(`(\d{4})年(\d{1,2})月(\d{1,2})日`)
+	matches := re.FindStringSubmatch(s)
+
+	if len(matches) == 4 {
+		year := matches[1]
+		month := matches[2]
+		day := matches[3]
+
+		// 补齐月份和日期为两位数
+		if len(month) == 1 {
+			month = "0" + month
+		}
+		if len(day) == 1 {
+			day = "0" + day
+		}
+
+		return fmt.Sprintf("%s-%s-%s", year, month, day)
+	}
+
+	// 如果解析失败,返回原始字符串
+	return s
 }
 
 // extractSeasonFromName 从名称中提取季度信息

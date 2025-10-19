@@ -5,7 +5,9 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/WormW/auto-rss/internal/model"
 	"github.com/spf13/viper"
+	"gorm.io/gorm"
 )
 
 // Config 应用配置
@@ -93,4 +95,35 @@ func getEnvAsInt(key string, defaultValue int) int {
 		}
 	}
 	return defaultValue
+}
+
+// LoadFromDB 从数据库加载配置并覆盖现有配置
+func (c *Config) LoadFromDB(db *gorm.DB) error {
+	var configs []model.Config
+	if err := db.Find(&configs).Error; err != nil {
+		return err
+	}
+
+	for _, cfg := range configs {
+		switch cfg.Key {
+		case "qb_host":
+			if cfg.Value != "" {
+				c.QBHost = cfg.Value
+			}
+		case "qb_username":
+			if cfg.Value != "" {
+				c.QBUsername = cfg.Value
+			}
+		case "qb_password":
+			if cfg.Value != "" {
+				c.QBPassword = cfg.Value
+			}
+		case "download_path":
+			if cfg.Value != "" {
+				c.DownloadPath = cfg.Value
+			}
+		}
+	}
+
+	return nil
 }

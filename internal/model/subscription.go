@@ -35,6 +35,8 @@ type Subscription struct {
 	BangumiCoverLocal string  `json:"bangumi_cover_local" gorm:"type:varchar(500)"` // 本地封面路径
 	BangumiRank       int     `json:"bangumi_rank"`                                 // 排名
 	BangumiSeason     int     `json:"bangumi_season" gorm:"default:0"`              // 季度(从Bangumi提取)
+	AirDate           string  `json:"air_date" gorm:"type:varchar(20)"`             // 开播日期 (YYYY-MM-DD)
+	AirYear           int     `json:"air_year"`                                     // 开播年份
 
 	// RSS源相关
 	RSSSourceID *uint  `json:"rss_source_id" gorm:"index"`            // RSS源ID（如果从RSS源创建）
