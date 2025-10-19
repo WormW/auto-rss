@@ -41,6 +41,19 @@ export interface Subscription {
   last_download_at?: string
   rss_source_id?: number
   source_type?: string
+  // Bangumi相关字段
+  bangumi_id?: number
+  bangumi_score?: number
+  bangumi_summary?: string
+  bangumi_cover?: string
+  bangumi_cover_local?: string
+  bangumi_rank?: number
+  bangumi_season?: number
+  // 下载统计字段
+  downloading_count?: number
+  // 开播信息
+  air_date?: string
+  air_year?: number
 }
 
 export interface Download {
@@ -71,7 +84,9 @@ export const subscriptionApi = {
   update: (id: number, data: Partial<Subscription>) =>
     api.put(`/subscriptions/${id}`, data),
   delete: (id: number) =>
-    api.delete(`/subscriptions/${id}`)
+    api.delete(`/subscriptions/${id}`),
+  batchImportFromRSS: (items: Array<{title: string, fansub?: string, rss_url?: string, source_id?: number, source_name?: string}>) =>
+    api.post('/subscriptions/batch-import-from-rss', { items })
 }
 
 export const downloadApi = {
@@ -94,7 +109,20 @@ export const configApi = {
   getAll: () =>
     api.get('/config'),
   update: (key: string, value: string) =>
-    api.put('/config', { key, value })
+    api.put('/config', { key, value }),
+  testQBittorrent: (host: string, username: string, password: string) =>
+    api.post('/config/qbittorrent/test', { host, username, password }),
+  saveQBittorrent: (host: string, username: string, password: string) =>
+    api.post('/config/qbittorrent/save', { host, username, password }),
+  // 重命名模板 API
+  getRenamePresets: () =>
+    api.get('/config/rename/presets'),
+  getRenameTemplate: () =>
+    api.get('/config/rename/template'),
+  saveRenameTemplate: (template: string) =>
+    api.post('/config/rename/template', { template }),
+  previewRenameTemplate: (template: string) =>
+    api.post('/config/rename/preview', { template })
 }
 
 export * from './rss-source'

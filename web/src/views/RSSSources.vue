@@ -45,32 +45,124 @@
     <!-- 查看番剧列表对话框 -->
     <n-modal
       v-model:show="showAnimesModal"
-      preset="dialog"
+      preset="card"
       :title="`${currentSource?.name} - 番剧列表`"
-      style="width: 80%; max-width: 1200px"
+      style="width: 90%; max-width: 1400px"
+      :segmented="{content: true, footer: 'soft'}"
     >
+      <template #header-extra>
+        <n-space>
+          <n-button
+            v-if="selectedAnimes.length > 0"
+            type="primary"
+            @click="handleBatchImport"
+            :loading="batchImporting"
+          >
+            批量导入 ({{ selectedAnimes.length }})
+          </n-button>
+          <n-button
+            @click="handleSelectAll"
+            :disabled="animes.length === 0"
+          >
+            {{ selectedAnimes.length === animes.length ? '取消全选' : '全选' }}
+          </n-button>
+        </n-space>
+      </template>
+
       <n-spin :show="animesLoading">
-        <n-list bordered>
+        <n-empty v-if="animes.length === 0 && !animesLoading" description="暂无番剧数据" />
+        <n-list v-else bordered>
           <n-list-item v-for="anime in animes" :key="anime.title">
             <template #prefix>
-              <n-tag type="info" size="small">{{ anime.fansub }}</n-tag>
+              <n-checkbox
+                :checked="isAnimeSelected(anime)"
+                @update:checked="(checked) => toggleAnimeSelection(anime, checked)"
+              />
             </template>
             <n-thing :title="anime.title">
+              <template #header-extra>
+                <n-tag type="info" size="small">{{ anime.fansub }}</n-tag>
+              </template>
               <template #description>
-                <n-space>
-                  <span>更新日期: {{ anime.update_day || '未知' }}</span>
-                  <span>集数: {{ anime.episodes.join(', ') || '暂无' }}</span>
+                <n-space size="small">
+                  <n-tag size="tiny" type="default">
+                    <template #icon>
+                      <n-icon :component="CalendarOutline" />
+                    </template>
+                    {{ anime.update_day || '未知' }}
+                  </n-tag>
+                  <n-tag size="tiny" type="default">
+                    <template #icon>
+                      <n-icon :component="FilmOutline" />
+                    </template>
+                    集数: {{ anime.episodes.length > 0 ? anime.episodes.join(', ') : '暂无' }}
+                  </n-tag>
                 </n-space>
               </template>
             </n-thing>
             <template #suffix>
-              <n-button size="small" @click="handleSubscribeAnime(anime)">
-                订阅
+              <n-button
+                size="small"
+                @click="handleSingleImport(anime)"
+                :loading="importingAnimes.has(anime.title)"
+              >
+                单个导入
               </n-button>
             </template>
           </n-list-item>
         </n-list>
       </n-spin>
+
+      <template #footer>
+        <n-space justify="space-between">
+          <n-text depth="3">
+            已选择 {{ selectedAnimes.length }} / {{ animes.length }} 个番剧
+          </n-text>
+          <n-button @click="showAnimesModal = false">关闭</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
+    <!-- 导入结果对话框 -->
+    <n-modal
+      v-model:show="showResultModal"
+      preset="card"
+      title="批量导入结果"
+      style="width: 80%; max-width: 1000px"
+      :segmented="{content: true}"
+    >
+      <n-alert v-if="importResults" :type="getResultAlertType()" style="margin-bottom: 16px">
+        <template #header>
+          导入完成: 成功 {{ importResults.success }} 个, 跳过 {{ importResults.skipped }} 个, 失败 {{ importResults.failed }} 个
+        </template>
+      </n-alert>
+
+      <n-list bordered>
+        <n-list-item v-for="(result, index) in importResults?.results || []" :key="index">
+          <n-thing :title="result.title">
+            <template #header-extra>
+              <n-tag
+                :type="result.success ? (result.skipped ? 'warning' : 'success') : 'error'"
+                size="small"
+              >
+                {{ result.success ? (result.skipped ? '跳过' : '成功') : '失败' }}
+              </n-tag>
+            </template>
+            <template #description>
+              {{ result.message }}
+            </template>
+          </n-thing>
+        </n-list-item>
+      </n-list>
+
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="handleCloseResultModal">关闭</n-button>
+          <n-button type="primary" @click="handleGoToSubscriptions">
+            查看订阅
+          </n-button>
+        </n-space>
+      </template>
     </n-modal>
   </div>
 </template>
@@ -91,10 +183,16 @@ import {
   NListItem,
   NThing,
   NSpin,
+  NCheckbox,
+  NEmpty,
+  NText,
+  NAlert,
+  NIcon,
   useMessage,
   useDialog
 } from 'naive-ui'
-import { rssSourceApi, type RSSSource, type RSSAnime } from '@/api'
+import { CalendarOutline, FilmOutline } from '@vicons/ionicons5'
+import { rssSourceApi, subscriptionApi, type RSSSource, type RSSAnime } from '@/api'
 import { useRouter } from 'vue-router'
 
 const router = useRouter()
@@ -104,9 +202,14 @@ const loading = ref(false)
 const sources = ref<RSSSource[]>([])
 const showCreateModal = ref(false)
 const showAnimesModal = ref(false)
+const showResultModal = ref(false)
 const animesLoading = ref(false)
+const batchImporting = ref(false)
 const animes = ref<RSSAnime[]>([])
+const selectedAnimes = ref<RSSAnime[]>([])
+const importingAnimes = ref<Set<string>>(new Set())
 const currentSource = ref<RSSSource | null>(null)
+const importResults = ref<any>(null)
 
 const formData = ref({
   name: '',
@@ -216,6 +319,7 @@ const handleDelete = async (id: number) => {
 
 const handleViewAnimes = async (source: RSSSource) => {
   currentSource.value = source
+  selectedAnimes.value = []
   showAnimesModal.value = true
   animesLoading.value = true
 
@@ -230,19 +334,109 @@ const handleViewAnimes = async (source: RSSSource) => {
   }
 }
 
-const handleSubscribeAnime = (anime: RSSAnime) => {
-  showAnimesModal.value = false
-  // 跳转到订阅页面并传递参数
-  router.push({
-    name: 'subscriptions',
-    query: {
-      from_rss: 'true',
-      rss_url: anime.rss_url,
-      name: anime.title,
-      fansub: anime.fansub,
-      rss_source_id: anime.source_id.toString()
+const isAnimeSelected = (anime: RSSAnime) => {
+  return selectedAnimes.value.some(a => a.title === anime.title)
+}
+
+const toggleAnimeSelection = (anime: RSSAnime, checked: boolean) => {
+  if (checked) {
+    if (!isAnimeSelected(anime)) {
+      selectedAnimes.value.push(anime)
     }
-  })
+  } else {
+    selectedAnimes.value = selectedAnimes.value.filter(a => a.title !== anime.title)
+  }
+}
+
+const handleSelectAll = () => {
+  if (selectedAnimes.value.length === animes.value.length) {
+    selectedAnimes.value = []
+  } else {
+    selectedAnimes.value = [...animes.value]
+  }
+}
+
+const handleSingleImport = async (anime: RSSAnime) => {
+  importingAnimes.value.add(anime.title)
+  try {
+    const res: any = await subscriptionApi.batchImportFromRSS([{
+      title: anime.title,
+      fansub: anime.fansub,
+      rss_url: anime.rss_url,
+      source_id: anime.source_id,
+      source_name: anime.source_name
+    }])
+
+    if (res.code === 0) {
+      const result = res.data.results[0]
+      if (result.success) {
+        if (result.skipped) {
+          message.warning(result.message)
+        } else {
+          message.success(`${anime.title} 导入成功`)
+        }
+      } else {
+        message.error(`${anime.title} 导入失败: ${result.message}`)
+      }
+    } else {
+      message.error('导入失败')
+    }
+  } catch (error: any) {
+    message.error('导入失败: ' + (error.message || '未知错误'))
+  } finally {
+    importingAnimes.value.delete(anime.title)
+  }
+}
+
+const handleBatchImport = async () => {
+  if (selectedAnimes.value.length === 0) {
+    message.warning('请先选择要导入的番剧')
+    return
+  }
+
+  batchImporting.value = true
+  try {
+    const items = selectedAnimes.value.map(anime => ({
+      title: anime.title,
+      fansub: anime.fansub,
+      rss_url: anime.rss_url,
+      source_id: anime.source_id,
+      source_name: anime.source_name
+    }))
+
+    const res: any = await subscriptionApi.batchImportFromRSS(items)
+
+    if (res.code === 0) {
+      importResults.value = res.data
+      showAnimesModal.value = false
+      showResultModal.value = true
+      selectedAnimes.value = []
+    } else {
+      message.error('批量导入失败: ' + (res.message || '未知错误'))
+    }
+  } catch (error: any) {
+    message.error('批量导入失败: ' + (error.message || '未知错误'))
+  } finally {
+    batchImporting.value = false
+  }
+}
+
+const getResultAlertType = () => {
+  if (!importResults.value) return 'info'
+  if (importResults.value.failed === 0) return 'success'
+  if (importResults.value.success === 0) return 'error'
+  return 'warning'
+}
+
+const handleCloseResultModal = () => {
+  showResultModal.value = false
+  importResults.value = null
+}
+
+const handleGoToSubscriptions = () => {
+  showResultModal.value = false
+  importResults.value = null
+  router.push({ name: 'subscriptions' })
 }
 
 onMounted(() => {

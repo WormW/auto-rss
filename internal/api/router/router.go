@@ -5,13 +5,14 @@ import (
 	"github.com/WormW/auto-rss/internal/api/middleware"
 	"github.com/WormW/auto-rss/internal/config"
 	"github.com/WormW/auto-rss/internal/repository"
+	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
 
 // Setup 设置路由
-func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
+func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClient) *gin.Engine {
 	r := gin.New()
 
 	// 应用中间件
@@ -30,15 +31,17 @@ func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	downloadRepo := repository.NewDownloadRepository(db)
 	configRepo := repository.NewConfigRepository(db)
 	rssSourceRepo := repository.NewRSSSourceRepository(db)
+	logRepo := repository.NewLogRepository(db)
 
 	// 初始化处理器
-	subscriptionHandler := handler.NewSubscriptionHandler(subscriptionRepo, configRepo)
+	subscriptionHandler := handler.NewSubscriptionHandler(subscriptionRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath)
 	downloadHandler := handler.NewDownloadHandler(downloadRepo)
 	rssHandler := handler.NewRSSHandler()
 	configHandler := handler.NewConfigHandler(configRepo)
 	rssSourceHandler := handler.NewRSSSourceHandler(rssSourceRepo, configRepo, rssParser)
 	mikanHandler := handler.NewMikanHandler(configRepo, subscriptionRepo)
 	bangumiHandler := handler.NewBangumiHandler(configRepo)
+	logHandler := handler.NewLogHandler(logRepo)
 
 	// API v1 路由组
 	v1 := r.Group("/api/v1")
@@ -78,6 +81,10 @@ func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 			subscriptions.GET("/:id", subscriptionHandler.GetByID)
 			subscriptions.PUT("/:id", subscriptionHandler.Update)
 			subscriptions.DELETE("/:id", subscriptionHandler.Delete)
+			subscriptions.POST("/:id/toggle", subscriptionHandler.Toggle)
+			subscriptions.POST("/:id/enrich-bangumi", subscriptionHandler.EnrichBangumi)
+			subscriptions.POST("/:id/collect-episodes", subscriptionHandler.CollectEpisodes)
+			subscriptions.POST("/batch-import-from-rss", subscriptionHandler.BatchImportFromRSS)
 		}
 
 		// 下载管理
@@ -100,6 +107,21 @@ func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 		{
 			configs.GET("", configHandler.GetAll)
 			configs.PUT("", configHandler.Update)
+			configs.POST("/qbittorrent/test", configHandler.TestQBittorrent)
+			configs.POST("/qbittorrent/save", configHandler.SaveQBittorrentConfig)
+
+			// 重命名模板配置
+			configs.GET("/rename/presets", configHandler.GetRenamePresets)
+			configs.GET("/rename/template", configHandler.GetRenameTemplate)
+			configs.POST("/rename/template", configHandler.SaveRenameTemplate)
+			configs.POST("/rename/preview", configHandler.PreviewRenameTemplate)
+		}
+
+		// 日志管理
+		logs := v1.Group("/logs")
+		{
+			logs.GET("", logHandler.List)
+			logs.POST("/clear", logHandler.Clear)
 		}
 	}
 

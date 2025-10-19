@@ -1,31 +1,50 @@
 package handler
 
 import (
-	"log"
 	"net/http"
 	"strconv"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/bangumi"
+	"github.com/WormW/auto-rss/internal/service/downloader"
+	"github.com/WormW/auto-rss/internal/service/mikan"
+	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/gin-gonic/gin"
 )
 
 // SubscriptionHandler 订阅处理器
 type SubscriptionHandler struct {
 	repo           repository.SubscriptionRepository
+	downloadRepo   repository.DownloadRepository
 	configRepo     repository.ConfigRepository
 	bangumiService *bangumi.BangumiService
 	imageService   *bangumi.ImageService
+	mikanService   *mikan.MikanService
+	rssParser      rss.Parser
+	qbClient       downloader.QBittorrentClient
+	downloadPath   string
 }
 
 // NewSubscriptionHandler 创建订阅处理器实例
-func NewSubscriptionHandler(repo repository.SubscriptionRepository, configRepo repository.ConfigRepository) *SubscriptionHandler {
+func NewSubscriptionHandler(
+	repo repository.SubscriptionRepository,
+	downloadRepo repository.DownloadRepository,
+	configRepo repository.ConfigRepository,
+	qbClient downloader.QBittorrentClient,
+	downloadPath string,
+) *SubscriptionHandler {
 	return &SubscriptionHandler{
 		repo:           repo,
+		downloadRepo:   downloadRepo,
 		configRepo:     configRepo,
 		bangumiService: bangumi.NewBangumiService(),
 		imageService:   bangumi.NewImageService("./data/covers"), // 封面保存路径
+		mikanService:   mikan.NewMikanService(""),
+		rssParser:      rss.NewParser(),
+		qbClient:       qbClient,
+		downloadPath:   downloadPath,
 	}
 }
 
@@ -36,16 +55,31 @@ func (h *SubscriptionHandler) setProxy() {
 		if err == nil && proxyConfig.Value != "" {
 			h.bangumiService.SetProxy(proxyConfig.Value)
 			h.imageService.SetProxy(proxyConfig.Value)
+			h.mikanService.SetProxy(proxyConfig.Value)
+			h.rssParser.SetProxy(proxyConfig.Value)
 		}
 	}
 }
 
 // enrichWithBangumi 自动获取Bangumi数据
 func (h *SubscriptionHandler) enrichWithBangumi(subscription *model.Subscription) {
-	// 如果已经有Bangumi ID，跳过
-	if subscription.BangumiID > 0 {
+	h.enrichWithBangumiInternal(subscription, false)
+}
+
+// enrichWithBangumiInternal 内部实现，支持强制刷新
+func (h *SubscriptionHandler) enrichWithBangumiInternal(subscription *model.Subscription, force bool) {
+	// 如果已经有Bangumi ID且不是强制刷新，跳过
+	if subscription.BangumiID > 0 && !force {
+		logger.Debug("Subscription already has Bangumi data, skipping enrichment",
+			"subscription_id", subscription.ID,
+			"subscription_name", subscription.Name,
+			"bangumi_id", subscription.BangumiID)
 		return
 	}
+
+	logger.Info("Starting Bangumi data enrichment",
+		"subscription_id", subscription.ID,
+		"subscription_name", subscription.Name)
 
 	// 设置代理
 	h.setProxy()
@@ -53,9 +87,16 @@ func (h *SubscriptionHandler) enrichWithBangumi(subscription *model.Subscription
 	// 通过番剧名称搜索
 	subject, err := h.bangumiService.SearchByName(subscription.Name)
 	if err != nil {
-		log.Printf("Failed to fetch Bangumi data for %s: %v", subscription.Name, err)
+		logger.Warn("Failed to fetch Bangumi data",
+			"subscription_name", subscription.Name,
+			"error", err.Error())
 		return
 	}
+
+	logger.Info("Bangumi data fetched successfully",
+		"subscription_name", subscription.Name,
+		"bangumi_id", subject.ID,
+		"bangumi_score", subject.Score)
 
 	// 填充Bangumi数据
 	subscription.BangumiID = subject.ID
@@ -66,12 +107,21 @@ func (h *SubscriptionHandler) enrichWithBangumi(subscription *model.Subscription
 
 		// 下载封面到本地
 		if subject.Images.Large != "" {
+			logger.Debug("Downloading cover image",
+				"subscription_name", subscription.Name,
+				"cover_url", subject.Images.Large)
+
 			localPath, err := h.imageService.DownloadCover(subject.Images.Large, subject.ID)
 			if err != nil {
-				log.Printf("Failed to download cover for %s: %v", subscription.Name, err)
+				logger.Error("Failed to download cover",
+					"subscription_name", subscription.Name,
+					"cover_url", subject.Images.Large,
+					"error", err.Error())
 			} else {
 				subscription.BangumiCoverLocal = localPath
-				log.Printf("Downloaded cover for %s: %s", subscription.Name, localPath)
+				logger.Info("Cover downloaded successfully",
+					"subscription_name", subscription.Name,
+					"local_path", localPath)
 			}
 		}
 	}
@@ -94,14 +144,35 @@ func (h *SubscriptionHandler) enrichWithBangumi(subscription *model.Subscription
 		subscription.UpdateDay = strconv.Itoa(subject.AirWeekday)
 	}
 
-	log.Printf("Enriched subscription %s with Bangumi data (ID: %d, Score: %.1f, Season: %d)",
-		subscription.Name, subscription.BangumiID, subscription.BangumiScore, subscription.Season)
+	// 提取开播日期和年份
+	if subject.AirDate != "" {
+		subscription.AirDate = subject.AirDate
+		// 从日期字符串提取年份 (格式: YYYY-MM-DD)
+		if len(subject.AirDate) >= 4 {
+			if year, err := strconv.Atoi(subject.AirDate[:4]); err == nil {
+				subscription.AirYear = year
+			}
+		}
+	}
+
+	logger.Info("Subscription enriched with Bangumi data",
+		"subscription_name", subscription.Name,
+		"bangumi_id", subscription.BangumiID,
+		"bangumi_score", subscription.BangumiScore,
+		"season", subscription.Season,
+		"total_episodes", subscription.TotalEpisodes,
+		"air_date", subscription.AirDate,
+		"air_year", subscription.AirYear,
+		"has_cover", subscription.BangumiCoverLocal != "")
 }
 
 // Create 创建订阅
 func (h *SubscriptionHandler) Create(c *gin.Context) {
 	var subscription model.Subscription
 	if err := c.ShouldBindJSON(&subscription); err != nil {
+		logger.Warn("Invalid subscription create request",
+			"error", err.Error(),
+			"client_ip", c.ClientIP())
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    400,
 			"message": "Invalid request body",
@@ -109,16 +180,30 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		return
 	}
 
+	logger.Info("Creating new subscription",
+		"name", subscription.Name,
+		"rss_url", subscription.RssURL,
+		"client_ip", c.ClientIP())
+
 	// 自动获取Bangumi数据
 	h.enrichWithBangumi(&subscription)
 
 	if err := h.repo.Create(&subscription); err != nil {
+		logger.Error("Failed to create subscription",
+			"name", subscription.Name,
+			"error", err.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
 			"message": "Failed to create subscription",
 		})
 		return
 	}
+
+	logger.Info("Subscription created successfully",
+		"id", subscription.ID,
+		"name", subscription.Name,
+		"bangumi_id", subscription.BangumiID,
+		"has_cover", subscription.BangumiCoverLocal != "")
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
@@ -131,6 +216,9 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 func (h *SubscriptionHandler) Update(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
 	if err != nil {
+		logger.Warn("Invalid subscription ID in update request",
+			"id_param", c.Param("id"),
+			"error", err.Error())
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    400,
 			"message": "Invalid subscription ID",
@@ -140,6 +228,10 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 
 	var subscription model.Subscription
 	if err := c.ShouldBindJSON(&subscription); err != nil {
+		logger.Warn("Invalid subscription update request",
+			"id", id,
+			"error", err.Error(),
+			"client_ip", c.ClientIP())
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    400,
 			"message": "Invalid request body",
@@ -148,13 +240,36 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 	}
 
 	subscription.ID = uint(id)
+
+	logger.Info("Updating subscription",
+		"id", id,
+		"name", subscription.Name,
+		"client_ip", c.ClientIP())
+
+	// 如果没有封面,尝试获取Bangumi数据
+	if subscription.BangumiCoverLocal == "" {
+		logger.Debug("No cover found, attempting to fetch Bangumi data",
+			"id", id,
+			"name", subscription.Name)
+		h.enrichWithBangumi(&subscription)
+	}
+
 	if err := h.repo.Update(&subscription); err != nil {
+		logger.Error("Failed to update subscription",
+			"id", id,
+			"name", subscription.Name,
+			"error", err.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
 			"message": "Failed to update subscription",
 		})
 		return
 	}
+
+	logger.Info("Subscription updated successfully",
+		"id", id,
+		"name", subscription.Name,
+		"bangumi_id", subscription.BangumiID)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
@@ -185,6 +300,109 @@ func (h *SubscriptionHandler) Delete(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
 		"message": "Success",
+	})
+}
+
+// Toggle 切换订阅启用状态
+func (h *SubscriptionHandler) Toggle(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Invalid subscription ID",
+		})
+		return
+	}
+
+	subscription, err := h.repo.GetByID(uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"code":    404,
+			"message": "Subscription not found",
+		})
+		return
+	}
+
+	// 切换启用状态
+	subscription.Enabled = !subscription.Enabled
+
+	logger.Info("Toggling subscription status",
+		"id", id,
+		"name", subscription.Name,
+		"enabled", subscription.Enabled,
+		"client_ip", c.ClientIP())
+
+	if err := h.repo.Update(subscription); err != nil {
+		logger.Error("Failed to toggle subscription",
+			"id", id,
+			"error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Failed to toggle subscription",
+		})
+		return
+	}
+
+	logger.Info("Subscription toggled successfully",
+		"id", id,
+		"enabled", subscription.Enabled)
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Success",
+		"data":    subscription,
+	})
+}
+
+// EnrichBangumi 手动补全Bangumi数据
+func (h *SubscriptionHandler) EnrichBangumi(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Invalid subscription ID",
+		})
+		return
+	}
+
+	subscription, err := h.repo.GetByID(uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"code":    404,
+			"message": "Subscription not found",
+		})
+		return
+	}
+
+	logger.Info("Manual Bangumi enrichment requested",
+		"id", id,
+		"name", subscription.Name,
+		"client_ip", c.ClientIP())
+
+	// 执行Bangumi数据补全（强制刷新）
+	h.enrichWithBangumiInternal(subscription, true)
+
+	// 更新到数据库
+	if err := h.repo.Update(subscription); err != nil {
+		logger.Error("Failed to update subscription after enrichment",
+			"id", id,
+			"error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Failed to update subscription",
+		})
+		return
+	}
+
+	logger.Info("Manual Bangumi enrichment completed",
+		"id", id,
+		"bangumi_id", subscription.BangumiID,
+		"has_cover", subscription.BangumiCoverLocal != "")
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Success",
+		"data":    subscription,
 	})
 }
 
@@ -237,13 +455,464 @@ func (h *SubscriptionHandler) List(c *gin.Context) {
 		return
 	}
 
+	// 为每个订阅添加下载统计信息
+	type SubscriptionWithStats struct {
+		model.Subscription
+		DownloadingCount int `json:"downloading_count"`
+	}
+
+	subscriptionsWithStats := make([]SubscriptionWithStats, 0, len(subscriptions))
+	for _, sub := range subscriptions {
+		// 查询该订阅下正在下载的任务数量
+		downloads, _, err := h.downloadRepo.List(0, 9999, "downloading")
+		downloadingCount := 0
+		if err == nil {
+			for _, download := range downloads {
+				if download.SubscriptionID == sub.ID {
+					downloadingCount++
+				}
+			}
+		}
+
+		subscriptionsWithStats = append(subscriptionsWithStats, SubscriptionWithStats{
+			Subscription:     sub,
+			DownloadingCount: downloadingCount,
+		})
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
 		"message": "Success",
 		"data": gin.H{
-			"list":  subscriptions,
+			"list":  subscriptionsWithStats,
 			"total": total,
 			"page":  page,
+		},
+	})
+}
+
+// CollectEpisodes 手动收集缺失的剧集
+func (h *SubscriptionHandler) CollectEpisodes(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Invalid subscription ID",
+		})
+		return
+	}
+
+	subscription, err := h.repo.GetByID(uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"code":    404,
+			"message": "Subscription not found",
+		})
+		return
+	}
+
+	logger.Info("Manual episode collection requested",
+		"id", id,
+		"name", subscription.Name,
+		"client_ip", c.ClientIP())
+
+	// 设置代理
+	h.setProxy()
+
+	// 解析RSS获取剧集列表
+	items, err := h.rssParser.FetchAndParse(subscription.RssURL)
+	if err != nil {
+		logger.Error("Failed to fetch RSS feed",
+			"subscription_id", id,
+			"rss_url", subscription.RssURL,
+			"error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Failed to fetch RSS feed: " + err.Error(),
+		})
+		return
+	}
+
+	logger.Info("RSS feed fetched successfully",
+		"subscription_id", id,
+		"items_count", len(items))
+
+	// 获取已有的下载记录
+	existingDownloads, err := h.downloadRepo.ListBySubscriptionID(uint(id))
+	if err != nil {
+		logger.Error("Failed to get existing downloads",
+			"subscription_id", id,
+			"error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Failed to check existing downloads",
+		})
+		return
+	}
+
+	// 按集数分组现有的下载任务 (每个集数保留最新的一个)
+	episodeMap := make(map[int]*model.Download)
+	hashSet := make(map[string]bool) // 用于快速检查 hash 是否已存在
+
+	for i := range existingDownloads {
+		download := &existingDownloads[i]
+		hashSet[download.TorrentHash] = true
+		episodeMap[download.Episode] = download
+	}
+
+	// 收集新的剧集和需要删除的旧任务
+	var newDownloads []model.Download
+	var deletedCount int
+
+	// RSS items 是按发布时间降序排列的（最新的在前）
+	// 所以我们遍历时，先遇到的就是最新的版本
+	processedEpisodes := make(map[int]bool)
+
+	for _, item := range items {
+		// 如果设置了总集数，只收集在范围内的
+		if subscription.TotalEpisodes > 0 && item.Episode > subscription.TotalEpisodes {
+			continue
+		}
+
+		// 如果 hash 已存在，跳过
+		if hashSet[item.TorrentHash] {
+			continue
+		}
+
+		// 检查是否已有相同集数的任务
+		existingDownload, exists := episodeMap[item.Episode]
+
+		if exists && !processedEpisodes[item.Episode] {
+			// 该集数已有任务，且是不同的 hash（不同版本）
+			// RSS feed 中靠前的是更新的版本，删除旧版本
+			logger.Info("Found newer version of episode, replacing old task",
+				"subscription_id", id,
+				"episode", item.Episode,
+				"old_title", existingDownload.Title,
+				"old_hash", existingDownload.TorrentHash,
+				"new_title", item.Title,
+				"new_hash", item.TorrentHash)
+
+			// 删除旧任务
+			if err := h.downloadRepo.Delete(existingDownload.ID); err != nil {
+				logger.Error("Failed to delete old download task",
+					"download_id", existingDownload.ID,
+					"error", err.Error())
+				continue
+			}
+			deletedCount++
+		} else if processedEpisodes[item.Episode] {
+			// 该集数在本次RSS中已经处理过（保留了更新的版本），跳过旧版本
+			logger.Debug("Skipping older version in RSS feed",
+				"episode", item.Episode,
+				"title", item.Title)
+			continue
+		}
+
+		// 标记该集数已处理
+		processedEpisodes[item.Episode] = true
+
+		// 创建下载任务
+		download := model.Download{
+			SubscriptionID: uint(id),
+			Title:          item.Title,
+			Episode:        item.Episode,
+			Fansub:         item.Fansub,
+			TorrentURL:     item.TorrentURL,
+			TorrentHash:    item.TorrentHash,
+			Status:         "pending",
+		}
+
+		if err := h.downloadRepo.Create(&download); err != nil {
+			logger.Error("Failed to create download task",
+				"subscription_id", id,
+				"episode", item.Episode,
+				"title", item.Title,
+				"error", err.Error())
+			continue
+		}
+
+		// 调用 qBittorrent API 添加下载任务（使用 AutoRss 分类）
+		if h.qbClient != nil {
+			savePath := h.downloadPath
+			if subscription.DownloadPath != "" {
+				savePath = subscription.DownloadPath
+			}
+
+			torrentHash, err := h.qbClient.AddTorrent(
+				item.TorrentURL,
+				savePath,
+				downloader.AutoRssCategory, // 使用 AutoRss 分类
+			)
+
+			if err != nil {
+				logger.Error("Failed to add torrent to qBittorrent",
+					"subscription_id", id,
+					"episode", item.Episode,
+					"title", item.Title,
+					"torrent_url", item.TorrentURL,
+					"error", err.Error())
+				// 更新下载状态为失败
+				download.Status = "failed"
+				h.downloadRepo.Update(&download)
+				continue
+			}
+
+			// 更新下载记录的 hash 和状态
+			download.TorrentHash = torrentHash
+			download.Status = "downloading"
+			if err := h.downloadRepo.Update(&download); err != nil {
+				logger.Error("Failed to update download status",
+					"download_id", download.ID,
+					"error", err.Error())
+			}
+
+			logger.Info("Torrent added to qBittorrent successfully",
+				"subscription_id", id,
+				"episode", item.Episode,
+				"title", item.Title,
+				"hash", torrentHash,
+				"category", downloader.AutoRssCategory)
+		}
+
+		newDownloads = append(newDownloads, download)
+		logger.Info("Download task created",
+			"subscription_id", id,
+			"episode", item.Episode,
+			"title", item.Title)
+	}
+
+	logger.Info("Episode collection completed",
+		"subscription_id", id,
+		"new_downloads", len(newDownloads),
+		"deleted_old_tasks", deletedCount,
+		"total_rss_items", len(items))
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Success",
+		"data": gin.H{
+			"collected":       len(newDownloads),
+			"deleted":         deletedCount,
+			"total_rss_items": len(items),
+			"downloads":       newDownloads,
+		},
+	})
+}
+
+// BatchImportFromRSSRequest 从RSS批量导入请求
+type BatchImportFromRSSRequest struct {
+	Items []RSSAnimeImportItem `json:"items" binding:"required,dive"`
+}
+
+// RSSAnimeImportItem RSS番剧导入项
+type RSSAnimeImportItem struct {
+	Title      string `json:"title" binding:"required"`       // 番剧名称
+	Fansub     string `json:"fansub"`                          // 字幕组
+	RssURL     string `json:"rss_url"`                         // RSS URL
+	SourceID   uint   `json:"source_id"`                       // RSS源ID
+	SourceName string `json:"source_name"`                     // RSS源名称
+}
+
+// BatchImportFromRSS 从RSS批量导入订阅
+// 通过Mikan搜索接口将RSS番剧信息转换为合法的订阅
+func (h *SubscriptionHandler) BatchImportFromRSS(c *gin.Context) {
+	var req BatchImportFromRSSRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    1,
+			"message": "参数错误: " + err.Error(),
+		})
+		return
+	}
+
+	if len(req.Items) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    1,
+			"message": "导入列表不能为空",
+		})
+		return
+	}
+
+	// 设置代理
+	h.setProxy()
+
+	// 批量导入结果
+	type ImportResult struct {
+		Title      string `json:"title"`
+		Success    bool   `json:"success"`
+		Message    string `json:"message"`
+		Skipped    bool   `json:"skipped"`     // 是否跳过(已存在)
+		Subscription *model.Subscription `json:"subscription,omitempty"`
+	}
+
+	results := make([]ImportResult, 0, len(req.Items))
+	successCount := 0
+	skippedCount := 0
+	failedCount := 0
+
+	// 获取已有订阅用于去重
+	existingSubs, _, err := h.repo.List(1, 9999)
+	if err != nil {
+		logger.Error("Failed to get existing subscriptions", "error", err)
+	}
+	existingNames := make(map[string]bool)
+	for _, sub := range existingSubs {
+		existingNames[sub.Name] = true
+	}
+
+	for _, item := range req.Items {
+		result := ImportResult{
+			Title:   item.Title,
+			Success: false,
+		}
+
+		// 检查是否已存在
+		if existingNames[item.Title] {
+			result.Skipped = true
+			result.Success = true
+			result.Message = "已存在,跳过"
+			results = append(results, result)
+			skippedCount++
+			continue
+		}
+
+		// 通过Mikan搜索找到对应的番剧
+		searchResult, err := h.mikanService.Search(item.Title)
+		if err != nil {
+			result.Message = "搜索失败: " + err.Error()
+			results = append(results, result)
+			failedCount++
+			logger.Error("Mikan search failed", "title", item.Title, "error", err)
+			continue
+		}
+
+		// 查找匹配的番剧
+		var foundAnime *mikan.AnimeItem
+
+		// 如果搜索结果为空或没有分组,尝试使用第一个结果
+		if searchResult == nil || len(searchResult.Groups) == 0 {
+			result.Message = "Mikan搜索无结果"
+			results = append(results, result)
+			failedCount++
+			logger.Warn("Mikan search returned no results", "title", item.Title)
+			continue
+		}
+
+		// 先尝试精确匹配
+		for _, group := range searchResult.Groups {
+			for _, anime := range group.Items {
+				if anime.Title == item.Title {
+					foundAnime = anime
+					break
+				}
+			}
+			if foundAnime != nil {
+				break
+			}
+		}
+
+		// 如果精确匹配失败,使用第一个搜索结果
+		if foundAnime == nil {
+			if len(searchResult.Groups) > 0 && len(searchResult.Groups[0].Items) > 0 {
+				foundAnime = searchResult.Groups[0].Items[0]
+				logger.Info("Using first search result as fallback",
+					"original_title", item.Title,
+					"matched_title", foundAnime.Title)
+			} else {
+				result.Message = "未找到匹配的番剧"
+				results = append(results, result)
+				failedCount++
+				logger.Warn("No matching anime found in Mikan", "title", item.Title)
+				continue
+			}
+		}
+
+		// 获取字幕组列表
+		fansubGroups, err := h.mikanService.GetFansubGroups(foundAnime.URL)
+		if err != nil {
+			result.Message = "获取字幕组失败: " + err.Error()
+			results = append(results, result)
+			failedCount++
+			logger.Error("Failed to get fansub groups", "title", item.Title, "error", err)
+			continue
+		}
+
+		// 查找匹配的字幕组
+		var selectedGroup *mikan.FansubGroup
+		if item.Fansub != "" {
+			for i := range fansubGroups {
+				if fansubGroups[i].Name == item.Fansub {
+					selectedGroup = fansubGroups[i]
+					break
+				}
+			}
+		}
+
+		// 如果没有匹配的字幕组,使用第一个
+		if selectedGroup == nil && len(fansubGroups) > 0 {
+			selectedGroup = fansubGroups[0]
+		}
+
+		if selectedGroup == nil {
+			result.Message = "未找到可用的字幕组"
+			results = append(results, result)
+			failedCount++
+			logger.Warn("No fansub group available", "title", item.Title)
+			continue
+		}
+
+		// 创建订阅
+		subscription := &model.Subscription{
+			Name:          item.Title,
+			RssURL:        selectedGroup.RSS,
+			Season:        1,
+			Status:        "active",
+			Enabled:       true,
+			Fansub:        selectedGroup.Name,
+			RenameEnabled: true,
+			DownloadPath:  h.downloadPath,
+		}
+
+		// 保存订阅
+		if err := h.repo.Create(subscription); err != nil {
+			result.Message = "创建订阅失败: " + err.Error()
+			results = append(results, result)
+			failedCount++
+			logger.Error("Failed to create subscription", "title", item.Title, "error", err)
+			continue
+		}
+
+		// 自动获取Bangumi数据
+		h.enrichWithBangumi(subscription)
+
+		// 保存Bangumi数据
+		if err := h.repo.Update(subscription); err != nil {
+			logger.Error("Failed to update subscription with Bangumi data", "subscription_id", subscription.ID, "error", err)
+		}
+
+		result.Success = true
+		result.Message = "导入成功"
+		result.Subscription = subscription
+		results = append(results, result)
+		successCount++
+		existingNames[item.Title] = true // 防止重复导入
+
+		logger.Info("Subscription imported successfully",
+			"title", item.Title,
+			"fansub", selectedGroup.Name,
+			"subscription_id", subscription.ID)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "批量导入完成",
+		"data": gin.H{
+			"total":   len(req.Items),
+			"success": successCount,
+			"skipped": skippedCount,
+			"failed":  failedCount,
+			"results": results,
 		},
 	})
 }
