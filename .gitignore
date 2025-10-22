@@ -1,5 +1,6 @@
 # 二进制文件
 bin/
+build/
 auto-rss
 
 # 数据目录
@@ -11,6 +12,9 @@ downloads/
 
 # 日志文件
 *.log
+
+# 文档目录
+claudedocs/
 
 # IDE
 .idea/
