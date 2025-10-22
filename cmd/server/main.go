@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"github.com/WormW/auto-rss/internal/api/router"
+	"github.com/WormW/auto-rss/internal/app"
 	"github.com/WormW/auto-rss/internal/config"
 	"github.com/WormW/auto-rss/internal/pkg/database"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/repository"
+	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/gin-gonic/gin"
 )
@@ -101,8 +103,28 @@ func main() {
 	downloadMonitor.Start(30 * time.Second)
 	logger.Info("Download monitor started", "interval", "30s", "category", "AutoRss")
 
-	// 初始化路由（传递 qBittorrent 客户端）
-	r := router.Setup(db, cfg, qbClient)
+	// 初始化 Bangumi 更新服务
+	bangumiService := bangumi.NewBangumiService()
+	bangumiUpdater := bangumi.NewBangumiUpdater(
+		bangumiService,
+		subscriptionRepo,
+		cfg.BangumiUpdateInterval,
+	)
+
+	// 启动 Bangumi 更新服务
+	bangumiUpdater.Start()
+
+	// 创建应用上下文
+	appCtx := app.NewContext(db, cfg, subscriptionRepo, bangumiService)
+	appCtx.SetRenameTemplate(renameTemplate)
+
+	// 初始化文件整理服务
+	if err := appCtx.InitializeFileOrganizer(); err != nil {
+		logger.Error("Failed to initialize file organizer", "error", err)
+	}
+
+	// 初始化路由（传递应用上下文）
+	r := router.Setup(db, cfg, qbClient, appCtx)
 
 	// 优雅关闭
 	quit := make(chan os.Signal, 1)
@@ -121,6 +143,14 @@ func main() {
 	// 等待退出信号
 	<-quit
 	logger.Info("Shutting down server...")
+
+	// 关闭应用上下文（包括文件整理服务）
+	appCtx.Shutdown()
+	logger.Info("App context shutdown complete")
+
+	// 停止 Bangumi 更新服务
+	bangumiUpdater.Stop()
+	logger.Info("Bangumi updater stopped")
 
 	// 停止下载监控
 	downloadMonitor.Stop()
