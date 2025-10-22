@@ -3,6 +3,7 @@ package router
 import (
 	"github.com/WormW/auto-rss/internal/api/handler"
 	"github.com/WormW/auto-rss/internal/api/middleware"
+	"github.com/WormW/auto-rss/internal/app"
 	"github.com/WormW/auto-rss/internal/config"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/downloader"
@@ -12,7 +13,7 @@ import (
 )
 
 // Setup 设置路由
-func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClient) *gin.Engine {
+func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClient, appCtx *app.Context) *gin.Engine {
 	r := gin.New()
 
 	// 应用中间件
@@ -42,6 +43,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	mikanHandler := handler.NewMikanHandler(configRepo, subscriptionRepo)
 	bangumiHandler := handler.NewBangumiHandler(configRepo)
 	logHandler := handler.NewLogHandler(logRepo)
+	fileOrganizerHandler := handler.NewFileOrganizerHandler(appCtx)
 
 	// API v1 路由组
 	v1 := r.Group("/api/v1")
@@ -122,6 +124,13 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		{
 			logs.GET("", logHandler.List)
 			logs.POST("/clear", logHandler.Clear)
+		}
+
+		// 文件整理
+		fileOrganizer := v1.Group("/file-organizer")
+		{
+			fileOrganizer.POST("/trigger", fileOrganizerHandler.TriggerScan)
+			fileOrganizer.POST("/reload", fileOrganizerHandler.ReloadConfig)
 		}
 	}
 

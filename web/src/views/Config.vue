@@ -72,6 +72,29 @@
       </n-form>
     </n-card>
 
+    <n-card title="文件整理配置" style="margin-top: 16px">
+      <n-form :model="fileOrganizerConfig" label-placement="left" label-width="120">
+        <n-form-item label="启用文件整理">
+          <n-switch v-model:value="fileOrganizerConfig.enabled" />
+        </n-form-item>
+        <n-form-item label="整理目录">
+          <n-input
+            v-model:value="fileOrganizerConfig.dir"
+            placeholder="/downloads"
+            :disabled="!fileOrganizerConfig.enabled"
+          />
+          <template #feedback>
+            <n-text depth="3" style="font-size: 12px">
+              监控此目录的文件变化，自动整理和重命名文件
+            </n-text>
+          </template>
+        </n-form-item>
+        <n-form-item>
+          <n-button type="primary" @click="saveFileOrganizerConfig">保存配置</n-button>
+        </n-form-item>
+      </n-form>
+    </n-card>
+
     <n-card title="文件重命名规则" style="margin-top: 16px">
       <n-form label-placement="left" label-width="120">
         <n-form-item label="模板预设">
@@ -131,6 +154,7 @@
     <n-card title="操作" style="margin-top: 16px">
       <n-space>
         <n-button type="info" @click="handleManualRefresh">手动刷新 RSS</n-button>
+        <n-button type="success" @click="handleTriggerFileOrganizer">手动整理文件</n-button>
         <n-button type="warning" @click="handleClearCache">清理缓存</n-button>
       </n-space>
     </n-card>
@@ -154,7 +178,7 @@ import {
   NText,
   useMessage
 } from 'naive-ui'
-import { configApi, rssApi } from '@/api'
+import { configApi, rssApi, fileOrganizerApi } from '@/api'
 
 const message = useMessage()
 
@@ -173,6 +197,11 @@ const systemConfig = ref({
   logLevel: 'info',
   autoRename: true,
   proxy: ''
+})
+
+const fileOrganizerConfig = ref({
+  enabled: false,
+  dir: ''
 })
 
 const logLevelOptions = [
@@ -343,6 +372,12 @@ const loadConfig = async () => {
         case 'auto_rename':
           systemConfig.value.autoRename = config.value === 'true'
           break
+        case 'file_organizer_enabled':
+          fileOrganizerConfig.value.enabled = config.value === 'true'
+          break
+        case 'file_organizer_dir':
+          fileOrganizerConfig.value.dir = config.value
+          break
       }
     })
   } catch (error) {
@@ -390,6 +425,29 @@ const saveSystemConfig = async () => {
   }
 }
 
+const saveFileOrganizerConfig = async () => {
+  if (fileOrganizerConfig.value.enabled && !fileOrganizerConfig.value.dir) {
+    message.warning('启用文件整理时，整理目录不能为空')
+    return
+  }
+
+  try {
+    await configApi.update('file_organizer_enabled', fileOrganizerConfig.value.enabled.toString())
+    await configApi.update('file_organizer_dir', fileOrganizerConfig.value.dir)
+
+    // 重新加载文件整理配置
+    try {
+      await fileOrganizerApi.reloadConfig()
+      message.success('文件整理配置保存并应用成功')
+    } catch (reloadError: any) {
+      const reloadMsg = reloadError?.response?.data?.message || '配置已保存，但重新加载失败'
+      message.warning(reloadMsg)
+    }
+  } catch (error) {
+    message.error('保存配置失败')
+  }
+}
+
 const testConnection = async () => {
   if (!qbConfig.value.host || !qbConfig.value.username || !qbConfig.value.password) {
     message.warning('请填写完整的 qBittorrent 配置信息')
@@ -418,6 +476,16 @@ const handleManualRefresh = async () => {
     message.success('RSS 刷新已触发')
   } catch (error) {
     message.error('RSS 刷新失败')
+  }
+}
+
+const handleTriggerFileOrganizer = async () => {
+  try {
+    await fileOrganizerApi.triggerScan()
+    message.success('文件整理任务已触发')
+  } catch (error: any) {
+    const errorMsg = error?.response?.data?.message || '触发文件整理失败'
+    message.error(errorMsg)
   }
 }
 

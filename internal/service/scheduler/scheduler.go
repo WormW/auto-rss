@@ -7,6 +7,7 @@ import (
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
+	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/rss"
@@ -182,17 +183,26 @@ func (s *scheduler) checkRSSFeeds() {
 				"episode", item.Episode,
 				"fansub", item.Fansub)
 
+			// 生成带番剧名的下载路径
+			downloadPath := utils.GenerateDownloadPath(sub.DownloadPath, sub.Name)
+
 			// 添加到 qBittorrent
-			_, err = s.qbClient.AddTorrent(item.TorrentURL, sub.DownloadPath)
+			_, err = s.qbClient.AddTorrent(item.TorrentURL, downloadPath)
 			if err != nil {
 				logger.Error("Failed to add torrent to qBittorrent",
 					"title", item.Title,
+					"download_path", downloadPath,
 					"error", err)
 				download.Status = "failed"
 				download.ErrorMessage = err.Error()
 				s.downloadRepo.Update(download)
 				continue
 			}
+
+			logger.Debug("Torrent added with path",
+				"subscription", sub.Name,
+				"episode", item.Episode,
+				"download_path", downloadPath)
 
 			download.Status = "downloading"
 			s.downloadRepo.Update(download)

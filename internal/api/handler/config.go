@@ -57,13 +57,24 @@ func (h *ConfigHandler) Update(c *gin.Context) {
 		return
 	}
 
+	logger.Info("Updating config",
+		"key", req.Key,
+		"value", req.Value,
+		"client_ip", c.ClientIP())
+
 	if err := h.repo.Set(req.Key, req.Value); err != nil {
+		logger.Error("Failed to update config",
+			"key", req.Key,
+			"error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
 			"message": "Failed to update config",
 		})
 		return
 	}
+
+	logger.Info("Config updated successfully",
+		"key", req.Key)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,

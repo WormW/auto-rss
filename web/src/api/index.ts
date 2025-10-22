@@ -35,6 +35,7 @@ export interface Subscription {
   update_day?: string
   total_episodes?: number
   current_episode?: number
+  latest_episode?: number
   episode_offset?: number
   filter_rules?: string
   enabled?: boolean
@@ -123,6 +124,13 @@ export const configApi = {
     api.post('/config/rename/template', { template }),
   previewRenameTemplate: (template: string) =>
     api.post('/config/rename/preview', { template })
+}
+
+export const fileOrganizerApi = {
+  triggerScan: () =>
+    api.post('/file-organizer/trigger'),
+  reloadConfig: () =>
+    api.post('/file-organizer/reload')
 }
 
 export * from './rss-source'

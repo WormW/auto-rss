@@ -23,6 +23,9 @@ type Config struct {
 	// RSS 配置
 	RSSInterval string
 
+	// Bangumi 更新配置
+	BangumiUpdateInterval int // 小时为单位，0表示禁用自动更新
+
 	// 日志配置
 	LogLevel string
 
@@ -31,6 +34,10 @@ type Config struct {
 
 	// 下载配置
 	DownloadPath string
+
+	// 文件整理配置
+	FileOrganizerEnabled bool   // 是否启用文件自动整理
+	FileOrganizerDir     string // 整理目录（监控和目标是同一目录）
 }
 
 // Load 加载配置
@@ -47,14 +54,19 @@ func Load() (*Config, error) {
 	_ = viper.ReadInConfig()
 
 	cfg := &Config{
-		DBPath:       getEnv("DB_PATH", "./data/auto-rss.db"),
-		QBHost:       getEnv("QB_HOST", "http://localhost:8080"),
-		QBUsername:   getEnv("QB_USERNAME", "admin"),
-		QBPassword:   getEnv("QB_PASSWORD", ""),
-		RSSInterval:  getEnv("RSS_INTERVAL", "30m"),
-		LogLevel:     getEnv("LOG_LEVEL", "info"),
-		ServerPort:   getEnvAsInt("SERVER_PORT", 7892),
-		DownloadPath: getEnv("DOWNLOAD_PATH", "/downloads"),
+		DBPath:                getEnv("DB_PATH", "./data/auto-rss.db"),
+		QBHost:                getEnv("QB_HOST", "http://localhost:8080"),
+		QBUsername:            getEnv("QB_USERNAME", "admin"),
+		QBPassword:            getEnv("QB_PASSWORD", ""),
+		RSSInterval:           getEnv("RSS_INTERVAL", "30m"),
+		BangumiUpdateInterval: getEnvAsInt("BANGUMI_UPDATE_INTERVAL", 6), // 默认6小时
+		LogLevel:              getEnv("LOG_LEVEL", "info"),
+		ServerPort:            getEnvAsInt("SERVER_PORT", 7892),
+		DownloadPath:          getEnv("DOWNLOAD_PATH", "/downloads"),
+
+		// 文件整理配置
+		FileOrganizerEnabled: getEnv("FILE_ORGANIZER_ENABLED", "false") == "true",
+		FileOrganizerDir:     getEnv("FILE_ORGANIZER_DIR", ""),
 	}
 
 	// 验证配置
@@ -121,6 +133,20 @@ func (c *Config) LoadFromDB(db *gorm.DB) error {
 		case "download_path":
 			if cfg.Value != "" {
 				c.DownloadPath = cfg.Value
+			}
+		case "bangumi_update_interval":
+			if cfg.Value != "" {
+				if intValue, err := strconv.Atoi(cfg.Value); err == nil {
+					c.BangumiUpdateInterval = intValue
+				}
+			}
+		case "file_organizer_enabled":
+			if cfg.Value != "" {
+				c.FileOrganizerEnabled = (cfg.Value == "true" || cfg.Value == "1")
+			}
+		case "file_organizer_dir":
+			if cfg.Value != "" {
+				c.FileOrganizerDir = cfg.Value
 			}
 		}
 	}
