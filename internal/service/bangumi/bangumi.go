@@ -178,6 +178,111 @@ func (s *BangumiService) Search(keyword string, subjectType SubjectType) (*Searc
 	return searchResult, nil
 }
 
+// Episode 剧集信息
+type Episode struct {
+	ID          int    `json:"id"`
+	Type        int    `json:"type"`
+	Name        string `json:"name"`
+	NameCN      string `json:"name_cn"`
+	Sort        int    `json:"sort"`        // 集数
+	EP          int    `json:"ep"`          // 章节编号
+	AirDate     string `json:"airdate"`     // 播出日期
+	Comment     int    `json:"comment"`     // 评论数
+	Duration    string `json:"duration"`    // 时长
+	Desc        string `json:"desc"`        // 描述
+	Status      string `json:"status"`      // 状态
+}
+
+// GetSubjectEpisodes 获取番剧的剧集列表
+func (s *BangumiService) GetSubjectEpisodes(subjectID int) ([]Episode, error) {
+	// 使用正确的API端点：/v0/episodes?subject_id=xxx
+	episodesURL := fmt.Sprintf("%s/v0/episodes", s.baseURL)
+
+	// 构建查询参数
+	params := url.Values{}
+	params.Set("subject_id", strconv.Itoa(subjectID))
+	params.Set("type", "0")     // 0 表示本篇
+	params.Set("limit", "100")  // 获取最多100集
+	params.Set("offset", "0")
+
+	fullURL := fmt.Sprintf("%s?%s", episodesURL, params.Encode())
+
+	req, err := http.NewRequest("GET", fullURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request failed: %w", err)
+	}
+
+	req.Header.Set("User-Agent", "Auto-RSS/1.0")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Total int       `json:"total"`
+		Data  []Episode `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode response failed: %w", err)
+	}
+
+	return result.Data, nil
+}
+
+// GetLatestEpisodeSimple 获取番剧的参考集数（简化版）
+// 对于已完结的番剧，返回总集数；对于正在播出的，返回0（依赖RSS源）
+func (s *BangumiService) GetLatestEpisodeSimple(subject *Subject) int {
+	// 如果有总集数信息，返回总集数作为参考
+	if subject.TotalEps > 0 {
+		return subject.TotalEps
+	}
+	return 0
+}
+
+// GetLatestEpisode 获取番剧最新已播出的集数
+// 根据airdate字段判断：播出日期<=今天表示已播出
+func (s *BangumiService) GetLatestEpisode(subjectID int) (int, error) {
+	episodes, err := s.GetSubjectEpisodes(subjectID)
+	if err != nil {
+		// API不可用，返回错误
+		return 0, err
+	}
+
+	maxEpisode := 0
+	today := time.Now().Format("2006-01-02")
+
+	for _, ep := range episodes {
+		// 跳过特殊篇 (SP) 等
+		if ep.Type != 0 {
+			continue
+		}
+
+		// 如果没有播出日期，跳过
+		if ep.AirDate == "" {
+			continue
+		}
+
+		// 如果播出日期在今天或之前，认为已播出
+		if ep.AirDate <= today {
+			// 更新最大集数
+			if ep.Sort > maxEpisode {
+				maxEpisode = ep.Sort
+			}
+		}
+	}
+
+	return maxEpisode, nil
+}
+
 // GetSubject 获取番剧详情
 func (s *BangumiService) GetSubject(id int) (*Subject, error) {
 	detailURL := fmt.Sprintf("%s/v0/subjects/%d", s.baseURL, id)
