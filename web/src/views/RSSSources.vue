@@ -16,12 +16,12 @@
 
     <!-- 添加/编辑 RSS 源对话框 -->
     <n-modal v-model:show="showCreateModal" preset="dialog" title="添加 RSS 源">
-      <n-form ref="formRef" :model="formData">
+      <n-form ref="formRef" :model="formData" :rules="formRules">
         <n-form-item label="名称" path="name">
           <n-input v-model:value="formData.name" placeholder="如：Mikanani" />
         </n-form-item>
         <n-form-item label="RSS 地址" path="base_url">
-          <n-input v-model:value="formData.base_url" placeholder="https://..." />
+          <n-input v-model:value="formData.base_url" placeholder="https://mikanime.tv/RSS/..." />
         </n-form-item>
         <n-form-item label="描述" path="description">
           <n-input
@@ -194,10 +194,12 @@ import {
 import { CalendarOutline, FilmOutline } from '@vicons/ionicons5'
 import { rssSourceApi, subscriptionApi, type RSSSource, type RSSAnime } from '@/api'
 import { useRouter } from 'vue-router'
+import type { FormInst } from 'naive-ui'
 
 const router = useRouter()
 const message = useMessage()
 const dialog = useDialog()
+const formRef = ref<FormInst | null>(null)
 const loading = ref(false)
 const sources = ref<RSSSource[]>([])
 const showCreateModal = ref(false)
@@ -217,6 +219,31 @@ const formData = ref({
   description: '',
   enabled: true
 })
+
+const formRules = {
+  name: [
+    { required: true, message: '请输入 RSS 源名称', trigger: 'blur' }
+  ],
+  base_url: [
+    { required: true, message: '请输入 RSS 地址', trigger: 'blur' },
+    {
+      validator: (_rule: any, value: string) => {
+        if (!value) return true
+        // 自动补全协议后验证
+        const url = value.startsWith('http://') || value.startsWith('https://')
+          ? value
+          : 'https://' + value
+        try {
+          new URL(url)
+          return true
+        } catch {
+          return new Error('请输入有效的 URL 地址')
+        }
+      },
+      trigger: 'blur'
+    }
+  ]
+}
 
 const pagination = ref({
   page: 1,
@@ -284,7 +311,21 @@ const loadSources = async () => {
 
 const handleCreate = async () => {
   try {
-    await rssSourceApi.create(formData.value)
+    // 验证表单
+    await formRef.value?.validate()
+
+    // 自动补全 URL 协议
+    let baseUrl = formData.value.base_url.trim()
+    if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
+      baseUrl = 'https://' + baseUrl
+    }
+
+    // 提交数据
+    await rssSourceApi.create({
+      ...formData.value,
+      base_url: baseUrl
+    })
+
     message.success('添加成功')
     showCreateModal.value = false
     formData.value = {
@@ -294,7 +335,11 @@ const handleCreate = async () => {
       enabled: true
     }
     loadSources()
-  } catch (error) {
+  } catch (error: any) {
+    // 如果是表单验证错误，不显示消息（表单会自动显示）
+    if (error?.message) {
+      return
+    }
     message.error('添加失败')
   }
 }

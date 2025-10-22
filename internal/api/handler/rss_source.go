@@ -29,7 +29,7 @@ func NewRSSSourceHandler(repo repository.RSSSourceRepository, configRepo reposit
 
 type CreateRSSSourceRequest struct {
 	Name        string `json:"name" binding:"required"`
-	BaseURL     string `json:"base_url" binding:"required,url"`
+	BaseURL     string `json:"base_url" binding:"required"`  // 移除 url 验证，改为手动验证
 	Description string `json:"description"`
 	Enabled     *bool  `json:"enabled"`
 }
@@ -49,6 +49,18 @@ func (h *RSSSourceHandler) Create(c *gin.Context) {
 		return
 	}
 
+	// 自动补全 URL 协议
+	baseURL := strings.TrimSpace(req.BaseURL)
+	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+		baseURL = "https://" + baseURL
+	}
+
+	// 验证 URL 格式
+	if _, err := http.NewRequest("GET", baseURL, nil); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "RSS 地址格式不正确"})
+		return
+	}
+
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
@@ -56,7 +68,7 @@ func (h *RSSSourceHandler) Create(c *gin.Context) {
 
 	source := &model.RSSSource{
 		Name:        req.Name,
-		BaseURL:     req.BaseURL,
+		BaseURL:     baseURL,
 		Description: req.Description,
 		Enabled:     enabled,
 	}
