@@ -20,7 +20,7 @@
 
     <!-- 订阅列表 - 按星期分组的卡片展示 -->
     <n-spin :show="loading">
-      <div v-for="week in weekList" :key="week.day" style="margin-bottom: 24px">
+      <div v-for="week in sortedWeekList" :key="week.day" style="margin-bottom: 24px">
         <div v-if="getActiveSubscriptionsByWeekday(week.day).length > 0">
           <h3 style="margin: 16px 0 12px 4px;">{{ week.label }}</h3>
           <div class="grid-container">
@@ -48,13 +48,13 @@
                 </div>
 
                 <!-- 内容区 -->
-                <div style="flex: 1; min-width: 0; position: relative;">
+                <div style="flex: 1; min-width: 0; position: relative; padding-right: 80px;">
                   <!-- Bangumi评分 - 右上角 -->
                   <div v-if="sub.bangumi_score && sub.bangumi_score > 0" style="position: absolute; top: 0; right: 0; background: linear-gradient(135deg, #f6d365 0%, #fda085 100%); color: white; padding: 4px 10px; border-radius: 12px; font-size: 13px; font-weight: 600; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
                     ⭐ {{ sub.bangumi_score.toFixed(1) }}
                   </div>
 
-                  <div>
+                  <div style="padding-bottom: 50px;">
                     <!-- 标题 -->
                     <n-ellipsis style="max-width: 250px; font-weight: 500; font-size: 16px; margin-bottom: 8px;">
                       {{ sub.name }}
@@ -66,7 +66,20 @@
                     </n-ellipsis>
 
                     <!-- 标签组 -->
-                    <n-space :size="4" style="margin-bottom: 8px;">
+                    <n-space :size="4" :wrap="true" style="margin-bottom: 8px; max-width: 100%;">
+                      <!-- Bangumi ID 标签 -->
+                      <n-tooltip v-if="sub.bangumi_id" trigger="hover">
+                        <template #trigger>
+                          <n-tag
+                            size="small"
+                            style="cursor: pointer;"
+                            @click="openBangumiPage(sub.bangumi_id)"
+                          >
+                            🔗 BGM:{{ sub.bangumi_id }}
+                          </n-tag>
+                        </template>
+                        点击查看 Bangumi 页面
+                      </n-tooltip>
                       <!-- 年份季度标签 -->
                       <n-tag v-if="sub.air_year" size="small" type="primary">
                         {{ getYearSeasonLabel(sub.air_year, sub.air_date) }}
@@ -78,22 +91,39 @@
                       <n-tag size="small" type="info" v-if="sub.fansub">
                         {{ sub.fansub }}
                       </n-tag>
-                      <n-tooltip trigger="hover" v-if="sub.current_episode || sub.total_episodes">
+                      <n-tooltip trigger="hover" v-if="sub.current_episode || sub.total_episodes || sub.latest_episode">
                         <template #trigger>
-                          <n-tag size="small" type="warning">
-                            {{ sub.current_episode || 0 }} / {{ sub.total_episodes || '*' }}
-                          </n-tag>
+                          <n-space :size="4">
+                            <n-tag size="small" type="info" v-if="sub.latest_episode">
+                              📺 更新至 {{ sub.latest_episode }} 集
+                            </n-tag>
+                            <n-tag
+                              size="small"
+                              :type="getCollectionTagType(sub)"
+                            >
+                              📂 收集 {{ sub.current_episode || 0 }} / {{ sub.total_episodes || '?' }}
+                            </n-tag>
+                          </n-space>
                         </template>
-                        <div v-if="sub.downloading_count !== undefined">
-                          <div>当前集数: {{ sub.current_episode || 0 }}</div>
-                          <div>总集数: {{ sub.total_episodes || '未知' }}</div>
-                          <div style="margin-top: 4px; color: #18a058;">
-                            下载中: {{ sub.downloading_count }} 个资源
+                        <div style="font-size: 13px; line-height: 1.6;">
+                          <div v-if="sub.latest_episode">
+                            <strong>📺 最新更新:</strong> 第 {{ sub.latest_episode }} 集
                           </div>
-                        </div>
-                        <div v-else>
-                          <div>当前集数: {{ sub.current_episode || 0 }}</div>
-                          <div>总集数: {{ sub.total_episodes || '未知' }}</div>
+                          <div>
+                            <strong>📂 已收集:</strong> {{ sub.current_episode || 0 }} 集
+                          </div>
+                          <div>
+                            <strong>📊 总集数:</strong> {{ sub.total_episodes || '未知' }}
+                          </div>
+                          <div v-if="sub.downloading_count !== undefined && sub.downloading_count > 0" style="margin-top: 4px; color: #18a058;">
+                            <strong>⬇️ 下载中:</strong> {{ sub.downloading_count }} 个资源
+                          </div>
+                          <div v-if="sub.latest_episode && sub.current_episode < sub.latest_episode" style="margin-top: 4px; color: #f0a020;">
+                            ⚠️ 未收集最新 {{ sub.latest_episode - sub.current_episode }} 集
+                          </div>
+                          <div v-else-if="sub.latest_episode && sub.current_episode === sub.latest_episode" style="margin-top: 4px; color: #18a058;">
+                            ✅ 已全部收集最新剧集
+                          </div>
                         </div>
                       </n-tooltip>
                     </n-space>
@@ -184,13 +214,13 @@
               </div>
 
               <!-- 内容区 -->
-              <div style="flex: 1; min-width: 0; position: relative;">
+              <div style="flex: 1; min-width: 0; position: relative; padding-right: 80px;">
                 <!-- Bangumi评分 - 右上角 -->
                 <div v-if="sub.bangumi_score && sub.bangumi_score > 0" style="position: absolute; top: 0; right: 0; background: linear-gradient(135deg, #f6d365 0%, #fda085 100%); color: white; padding: 4px 10px; border-radius: 12px; font-size: 13px; font-weight: 600; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
                   ⭐ {{ sub.bangumi_score.toFixed(1) }}
                 </div>
 
-                <div>
+                <div style="padding-bottom: 50px;">
                   <!-- 标题 -->
                   <n-ellipsis style="max-width: 250px; font-weight: 500; font-size: 16px; margin-bottom: 8px;">
                     {{ sub.name }}
@@ -202,7 +232,7 @@
                   </n-ellipsis>
 
                   <!-- 标签组 -->
-                  <n-space :size="4" style="margin-bottom: 8px;">
+                  <n-space :size="4" :wrap="true" style="margin-bottom: 8px; max-width: 100%;">
                     <!-- 年份季度标签 -->
                     <n-tag v-if="sub.air_year" size="small" type="primary">
                       {{ getYearSeasonLabel(sub.air_year, sub.air_date) }}
@@ -212,22 +242,30 @@
                     <n-tag size="small" type="info" v-if="sub.fansub">
                       {{ sub.fansub }}
                     </n-tag>
-                    <n-tooltip trigger="hover" v-if="sub.current_episode || sub.total_episodes">
+                    <n-tooltip trigger="hover" v-if="sub.current_episode || sub.total_episodes || sub.latest_episode">
                       <template #trigger>
-                        <n-tag size="small" type="success">
-                          {{ sub.current_episode || 0 }} / {{ sub.total_episodes || '*' }}
-                        </n-tag>
+                        <n-space :size="4">
+                          <n-tag size="small" type="warning" v-if="sub.latest_episode">
+                            📺 更新至 {{ sub.latest_episode }} 集
+                          </n-tag>
+                          <n-tag size="small" :type="sub.current_episode === sub.total_episodes && sub.total_episodes > 0 ? 'success' : 'info'">
+                            📂 收集 {{ sub.current_episode || 0 }} / {{ sub.total_episodes || '?' }} 集
+                          </n-tag>
+                        </n-space>
                       </template>
-                      <div v-if="sub.downloading_count !== undefined">
-                        <div>当前集数: {{ sub.current_episode || 0 }}</div>
-                        <div>总集数: {{ sub.total_episodes || '未知' }}</div>
-                        <div style="margin-top: 4px; color: #18a058;">
-                          下载中: {{ sub.downloading_count }} 个资源
+                      <div>
+                        <div v-if="sub.latest_episode">
+                          <strong>📺 最新更新:</strong> 第 {{ sub.latest_episode }} 集
                         </div>
-                      </div>
-                      <div v-else>
-                        <div>当前集数: {{ sub.current_episode || 0 }}</div>
-                        <div>总集数: {{ sub.total_episodes || '未知' }}</div>
+                        <div>
+                          <strong>📂 已收集:</strong> {{ sub.current_episode || 0 }} 集
+                        </div>
+                        <div>
+                          <strong>📊 总集数:</strong> {{ sub.total_episodes || '未知' }}
+                        </div>
+                        <div v-if="sub.current_episode < sub.total_episodes && sub.total_episodes > 0" style="margin-top: 4px; color: #d03050;">
+                          ⚠️ 还缺 {{ sub.total_episodes - sub.current_episode }} 集
+                        </div>
                       </div>
                     </n-tooltip>
                   </n-space>
@@ -405,6 +443,29 @@
                 <n-input-number v-model:value="formData.season" :min="1" style="width: 100%;" />
               </n-form-item>
 
+              <n-form-item label="Bangumi ID">
+                <n-input-number
+                  v-model:value="formData.bangumi_id"
+                  :min="0"
+                  :show-button="false"
+                  style="width: 100%;"
+                  placeholder="可选：手动指定 Bangumi 条目 ID"
+                >
+                  <template #suffix>
+                    <n-button
+                      text
+                      size="small"
+                      tag="a"
+                      :href="formData.bangumi_id ? `https://bgm.tv/subject/${formData.bangumi_id}` : 'https://bgm.tv'"
+                      target="_blank"
+                      :disabled="!formData.bangumi_id"
+                    >
+                      查看
+                    </n-button>
+                  </template>
+                </n-input-number>
+              </n-form-item>
+
               <n-form-item label="总集数">
                 <n-input-number v-model:value="formData.total_episodes" :min="0" style="width: 100%;" placeholder="0表示未知" />
               </n-form-item>
@@ -508,6 +569,23 @@ const weekdayOptions = weekList.map(w => ({
   value: w.day.toString()
 }))
 
+// 按照当前星期排序的星期列表（从今天开始往后排列）
+const sortedWeekList = computed(() => {
+  const today = new Date().getDay() // 0-6, 0是星期日
+  const sorted = []
+
+  // 从今天开始往后排列
+  for (let i = 0; i < 7; i++) {
+    const targetDay = (today + i) % 7
+    const weekItem = weekList.find(w => w.day === targetDay)
+    if (weekItem) {
+      sorted.push(weekItem)
+    }
+  }
+
+  return sorted
+})
+
 // 表单数据
 const formData = ref({
   name: '',
@@ -516,6 +594,7 @@ const formData = ref({
   language: '',
   update_day: '',
   season: 1,
+  bangumi_id: 0,
   total_episodes: 0,
   episode_offset: 0,
   download_path: '/downloads',
@@ -584,6 +663,13 @@ const isCompleted = (sub: Subscription) => {
   return false
 }
 
+// 打开 Bangumi 页面
+const openBangumiPage = (bangumiId: number) => {
+  if (bangumiId) {
+    window.open(`https://bgm.tv/subject/${bangumiId}`, '_blank')
+  }
+}
+
 // 显示添加对话框
 const showAddDialog = () => {
   editingId.value = undefined
@@ -594,6 +680,7 @@ const showAddDialog = () => {
     language: '',
     update_day: '',
     season: 1,
+    bangumi_id: 0,
     total_episodes: 0,
     episode_offset: 0,
     download_path: '/downloads',
@@ -643,6 +730,7 @@ const handleEdit = (sub: Subscription) => {
     language: sub.language || '',
     update_day: sub.update_day || '',
     season: sub.season,
+    bangumi_id: sub.bangumi_id || 0,
     total_episodes: sub.total_episodes || 0,
     episode_offset: sub.episode_offset || 0,
     download_path: sub.download_path,
@@ -767,6 +855,27 @@ const handleEnrichBangumi = async (id: number) => {
     message.destroyAll()
     message.error(error.message || '补全失败')
   }
+}
+
+// 获取收集状态的标签类型
+const getCollectionTagType = (sub: Subscription): string => {
+  // 如果有最新集数信息
+  if (sub.latest_episode) {
+    if (sub.current_episode === sub.latest_episode) {
+      return 'success' // 已全部收集最新剧集
+    }
+    return 'warning' // 有未收集的最新剧集
+  }
+
+  // 如果有总集数信息
+  if (sub.total_episodes && sub.total_episodes > 0) {
+    if (sub.current_episode >= sub.total_episodes) {
+      return 'success' // 已完成收集
+    }
+    return 'info' // 收集中
+  }
+
+  return 'default' // 没有集数信息
 }
 
 // 手动收集剧集

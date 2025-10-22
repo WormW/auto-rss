@@ -21,7 +21,8 @@ type Subscription struct {
 	Language        string     `json:"language" gorm:"type:varchar(10)"`        // 字幕语言 (CHS, CHT, etc.)
 	UpdateDay       string     `json:"update_day" gorm:"type:varchar(10)"`      // 更新星期 (0-6)
 	TotalEpisodes   int        `json:"total_episodes" gorm:"default:0"`         // 总集数 (0表示未知)
-	CurrentEpisode  int        `json:"current_episode" gorm:"default:0"`        // 当前集数
+	CurrentEpisode  int        `json:"current_episode" gorm:"default:0"`        // 当前集数（已收集的集数）
+	LatestEpisode   int        `json:"latest_episode" gorm:"default:0"`         // 最新更新的集数（从RSS/番剧源获取）
 	EpisodeOffset   int        `json:"episode_offset" gorm:"default:0"`         // 集数偏移
 	FilterRules     string     `json:"filter_rules" gorm:"type:text"`           // 过滤规则
 	Enabled         bool       `json:"enabled" gorm:"default:true;index"`       // 是否启用

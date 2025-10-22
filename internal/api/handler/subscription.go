@@ -6,6 +6,7 @@ import (
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
+	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/downloader"
@@ -84,13 +85,37 @@ func (h *SubscriptionHandler) enrichWithBangumiInternal(subscription *model.Subs
 	// 设置代理
 	h.setProxy()
 
-	// 通过番剧名称搜索
-	subject, err := h.bangumiService.SearchByName(subscription.Name)
-	if err != nil {
-		logger.Warn("Failed to fetch Bangumi data",
+	var subject *bangumi.Subject
+	var err error
+
+	// 如果已有 Bangumi ID，直接通过 ID 获取详细信息
+	if subscription.BangumiID > 0 {
+		logger.Info("Using existing Bangumi ID to fetch data",
+			"subscription_id", subscription.ID,
 			"subscription_name", subscription.Name,
-			"error", err.Error())
-		return
+			"bangumi_id", subscription.BangumiID)
+
+		subject, err = h.bangumiService.GetSubject(subscription.BangumiID)
+		if err != nil {
+			logger.Warn("Failed to fetch Bangumi data by ID",
+				"subscription_name", subscription.Name,
+				"bangumi_id", subscription.BangumiID,
+				"error", err.Error())
+			return
+		}
+	} else {
+		// 没有 Bangumi ID，通过番剧名称搜索
+		logger.Info("Searching Bangumi by name",
+			"subscription_id", subscription.ID,
+			"subscription_name", subscription.Name)
+
+		subject, err = h.bangumiService.SearchByName(subscription.Name)
+		if err != nil {
+			logger.Warn("Failed to fetch Bangumi data by name",
+				"subscription_name", subscription.Name,
+				"error", err.Error())
+			return
+		}
 	}
 
 	logger.Info("Bangumi data fetched successfully",
@@ -137,6 +162,27 @@ func (h *SubscriptionHandler) enrichWithBangumiInternal(subscription *model.Subs
 	// 如果总集数为0，尝试从Bangumi获取
 	if subscription.TotalEpisodes == 0 && subject.TotalEps > 0 {
 		subscription.TotalEpisodes = subject.TotalEps
+	}
+
+	// 获取最新已播出的集数
+	if subject.ID > 0 && subject.TotalEps > 0 {
+		// 先尝试通过API获取精确的已播出集数
+		latestEp, err := h.bangumiService.GetLatestEpisode(subject.ID)
+		if err != nil || latestEp == 0 {
+			// API不可用时，使用总集数作为参考
+			// 对于已完结番剧，这就是最终集数
+			// 对于正在播出的，RSS会提供更准确的信息
+			subscription.LatestEpisode = subject.TotalEps
+			logger.Info("Using total episodes as latest episode reference",
+				"subscription_name", subscription.Name,
+				"total_episodes", subject.TotalEps,
+				"reason", "Bangumi episodes API unavailable")
+		} else {
+			subscription.LatestEpisode = latestEp
+			logger.Info("Got latest episode from Bangumi API",
+				"subscription_name", subscription.Name,
+				"latest_episode", latestEp)
+		}
 	}
 
 	// 如果更新日期为空，尝试从Bangumi获取
@@ -226,8 +272,22 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 		return
 	}
 
-	var subscription model.Subscription
-	if err := c.ShouldBindJSON(&subscription); err != nil {
+	// 先获取现有订阅
+	existing, err := h.repo.GetByID(uint(id))
+	if err != nil {
+		logger.Error("Failed to get existing subscription",
+			"id", id,
+			"error", err.Error())
+		c.JSON(http.StatusNotFound, gin.H{
+			"code":    404,
+			"message": "Subscription not found",
+		})
+		return
+	}
+
+	// 绑定更新数据到 map，只更新提供的字段
+	var updates map[string]interface{}
+	if err := c.ShouldBindJSON(&updates); err != nil {
 		logger.Warn("Invalid subscription update request",
 			"id", id,
 			"error", err.Error(),
@@ -239,25 +299,64 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 		return
 	}
 
-	subscription.ID = uint(id)
-
 	logger.Info("Updating subscription",
 		"id", id,
-		"name", subscription.Name,
+		"updates", updates,
 		"client_ip", c.ClientIP())
 
-	// 如果没有封面,尝试获取Bangumi数据
-	if subscription.BangumiCoverLocal == "" {
-		logger.Debug("No cover found, attempting to fetch Bangumi data",
-			"id", id,
-			"name", subscription.Name)
-		h.enrichWithBangumi(&subscription)
+	// 应用更新到现有订阅
+	if name, ok := updates["name"].(string); ok {
+		existing.Name = name
+	}
+	if rssURL, ok := updates["rss_url"].(string); ok {
+		existing.RssURL = rssURL
+	}
+	if fansub, ok := updates["fansub"].(string); ok {
+		existing.Fansub = fansub
+	}
+	if language, ok := updates["language"].(string); ok {
+		existing.Language = language
+	}
+	if updateDay, ok := updates["update_day"].(string); ok {
+		existing.UpdateDay = updateDay
+	}
+	if season, ok := updates["season"].(float64); ok {
+		existing.Season = int(season)
+	}
+	if bangumiID, ok := updates["bangumi_id"].(float64); ok {
+		existing.BangumiID = int(bangumiID)
+	}
+	if totalEps, ok := updates["total_episodes"].(float64); ok {
+		existing.TotalEpisodes = int(totalEps)
+	}
+	if epOffset, ok := updates["episode_offset"].(float64); ok {
+		existing.EpisodeOffset = int(epOffset)
+	}
+	if downloadPath, ok := updates["download_path"].(string); ok {
+		existing.DownloadPath = downloadPath
+	}
+	if filterRules, ok := updates["filter_rules"].(string); ok {
+		existing.FilterRules = filterRules
+	}
+	if enabled, ok := updates["enabled"].(bool); ok {
+		existing.Enabled = enabled
+	}
+	if renameEnabled, ok := updates["rename_enabled"].(bool); ok {
+		existing.RenameEnabled = renameEnabled
 	}
 
-	if err := h.repo.Update(&subscription); err != nil {
+	// 如果没有封面,尝试获取Bangumi数据
+	if existing.BangumiCoverLocal == "" {
+		logger.Debug("No cover found, attempting to fetch Bangumi data",
+			"id", id,
+			"name", existing.Name)
+		h.enrichWithBangumi(existing)
+	}
+
+	if err := h.repo.Update(existing); err != nil {
 		logger.Error("Failed to update subscription",
 			"id", id,
-			"name", subscription.Name,
+			"name", existing.Name,
 			"error", err.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
@@ -268,13 +367,13 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 
 	logger.Info("Subscription updated successfully",
 		"id", id,
-		"name", subscription.Name,
-		"bangumi_id", subscription.BangumiID)
+		"name", existing.Name,
+		"bangumi_id", existing.BangumiID)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
 		"message": "Success",
-		"data":    subscription,
+		"data":    existing,
 	})
 }
 
@@ -639,9 +738,12 @@ func (h *SubscriptionHandler) CollectEpisodes(c *gin.Context) {
 				savePath = subscription.DownloadPath
 			}
 
+			// 生成带番剧名的下载路径
+			downloadPath := utils.GenerateDownloadPath(savePath, subscription.Name)
+
 			torrentHash, err := h.qbClient.AddTorrent(
 				item.TorrentURL,
-				savePath,
+				downloadPath,
 				downloader.AutoRssCategory, // 使用 AutoRss 分类
 			)
 
@@ -651,6 +753,7 @@ func (h *SubscriptionHandler) CollectEpisodes(c *gin.Context) {
 					"episode", item.Episode,
 					"title", item.Title,
 					"torrent_url", item.TorrentURL,
+					"download_path", downloadPath,
 					"error", err.Error())
 				// 更新下载状态为失败
 				download.Status = "failed"
@@ -669,9 +772,11 @@ func (h *SubscriptionHandler) CollectEpisodes(c *gin.Context) {
 
 			logger.Info("Torrent added to qBittorrent successfully",
 				"subscription_id", id,
+				"subscription_name", subscription.Name,
 				"episode", item.Episode,
 				"title", item.Title,
 				"hash", torrentHash,
+				"download_path", downloadPath,
 				"category", downloader.AutoRssCategory)
 		}
 
@@ -682,11 +787,78 @@ func (h *SubscriptionHandler) CollectEpisodes(c *gin.Context) {
 			"title", item.Title)
 	}
 
+	// 找出RSS中的最新集数
+	maxEpisodeInRSS := 0
+	for _, item := range items {
+		if item.Episode > maxEpisodeInRSS {
+			maxEpisodeInRSS = item.Episode
+		}
+	}
+
+	// 从Bangumi获取最新集数（如果有Bangumi ID）
+	maxEpisodeFromBangumi := 0
+	if subscription.BangumiID > 0 {
+		latestEp, err := h.bangumiService.GetLatestEpisode(subscription.BangumiID)
+		if err != nil {
+			logger.Warn("Failed to get latest episode from Bangumi",
+				"subscription_id", id,
+				"bangumi_id", subscription.BangumiID,
+				"error", err.Error())
+		} else if latestEp > 0 {
+			maxEpisodeFromBangumi = latestEp
+			logger.Info("Got latest episode from Bangumi",
+				"subscription_id", id,
+				"latest_episode", latestEp)
+		}
+	}
+
+	// 取RSS和Bangumi中的最大值作为最新集数
+	latestEpisode := maxEpisodeInRSS
+	if maxEpisodeFromBangumi > latestEpisode {
+		latestEpisode = maxEpisodeFromBangumi
+	}
+
+	// 计算本地已收集的最大集数
+	maxCollectedEpisode := 0
+	for _, download := range existingDownloads {
+		if download.Episode > maxCollectedEpisode && download.Status != "failed" {
+			maxCollectedEpisode = download.Episode
+		}
+	}
+	// 考虑本次新增的下载
+	for _, download := range newDownloads {
+		if download.Episode > maxCollectedEpisode {
+			maxCollectedEpisode = download.Episode
+		}
+	}
+
+	// 更新订阅的集数信息
+	if latestEpisode > 0 || maxCollectedEpisode > 0 {
+		subscription.LatestEpisode = latestEpisode
+		subscription.CurrentEpisode = maxCollectedEpisode
+		if err := h.repo.Update(subscription); err != nil {
+			logger.Error("Failed to update subscription episode info",
+				"subscription_id", id,
+				"latest_episode", latestEpisode,
+				"current_episode", maxCollectedEpisode,
+				"error", err.Error())
+		} else {
+			logger.Info("Updated subscription episode info",
+				"subscription_id", id,
+				"latest_episode", latestEpisode,
+				"current_episode", maxCollectedEpisode,
+				"rss_episodes", maxEpisodeInRSS,
+				"bangumi_episodes", maxEpisodeFromBangumi)
+		}
+	}
+
 	logger.Info("Episode collection completed",
 		"subscription_id", id,
 		"new_downloads", len(newDownloads),
 		"deleted_old_tasks", deletedCount,
-		"total_rss_items", len(items))
+		"total_rss_items", len(items),
+		"latest_episode", latestEpisode,
+		"current_episode", maxCollectedEpisode)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
