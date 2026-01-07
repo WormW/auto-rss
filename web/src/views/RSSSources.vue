@@ -188,10 +188,11 @@ import {
   NText,
   NAlert,
   NIcon,
+  NTooltip,
   useMessage,
   useDialog
 } from 'naive-ui'
-import { CalendarOutline, FilmOutline } from '@vicons/ionicons5'
+import { CalendarOutline, FilmOutline, ListOutline, TrashOutline } from '@vicons/ionicons5'
 import { rssSourceApi, subscriptionApi, type RSSSource, type RSSAnime } from '@/api'
 import { useRouter } from 'vue-router'
 import type { FormInst } from 'naive-ui'
@@ -275,19 +276,33 @@ const columns = [
   {
     title: '操作',
     key: 'actions',
-    width: 200,
+    width: 120,
     render: (row: RSSSource) => {
       return h(NSpace, null, {
         default: () => [
           h(
-            NButton,
-            { size: 'small', onClick: () => handleViewAnimes(row) },
-            { default: () => '查看番剧' }
+            NTooltip,
+            { trigger: 'hover' },
+            {
+              trigger: () => h(
+                NButton,
+                { size: 'small', circle: true, secondary: true, type: 'info', onClick: () => handleViewAnimes(row) },
+                { icon: () => h(NIcon, null, { default: () => h(ListOutline) }) }
+              ),
+              default: () => '查看番剧列表'
+            }
           ),
           h(
-            NButton,
-            { size: 'small', onClick: () => handleDelete(row.id) },
-            { default: () => '删除' }
+            NTooltip,
+            { trigger: 'hover' },
+            {
+              trigger: () => h(
+                NButton,
+                { size: 'small', circle: true, secondary: true, type: 'error', onClick: () => handleDelete(row.id) },
+                { icon: () => h(NIcon, null, { default: () => h(TrashOutline) }) }
+              ),
+              default: () => '删除此源'
+            }
           )
         ]
       })

@@ -198,11 +198,12 @@ const show = (sourceId?: number, searchQuery?: string) => {
   searchText.value = searchQuery || ''
   animeList.value = []
   fansubGroups.value = {}
+  seasons.value = []
+  selectedSeason.value = ''
 
+  // 只有传入搜索关键词时才自动搜索，否则等待用户点击搜索按钮
   if (searchQuery) {
     handleSearch()
-  } else {
-    loadCurrentSeason()
   }
 }
 
