@@ -154,13 +154,14 @@ func (p *parser) ExtractEpisode(title string) int {
 	// - E12, EP12, Episode 12
 	// - 12话, 12話
 	// - S01E12
+	// - Title - 176 (1080p)
 	patterns := []string{
 		`第?\s*(\d+)\s*[集话話]`,           // 第12集, 12话
 		`[Ee][Pp]?\.?\s*(\d+)`,          // E12, EP12, Ep.12
 		`Episode\s*(\d+)`,               // Episode 12
 		`\[\s*(\d+)\s*\]`,               // [12]
 		`S\d+E(\d+)`,                    // S01E12
-		`-\s*(\d+)\s*[-\[]`,             // - 12 -
+		`-\s*(\d+)\s*[([\-]`,            // - 12 (, - 12 [, - 12 -
 	}
 
 	for _, pattern := range patterns {

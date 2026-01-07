@@ -740,8 +740,29 @@ func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Tas
 		progress := 25 + (processedItems * 60 / totalItems) // 25-85%
 		manager.UpdateProgress(progress, fmt.Sprintf("处理第 %d/%d 个条目...", processedItems, totalItems))
 
+		// 计算相对集数（考虑偏移）
+		offset := subscription.EpisodeOffset
+		relativeEpisode := item.Episode
+		if offset > 0 {
+			relativeEpisode = item.Episode - offset
+			// 如果相对集数 <= 0，说明这集在偏移之前，跳过
+			if relativeEpisode <= 0 {
+				logger.Debug("Skipping episode before offset",
+					"episode", item.Episode,
+					"offset", offset,
+					"relative_episode", relativeEpisode,
+					"title", item.Title)
+				continue
+			}
+		}
+
 		// 如果设置了总集数，只收集在范围内的
-		if subscription.TotalEpisodes > 0 && item.Episode > subscription.TotalEpisodes {
+		if subscription.TotalEpisodes > 0 && relativeEpisode > subscription.TotalEpisodes {
+			logger.Debug("Skipping episode beyond total",
+				"episode", item.Episode,
+				"relative_episode", relativeEpisode,
+				"total_episodes", subscription.TotalEpisodes,
+				"title", item.Title)
 			continue
 		}
 

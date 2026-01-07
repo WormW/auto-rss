@@ -155,6 +155,32 @@ func (s *scheduler) checkRSSFeeds() {
 				continue
 			}
 
+			// 计算相对集数（考虑偏移）
+			offset := sub.EpisodeOffset
+			relativeEpisode := item.Episode
+			if offset > 0 {
+				relativeEpisode = item.Episode - offset
+				// 如果相对集数 <= 0，说明这集在偏移之前，跳过
+				if relativeEpisode <= 0 {
+					logger.Debug("Skipping episode before offset",
+						"subscription", sub.Name,
+						"episode", item.Episode,
+						"offset", offset,
+						"relative_episode", relativeEpisode)
+					continue
+				}
+			}
+
+			// 如果设置了总集数，只收集在范围内的
+			if sub.TotalEpisodes > 0 && relativeEpisode > sub.TotalEpisodes {
+				logger.Debug("Skipping episode beyond total",
+					"subscription", sub.Name,
+					"episode", item.Episode,
+					"relative_episode", relativeEpisode,
+					"total_episodes", sub.TotalEpisodes)
+				continue
+			}
+
 			// 检查同一订阅的同一集数是否已存在
 			if item.Episode > 0 {
 				existingEpisode, _ := s.downloadRepo.GetBySubscriptionAndEpisode(sub.ID, item.Episode)
