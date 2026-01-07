@@ -1,8 +1,11 @@
 package handler
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
@@ -12,6 +15,7 @@ import (
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/mikan"
 	"github.com/WormW/auto-rss/internal/service/rss"
+	"github.com/WormW/auto-rss/internal/service/task"
 	"github.com/gin-gonic/gin"
 )
 
@@ -53,11 +57,16 @@ func NewSubscriptionHandler(
 func (h *SubscriptionHandler) setProxy() {
 	if h.configRepo != nil {
 		proxyConfig, err := h.configRepo.Get("system_proxy")
-		if err == nil && proxyConfig.Value != "" {
+		if err == nil && proxyConfig != nil && proxyConfig.Value != "" {
+			logger.Debug("Setting proxy for services", "proxy", proxyConfig.Value)
 			h.bangumiService.SetProxy(proxyConfig.Value)
 			h.imageService.SetProxy(proxyConfig.Value)
 			h.mikanService.SetProxy(proxyConfig.Value)
-			h.rssParser.SetProxy(proxyConfig.Value)
+			if err := h.rssParser.SetProxy(proxyConfig.Value); err != nil {
+				logger.Error("Failed to set proxy for RSS parser", "proxy", proxyConfig.Value, "error", err)
+			}
+		} else {
+			logger.Debug("No proxy configured", "err", err)
 		}
 	}
 }
@@ -590,7 +599,7 @@ func (h *SubscriptionHandler) List(c *gin.Context) {
 	})
 }
 
-// CollectEpisodes 手动收集缺失的剧集
+// CollectEpisodes 手动收集缺失的剧集（异步执行）
 func (h *SubscriptionHandler) CollectEpisodes(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
 	if err != nil {
@@ -615,9 +624,55 @@ func (h *SubscriptionHandler) CollectEpisodes(c *gin.Context) {
 		"name", subscription.Name,
 		"client_ip", c.ClientIP())
 
+	// 启动异步任务
+	manager := task.GetManager()
+	taskName := fmt.Sprintf("采集: %s", subscription.Name)
+
+	newTask, err := manager.StartTask(task.TaskTypeCollect, uint(id), taskName, func(ctx context.Context, t *task.Task) error {
+		return h.doCollectEpisodes(ctx, t, subscription)
+	})
+
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{
+			"code":    409,
+			"message": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "采集任务已启动",
+		"data": gin.H{
+			"task": newTask,
+		},
+	})
+}
+
+// doCollectEpisodes 执行采集任务的核心逻辑
+func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Task, subscription *model.Subscription) error {
+	manager := task.GetManager()
+	id := subscription.ID
+
+	// 检查取消
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	manager.UpdateProgress(5, "设置代理...")
 	// 设置代理
 	h.setProxy()
 
+	// 检查取消
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	manager.UpdateProgress(10, "获取RSS订阅...")
 	// 解析RSS获取剧集列表
 	items, err := h.rssParser.FetchAndParse(subscription.RssURL)
 	if err != nil {
@@ -625,28 +680,28 @@ func (h *SubscriptionHandler) CollectEpisodes(c *gin.Context) {
 			"subscription_id", id,
 			"rss_url", subscription.RssURL,
 			"error", err.Error())
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "Failed to fetch RSS feed: " + err.Error(),
-		})
-		return
+		return fmt.Errorf("获取RSS失败: %s", err.Error())
 	}
 
 	logger.Info("RSS feed fetched successfully",
 		"subscription_id", id,
 		"items_count", len(items))
 
+	// 检查取消
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	manager.UpdateProgress(20, "获取已有下载记录...")
 	// 获取已有的下载记录
-	existingDownloads, err := h.downloadRepo.ListBySubscriptionID(uint(id))
+	existingDownloads, err := h.downloadRepo.ListBySubscriptionID(id)
 	if err != nil {
 		logger.Error("Failed to get existing downloads",
 			"subscription_id", id,
 			"error", err.Error())
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "Failed to check existing downloads",
-		})
-		return
+		return fmt.Errorf("获取下载记录失败: %s", err.Error())
 	}
 
 	// 按集数分组现有的下载任务 (每个集数保留最新的一个)
@@ -667,7 +722,24 @@ func (h *SubscriptionHandler) CollectEpisodes(c *gin.Context) {
 	// 所以我们遍历时，先遇到的就是最新的版本
 	processedEpisodes := make(map[int]bool)
 
+	manager.UpdateProgress(25, "分析RSS条目...")
+
+	// 计算需要处理的条目数量
+	totalItems := len(items)
+	processedItems := 0
+
 	for _, item := range items {
+		// 检查取消
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		processedItems++
+		progress := 25 + (processedItems * 60 / totalItems) // 25-85%
+		manager.UpdateProgress(progress, fmt.Sprintf("处理第 %d/%d 个条目...", processedItems, totalItems))
+
 		// 如果设置了总集数，只收集在范围内的
 		if subscription.TotalEpisodes > 0 && item.Episode > subscription.TotalEpisodes {
 			continue
@@ -713,7 +785,7 @@ func (h *SubscriptionHandler) CollectEpisodes(c *gin.Context) {
 
 		// 创建下载任务
 		download := model.Download{
-			SubscriptionID: uint(id),
+			SubscriptionID: id,
 			Title:          item.Title,
 			Episode:        item.Episode,
 			Fansub:         item.Fansub,
@@ -733,19 +805,64 @@ func (h *SubscriptionHandler) CollectEpisodes(c *gin.Context) {
 
 		// 调用 qBittorrent API 添加下载任务（使用 AutoRss 分类）
 		if h.qbClient != nil {
+			// 使用系统配置的下载路径
 			savePath := h.downloadPath
-			if subscription.DownloadPath != "" {
-				savePath = subscription.DownloadPath
-			}
 
 			// 生成带番剧名的下载路径
 			downloadPath := utils.GenerateDownloadPath(savePath, subscription.Name)
 
-			torrentHash, err := h.qbClient.AddTorrent(
-				item.TorrentURL,
-				downloadPath,
-				downloader.AutoRssCategory, // 使用 AutoRss 分类
-			)
+			var torrentHash string
+			var err error
+
+			// 检查是否是.torrent URL，需要通过代理下载
+			if strings.HasSuffix(strings.ToLower(item.TorrentURL), ".torrent") ||
+				strings.Contains(item.TorrentURL, "/Download/") {
+				// 设置代理
+				if h.configRepo != nil {
+					if proxyConfig, err := h.configRepo.Get("system_proxy"); err == nil && proxyConfig != nil && proxyConfig.Value != "" {
+						h.qbClient.SetProxy(proxyConfig.Value)
+					}
+				}
+
+				// 先下载种子文件
+				if qbDownloader, ok := h.qbClient.(interface {
+					DownloadTorrentFile(url string) ([]byte, error)
+				}); ok {
+					fileContent, downloadErr := qbDownloader.DownloadTorrentFile(item.TorrentURL)
+					if downloadErr != nil {
+						logger.Error("Failed to download torrent file",
+							"subscription_id", id,
+							"episode", item.Episode,
+							"torrent_url", item.TorrentURL,
+							"error", downloadErr.Error())
+						download.Status = "failed"
+						h.downloadRepo.Update(&download)
+						continue
+					}
+
+					// 通过文件内容添加种子
+					torrentHash, err = h.qbClient.AddTorrentFile(
+						"torrent.torrent",
+						fileContent,
+						downloadPath,
+						downloader.AutoRssCategory,
+					)
+				} else {
+					// 回退到URL方式
+					torrentHash, err = h.qbClient.AddTorrent(
+						item.TorrentURL,
+						downloadPath,
+						downloader.AutoRssCategory,
+					)
+				}
+			} else {
+				// magnet链接或其他，直接添加
+				torrentHash, err = h.qbClient.AddTorrent(
+					item.TorrentURL,
+					downloadPath,
+					downloader.AutoRssCategory,
+				)
+			}
 
 			if err != nil {
 				logger.Error("Failed to add torrent to qBittorrent",
@@ -762,7 +879,21 @@ func (h *SubscriptionHandler) CollectEpisodes(c *gin.Context) {
 			}
 
 			// 更新下载记录的 hash 和状态
-			download.TorrentHash = torrentHash
+			// 只有当 qBittorrent 返回了有效的 hash 且与原来不同时才更新
+			if torrentHash != "" && torrentHash != download.TorrentHash {
+				// 检查这个 hash 是否已经存在于其他记录中
+				existingByHash, _ := h.downloadRepo.GetByHash(torrentHash)
+				if existingByHash != nil && existingByHash.ID != download.ID {
+					logger.Warn("Torrent hash already exists in another download record",
+						"download_id", download.ID,
+						"existing_download_id", existingByHash.ID,
+						"hash", torrentHash)
+					// 删除当前重复的记录，保留已有的
+					h.downloadRepo.Delete(download.ID)
+					continue
+				}
+				download.TorrentHash = torrentHash
+			}
 			download.Status = "downloading"
 			if err := h.downloadRepo.Update(&download); err != nil {
 				logger.Error("Failed to update download status",
@@ -786,6 +917,15 @@ func (h *SubscriptionHandler) CollectEpisodes(c *gin.Context) {
 			"episode", item.Episode,
 			"title", item.Title)
 	}
+
+	// 检查取消
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	manager.UpdateProgress(90, "更新集数信息...")
 
 	// 找出RSS中的最新集数
 	maxEpisodeInRSS := 0
@@ -860,16 +1000,14 @@ func (h *SubscriptionHandler) CollectEpisodes(c *gin.Context) {
 		"latest_episode", latestEpisode,
 		"current_episode", maxCollectedEpisode)
 
-	c.JSON(http.StatusOK, gin.H{
-		"code":    0,
-		"message": "Success",
-		"data": gin.H{
-			"collected":       len(newDownloads),
-			"deleted":         deletedCount,
-			"total_rss_items": len(items),
-			"downloads":       newDownloads,
-		},
+	// 设置任务结果
+	manager.SetResult(gin.H{
+		"collected":       len(newDownloads),
+		"deleted":         deletedCount,
+		"total_rss_items": len(items),
 	})
+
+	return nil
 }
 
 // BatchImportFromRSSRequest 从RSS批量导入请求
@@ -1043,7 +1181,7 @@ func (h *SubscriptionHandler) BatchImportFromRSS(c *gin.Context) {
 			Enabled:       true,
 			Fansub:        selectedGroup.Name,
 			RenameEnabled: true,
-			DownloadPath:  h.downloadPath,
+			// DownloadPath 不设置，统一使用系统配置
 		}
 
 		// 保存订阅

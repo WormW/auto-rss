@@ -36,7 +36,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 
 	// 初始化处理器
 	subscriptionHandler := handler.NewSubscriptionHandler(subscriptionRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath)
-	downloadHandler := handler.NewDownloadHandler(downloadRepo)
+	downloadHandler := handler.NewDownloadHandler(downloadRepo, qbClient)
 	rssHandler := handler.NewRSSHandler()
 	configHandler := handler.NewConfigHandler(configRepo)
 	rssSourceHandler := handler.NewRSSSourceHandler(rssSourceRepo, configRepo, rssParser)
@@ -96,6 +96,8 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			downloads.GET("/:id", downloadHandler.GetByID)
 			downloads.DELETE("/:id", downloadHandler.Delete)
 			downloads.POST("/:id/retry", downloadHandler.Retry)
+			downloads.POST("/batch-delete", downloadHandler.BatchDelete)
+			downloads.DELETE("/clear", downloadHandler.Clear)
 		}
 
 		// RSS 管理
@@ -131,6 +133,15 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		{
 			fileOrganizer.POST("/trigger", fileOrganizerHandler.TriggerScan)
 			fileOrganizer.POST("/reload", fileOrganizerHandler.ReloadConfig)
+		}
+
+		// 任务管理
+		taskHandler := handler.NewTaskHandler()
+		tasks := v1.Group("/tasks")
+		{
+			tasks.GET("/current", taskHandler.GetCurrent)
+			tasks.GET("/history", taskHandler.GetHistory)
+			tasks.POST("/cancel", taskHandler.Cancel)
 		}
 	}
 

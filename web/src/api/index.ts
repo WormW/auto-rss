@@ -98,7 +98,11 @@ export const downloadApi = {
   delete: (id: number) =>
     api.delete(`/downloads/${id}`),
   retry: (id: number) =>
-    api.post(`/downloads/${id}/retry`)
+    api.post(`/downloads/${id}/retry`),
+  batchDelete: (ids: number[]) =>
+    api.post('/downloads/batch-delete', { ids }),
+  clear: (status?: string) =>
+    api.delete('/downloads/clear', { params: { status } })
 }
 
 export const rssApi = {
@@ -131,6 +135,30 @@ export const fileOrganizerApi = {
     api.post('/file-organizer/trigger'),
   reloadConfig: () =>
     api.post('/file-organizer/reload')
+}
+
+// 任务类型
+export interface Task {
+  id: string
+  type: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+  subscription_id?: number
+  name: string
+  progress: number
+  message: string
+  error?: string
+  started_at?: string
+  completed_at?: string
+  result?: any
+}
+
+export const taskApi = {
+  getCurrent: () =>
+    api.get('/tasks/current'),
+  getHistory: () =>
+    api.get('/tasks/history'),
+  cancel: () =>
+    api.post('/tasks/cancel')
 }
 
 export * from './rss-source'
