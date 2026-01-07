@@ -6,7 +6,7 @@ import "time"
 type Subscription struct {
 	ID              uint       `json:"id" gorm:"primaryKey"`
 	Name            string     `json:"name" gorm:"not null;index"`
-	RssURL          string     `json:"rss_url" gorm:"not null"`
+	RssURL          string     `json:"rss_url"`
 	Season          int        `json:"season" gorm:"default:1"`
 	Status          string     `json:"status" gorm:"default:active;index"` // active, paused
 	FilterKeywords  string     `json:"filter_keywords" gorm:"type:text"`   // JSON array
@@ -43,7 +43,10 @@ type Subscription struct {
 	RSSSourceID *uint  `json:"rss_source_id" gorm:"index"`            // RSS源ID（如果从RSS源创建）
 	SourceType  string `json:"source_type" gorm:"default:manual"`     // manual: 手动填写, rss_source: 从RSS源选择
 
-	CreatedAt time.Time `json:"created_at"`
+	// 合集种子
+	CollectionTorrent string `json:"collection_torrent" gorm:"type:text"` // 合集种子地址(磁力链接或.torrent URL)
+
+		CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 
 	Downloads []Download `json:"downloads,omitempty" gorm:"foreignKey:SubscriptionID"`

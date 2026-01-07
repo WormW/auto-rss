@@ -42,6 +42,7 @@ export interface Subscription {
   last_download_at?: string
   rss_source_id?: number
   source_type?: string
+  collection_torrent?: string
   // Bangumi相关字段
   bangumi_id?: number
   bangumi_score?: number

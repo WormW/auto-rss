@@ -225,6 +225,156 @@ func (h *SubscriptionHandler) enrichWithBangumiInternal(subscription *model.Subs
 		"has_cover", subscription.BangumiCoverLocal != "")
 }
 
+// downloadCollectionTorrent 下载合集种子
+func (h *SubscriptionHandler) downloadCollectionTorrent(subscription *model.Subscription) {
+	if subscription.CollectionTorrent == "" {
+		return
+	}
+
+	if h.qbClient == nil {
+		logger.Warn("qBittorrent client not configured, skipping collection torrent download",
+			"subscription_id", subscription.ID,
+			"subscription_name", subscription.Name)
+		return
+	}
+
+	logger.Info("Starting collection torrent download",
+		"subscription_id", subscription.ID,
+		"subscription_name", subscription.Name,
+		"collection_torrent", subscription.CollectionTorrent)
+
+	// 使用系统配置的下载路径
+	savePath := h.downloadPath
+
+	// 生成带番剧名的下载路径
+	downloadPath := utils.GenerateDownloadPath(savePath, subscription.Name)
+
+	var torrentHash string
+	var err error
+
+	// 检查是否是 .torrent URL，需要通过代理下载
+	torrentURL := subscription.CollectionTorrent
+	if strings.HasSuffix(strings.ToLower(torrentURL), ".torrent") ||
+		strings.Contains(torrentURL, "/Download/") {
+		// 设置代理
+		if h.configRepo != nil {
+			if proxyConfig, err := h.configRepo.Get("system_proxy"); err == nil && proxyConfig != nil && proxyConfig.Value != "" {
+				h.qbClient.SetProxy(proxyConfig.Value)
+			}
+		}
+
+		// 先下载种子文件
+		if qbDownloader, ok := h.qbClient.(interface {
+			DownloadTorrentFile(url string) ([]byte, error)
+		}); ok {
+			fileContent, downloadErr := qbDownloader.DownloadTorrentFile(torrentURL)
+			if downloadErr != nil {
+				logger.Error("Failed to download collection torrent file",
+					"subscription_id", subscription.ID,
+					"torrent_url", torrentURL,
+					"error", downloadErr.Error())
+				return
+			}
+
+			// 通过文件内容添加种子
+			torrentHash, err = h.qbClient.AddTorrentFile(
+				"collection.torrent",
+				fileContent,
+				downloadPath,
+				downloader.AutoRssCategory,
+			)
+		} else {
+			// 回退到 URL 方式
+			torrentHash, err = h.qbClient.AddTorrent(
+				torrentURL,
+				downloadPath,
+				downloader.AutoRssCategory,
+			)
+		}
+	} else {
+		// magnet 链接或其他，直接添加
+		torrentHash, err = h.qbClient.AddTorrent(
+			torrentURL,
+			downloadPath,
+			downloader.AutoRssCategory,
+		)
+	}
+
+	if err != nil {
+		logger.Error("Failed to add collection torrent to qBittorrent",
+			"subscription_id", subscription.ID,
+			"subscription_name", subscription.Name,
+			"torrent_url", torrentURL,
+			"download_path", downloadPath,
+			"error", err.Error())
+		return
+	}
+
+	// 如果没有获取到 hash（种子可能已存在），尝试通过 savePath 查找
+	if torrentHash == "" {
+		logger.Info("Torrent hash empty, searching for existing torrent by savePath",
+			"subscription_id", subscription.ID,
+			"download_path", downloadPath)
+
+		torrents, listErr := h.qbClient.GetTorrentsByCategory(downloader.AutoRssCategory)
+		if listErr == nil {
+			for _, t := range torrents {
+				// 匹配 savePath（可能完全匹配或以 downloadPath 开头）
+				if t.SavePath == downloadPath || strings.HasPrefix(t.SavePath, downloadPath) {
+					torrentHash = t.Hash
+					logger.Info("Found existing torrent by savePath",
+						"subscription_id", subscription.ID,
+						"torrent_hash", torrentHash,
+						"torrent_name", t.Name,
+						"save_path", t.SavePath)
+					break
+				}
+			}
+		}
+	}
+
+	logger.Info("Collection torrent added successfully",
+		"subscription_id", subscription.ID,
+		"subscription_name", subscription.Name,
+		"torrent_hash", torrentHash,
+		"download_path", downloadPath)
+
+	// 创建 Download 记录以支持自动重命名
+	// Episode 设为 0 表示合集种子
+	if torrentHash != "" && h.downloadRepo != nil {
+		// 先检查是否已存在相同 hash 的记录
+		existing, _ := h.downloadRepo.GetByHash(torrentHash)
+		if existing != nil {
+			logger.Info("Download record already exists for collection torrent",
+				"subscription_id", subscription.ID,
+				"torrent_hash", torrentHash)
+			return
+		}
+
+		download := &model.Download{
+			SubscriptionID: subscription.ID,
+			Title:          subscription.Name + " [合集]",
+			Episode:        0, // 0 表示合集
+			Fansub:         subscription.Fansub,
+			TorrentURL:     torrentURL,
+			TorrentHash:    torrentHash,
+			Status:         "downloading",
+		}
+
+		if err := h.downloadRepo.Create(download); err != nil {
+			logger.Error("Failed to create download record for collection torrent",
+				"subscription_id", subscription.ID,
+				"torrent_hash", torrentHash,
+				"error", err.Error())
+		} else {
+			logger.Info("Download record created for collection torrent",
+				"subscription_id", subscription.ID,
+				"download_id", download.ID,
+				"torrent_hash", torrentHash)
+		}
+	}
+}
+
 // Create 创建订阅
 func (h *SubscriptionHandler) Create(c *gin.Context) {
 	var subscription model.Subscription
@@ -263,6 +413,9 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		"name", subscription.Name,
 		"bangumi_id", subscription.BangumiID,
 		"has_cover", subscription.BangumiCoverLocal != "")
+
+	// 如果提供了合集种子地址，自动触发下载
+	go h.downloadCollectionTorrent(&subscription)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
@@ -358,6 +511,16 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 		existing.RenameEnabled = renameEnabled
 	}
 
+	// 处理合集种子地址，记录是否需要触发下载
+	var shouldDownloadCollection bool
+	if collectionTorrent, ok := updates["collection_torrent"].(string); ok {
+		// 只有当合集种子地址发生变化且新值不为空时才触发下载
+		if collectionTorrent != existing.CollectionTorrent && collectionTorrent != "" {
+			shouldDownloadCollection = true
+		}
+		existing.CollectionTorrent = collectionTorrent
+	}
+
 	// 如果没有封面,尝试获取Bangumi数据
 	if existing.BangumiCoverLocal == "" {
 		logger.Debug("No cover found, attempting to fetch Bangumi data",
@@ -382,6 +545,11 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 		"id", id,
 		"name", existing.Name,
 		"bangumi_id", existing.BangumiID)
+
+	// 如果合集种子地址发生变化，自动触发下载
+	if shouldDownloadCollection {
+		go h.downloadCollectionTorrent(existing)
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
@@ -515,6 +683,53 @@ func (h *SubscriptionHandler) EnrichBangumi(c *gin.Context) {
 		"code":    0,
 		"message": "Success",
 		"data":    subscription,
+	})
+}
+
+// DownloadCollection 手动触发合集种子下载
+func (h *SubscriptionHandler) DownloadCollection(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Invalid subscription ID",
+		})
+		return
+	}
+
+	subscription, err := h.repo.GetByID(uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"code":    404,
+			"message": "Subscription not found",
+		})
+		return
+	}
+
+	if subscription.CollectionTorrent == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "No collection torrent configured for this subscription",
+		})
+		return
+	}
+
+	logger.Info("Manual collection torrent download requested",
+		"id", id,
+		"name", subscription.Name,
+		"collection_torrent", subscription.CollectionTorrent,
+		"client_ip", c.ClientIP())
+
+	// 异步执行下载
+	go h.downloadCollectionTorrent(subscription)
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Collection torrent download started",
+		"data": gin.H{
+			"subscription_id":    subscription.ID,
+			"collection_torrent": subscription.CollectionTorrent,
+		},
 	})
 }
 

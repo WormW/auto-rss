@@ -434,12 +434,12 @@
                 <n-input v-model:value="formData.name" placeholder="请输入番剧名称" />
               </n-form-item>
 
-              <n-form-item label="RSS 地址">
+              <n-form-item label="RSS 地址 (可选)">
                 <n-input
                   v-model:value="formData.rss_url"
                   type="textarea"
                   :autosize="{ minRows: 2 }"
-                  placeholder="RSS 地址"
+                  placeholder="RSS 地址 (与合集种子至少填一个)"
                 />
               </n-form-item>
 
@@ -496,6 +496,15 @@
 
               <n-form-item label="下载路径">
                 <n-input v-model:value="formData.download_path" placeholder="/downloads" />
+              </n-form-item>
+
+              <n-form-item label="合集种子 (可选)">
+                <n-input
+                  v-model:value="formData.collection_torrent"
+                  type="textarea"
+                  :autosize="{ minRows: 2 }"
+                  placeholder="磁力链接或 .torrent 文件地址 (与 RSS 地址至少填一个)"
+                />
               </n-form-item>
 
               <n-form-item label="过滤规则">
@@ -618,6 +627,7 @@ const formData = ref({
   total_episodes: 0,
   episode_offset: 0,
   download_path: '/downloads',
+  collection_torrent: '',
   filter_rules: '',
   enabled: true,
   rss_source_id: undefined as number | undefined,
@@ -731,6 +741,7 @@ const showAddDialog = () => {
     total_episodes: 0,
     episode_offset: 0,
     download_path: '/downloads',
+    collection_torrent: '',
     filter_rules: '',
     enabled: true,
     rss_source_id: undefined,
@@ -781,6 +792,7 @@ const handleEdit = (sub: Subscription) => {
     total_episodes: sub.total_episodes || 0,
     episode_offset: sub.episode_offset || 0,
     download_path: sub.download_path,
+    collection_torrent: sub.collection_torrent || '',
     filter_rules: sub.filter_rules || '',
     enabled: sub.enabled !== false,
     rss_source_id: sub.rss_source_id,
@@ -792,15 +804,18 @@ const handleEdit = (sub: Subscription) => {
 
 // 获取RSS数据 (第一步到第二步的过渡)
 const handleGetRssData = async () => {
-  if (!formData.value.rss_url) {
-    message.error('请输入 RSS 地址')
-    return
-  }
-
-  // 如果是手动输入模式且没有填写名称,提示用户
-  if (activeTab.value === 'manual' && !formData.value.name) {
-    message.error('请输入番剧名称')
-    return
+  // 如果是手动输入模式，只需要番剧名称
+  if (activeTab.value === 'manual') {
+    if (!formData.value.name) {
+      message.error('请输入番剧名称')
+      return
+    }
+  } else {
+    // RSS源模式需要 RSS 地址
+    if (!formData.value.rss_url) {
+      message.error('请输入 RSS 地址')
+      return
+    }
   }
 
   step2Loading.value = true
@@ -815,8 +830,15 @@ const handleGetRssData = async () => {
 
 // 提交表单
 const handleSubmit = async () => {
-  if (!formData.value.name || !formData.value.rss_url) {
-    message.error('请填写必填项')
+  // 名称必填
+  if (!formData.value.name) {
+    message.error('请填写番剧名称')
+    return
+  }
+
+  // RSS 地址和合集种子至少需要一个
+  if (!formData.value.rss_url && !formData.value.collection_torrent) {
+    message.error('请填写 RSS 地址或合集种子地址')
     return
   }
 
@@ -979,9 +1001,11 @@ onMounted(() => {
       language: '',
       update_day: '',
       season: 1,
+      bangumi_id: 0,
       total_episodes: 0,
       episode_offset: 0,
       download_path: '/downloads',
+      collection_torrent: '',
       filter_rules: '',
       enabled: true,
       rss_source_id: route.query.rss_source_id ? parseInt(route.query.rss_source_id as string) : undefined,

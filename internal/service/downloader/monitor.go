@@ -3,6 +3,9 @@ package downloader
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -272,6 +275,7 @@ func (m *DownloadMonitor) handleDownloadComplete(download *model.Download, torre
 	logger.Info("Download completed",
 		"id", download.ID,
 		"title", download.Title,
+		"episode", download.Episode,
 		"subscription_id", download.SubscriptionID)
 
 	// 获取订阅信息
@@ -289,18 +293,34 @@ func (m *DownloadMonitor) handleDownloadComplete(download *model.Download, torre
 	download.FilePath = torrent.SavePath
 
 	// 如果启用了重命名，执行文件重命名
+	// 合集种子（Episode=0）需要批量重命名所有视频文件
 	if subscription.RenameEnabled {
-		newPath, err := m.renameFile(download, subscription, torrent)
-		if err != nil {
-			logger.Error("Failed to rename file",
-				"download_id", download.ID,
-				"error", err.Error())
+		if download.Episode > 0 {
+			// 单集重命名
+			newPath, err := m.renameFile(download, subscription, torrent)
+			if err != nil {
+				logger.Error("Failed to rename file",
+					"download_id", download.ID,
+					"error", err.Error())
+			} else {
+				download.RenamedPath = newPath
+				logger.Info("File renamed successfully",
+					"download_id", download.ID,
+					"old_path", torrent.SavePath,
+					"new_path", newPath)
+			}
 		} else {
-			download.RenamedPath = newPath
-			logger.Info("File renamed successfully",
-				"download_id", download.ID,
-				"old_path", torrent.SavePath,
-				"new_path", newPath)
+			// 合集种子批量重命名
+			renamedCount, err := m.renameCollectionFiles(download, subscription, torrent)
+			if err != nil {
+				logger.Error("Failed to rename collection files",
+					"download_id", download.ID,
+					"error", err.Error())
+			} else {
+				logger.Info("Collection files renamed successfully",
+					"download_id", download.ID,
+					"renamed_count", renamedCount)
+			}
 		}
 	}
 
@@ -353,6 +373,142 @@ func (m *DownloadMonitor) renameFile(download *model.Download, subscription *mod
 	// 返回完整路径
 	fullPath := filepath.Join(torrent.SavePath, newRelativePath)
 	return fullPath, nil
+}
+
+// renameCollectionFiles 重命名合集种子中的所有视频文件
+func (m *DownloadMonitor) renameCollectionFiles(download *model.Download, subscription *model.Subscription, torrent *TorrentInfo) (int, error) {
+	// 获取种子文件列表
+	files, err := m.qbClient.GetTorrentFiles(torrent.Hash)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get torrent files: %w", err)
+	}
+
+	if len(files) == 0 {
+		return 0, fmt.Errorf("no files found in torrent")
+	}
+
+	// 视频文件扩展名
+	videoExts := map[string]bool{
+		".mkv": true, ".mp4": true, ".avi": true, ".flv": true,
+		".ts": true, ".m2ts": true, ".wmv": true, ".mov": true,
+	}
+
+	// 收集所有视频文件并解析集数
+	type videoFileInfo struct {
+		file    TorrentFile
+		episode int
+	}
+	var videoFiles []videoFileInfo
+
+	for _, file := range files {
+		ext := strings.ToLower(filepath.Ext(file.Name))
+		if !videoExts[ext] {
+			continue
+		}
+
+		// 从文件名解析集数
+		episode := extractEpisodeFromFilename(filepath.Base(file.Name))
+		if episode > 0 {
+			videoFiles = append(videoFiles, videoFileInfo{file: file, episode: episode})
+		} else {
+			logger.Warn("Could not extract episode from filename, skipping",
+				"filename", file.Name)
+		}
+	}
+
+	if len(videoFiles) == 0 {
+		return 0, fmt.Errorf("no video files with episode numbers found")
+	}
+
+	// 按集数排序
+	sort.Slice(videoFiles, func(i, j int) bool {
+		return videoFiles[i].episode < videoFiles[j].episode
+	})
+
+	logger.Info("Found video files in collection",
+		"download_id", download.ID,
+		"video_count", len(videoFiles),
+		"first_episode", videoFiles[0].episode,
+		"last_episode", videoFiles[len(videoFiles)-1].episode)
+
+	renamedCount := 0
+
+	for _, vf := range videoFiles {
+		ext := filepath.Ext(vf.file.Name)
+
+		// 构建重命名上下文
+		ctx := &RenameContext{
+			Subscription: subscription,
+			Download: &model.Download{
+				Episode: vf.episode,
+			},
+			OriginalName: vf.file.Name,
+			Extension:    ext,
+			Resolution:   extractResolution(vf.file.Name),
+		}
+
+		// 生成新文件路径
+		newRelativePath := m.renameService.GenerateFileName(ctx)
+
+		// 调用 qBittorrent API 重命名文件
+		if err := m.qbClient.RenameTorrentFile(torrent.Hash, vf.file.Name, newRelativePath); err != nil {
+			// 如果是409错误(文件已存在)，不视为失败
+			if strings.Contains(err.Error(), "409") {
+				logger.Debug("File already renamed, skipping",
+					"episode", vf.episode,
+					"path", newRelativePath)
+				renamedCount++
+				continue
+			}
+			logger.Warn("Failed to rename file in collection",
+				"episode", vf.episode,
+				"original", vf.file.Name,
+				"target", newRelativePath,
+				"error", err.Error())
+			continue
+		}
+
+		renamedCount++
+		logger.Debug("Renamed collection file",
+			"episode", vf.episode,
+			"original", filepath.Base(vf.file.Name),
+			"new", newRelativePath)
+	}
+
+	return renamedCount, nil
+}
+
+// extractEpisodeFromFilename 从文件名中提取集数
+func extractEpisodeFromFilename(filename string) int {
+	// 常见集数格式:
+	// - 第12集, 12话, 12話
+	// - E12, EP12, Ep.12
+	// - S01E12, S1E12
+	// - - 01, - 12 (常见于番剧标题后)
+	// - [01], [12] (方括号内的数字)
+	// - _01_, _12_ (下划线包围)
+	patterns := []string{
+		`第?\s*(\d+)\s*[集话話]`,           // 第12集, 12话
+		`[Ee][Pp]?\.?\s*(\d+)`,          // E12, EP12, Ep.12
+		`Episode\s*(\d+)`,               // Episode 12
+		`[Ss]\d{1,2}[Ee](\d+)`,          // S01E12, S1E12
+		`[\[\(](\d{2,3})[\]\)]`,         // [01], (12)
+		`[\s\-_](\d{2})[\s\-_\[\.]`,     // -01-, _12_, 空格01空格
+		`[\s\-](\d{2})$`,                // 以-01或空格01结尾
+	}
+
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern)
+		matches := re.FindStringSubmatch(filename)
+		if len(matches) > 1 {
+			episode, err := strconv.Atoi(matches[1])
+			if err == nil && episode > 0 && episode < 1000 {
+				return episode
+			}
+		}
+	}
+
+	return 0
 }
 
 // updateSubscriptionStats 更新订阅统计信息
