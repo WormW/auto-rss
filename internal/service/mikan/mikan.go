@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/PuerkitoBio/goquery"
 )
@@ -23,8 +24,10 @@ func NewMikanService(baseURL string) *MikanService {
 		baseURL = "https://mikanime.tv"
 	}
 	return &MikanService{
-		baseURL:    baseURL,
-		httpClient: &http.Client{},
+		baseURL: baseURL,
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second, // 30秒超时
+		},
 	}
 }
 
@@ -41,7 +44,8 @@ func (s *MikanService) SetProxy(proxyURL string) error {
 	}
 
 	s.httpClient.Transport = &http.Transport{
-		Proxy: http.ProxyURL(proxy),
+		Proxy:                 http.ProxyURL(proxy),
+		ResponseHeaderTimeout: 15 * time.Second,
 	}
 	return nil
 }

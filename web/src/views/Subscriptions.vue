@@ -656,10 +656,37 @@ const getYearSeasonLabel = (year: number, airDate?: string) => {
 
 // 判断番剧是否已完结
 const isCompleted = (sub: Subscription) => {
-  // 如果有总集数且当前集数等于总集数，认为已完结
-  if (sub.total_episodes && sub.total_episodes > 0 && sub.current_episode && sub.current_episode >= sub.total_episodes) {
+  // 没有总集数信息，无法判断
+  if (!sub.total_episodes || sub.total_episodes <= 0) {
+    return false
+  }
+
+  // 方案1：当前集数 >= 总集数（已采集过的订阅）
+  if (sub.current_episode && sub.current_episode >= sub.total_episodes) {
     return true
   }
+
+  // 方案2：RSS 最新集数 >= 总集数，且是老番（播出超过3个月）
+  if (sub.latest_episode && sub.latest_episode >= sub.total_episodes && sub.air_date) {
+    const airDate = new Date(sub.air_date)
+    // 计算预计完结日期：播出日期 + 总集数周数 + 1个月缓冲
+    const estimatedEndDate = new Date(airDate)
+    estimatedEndDate.setDate(estimatedEndDate.getDate() + (sub.total_episodes * 7) + 30)
+
+    if (new Date() > estimatedEndDate) {
+      return true
+    }
+  }
+
+  // 方案3：没有播出日期但 RSS 已有完整集数，且年份是过去的
+  if (sub.latest_episode && sub.latest_episode >= sub.total_episodes && sub.air_year) {
+    const currentYear = new Date().getFullYear()
+    // 如果播出年份是去年或更早，认为已完结
+    if (sub.air_year < currentYear) {
+      return true
+    }
+  }
+
   return false
 }
 
@@ -881,21 +908,21 @@ const getCollectionTagType = (sub: Subscription): string => {
 // 手动收集剧集
 const handleCollectEpisodes = async (id: number) => {
   try {
-    message.loading('正在收集剧集...', { duration: 0 })
     const response: any = await api.post(`/subscriptions/${id}/collect-episodes`)
-    message.destroyAll()
 
     if (response.code === 0) {
-      const collected = response.data?.collected || 0
-      const total = response.data?.total_rss_items || 0
-      message.success(`收集完成！新增 ${collected} 个下载任务（RSS共 ${total} 项）`)
-      loadSubscriptions()
+      message.success('采集任务已启动，请在右上角任务管理中查看进度')
+    } else if (response.code === 409) {
+      message.warning(response.message || '已有任务在执行中')
     } else {
-      message.error(response.message || '收集失败')
+      message.error(response.message || '启动采集任务失败')
     }
   } catch (error: any) {
-    message.destroyAll()
-    message.error(error.message || '收集失败')
+    if (error.response?.status === 409) {
+      message.warning(error.response?.data?.message || '已有任务在执行中')
+    } else {
+      message.error(error.response?.data?.message || error.message || '启动采集任务失败')
+    }
   }
 }
 

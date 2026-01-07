@@ -118,15 +118,15 @@ func (c *Config) LoadFromDB(db *gorm.DB) error {
 
 	for _, cfg := range configs {
 		switch cfg.Key {
-		case "qb_host":
+		case "qb_host", "qbittorrent_host":
 			if cfg.Value != "" {
 				c.QBHost = cfg.Value
 			}
-		case "qb_username":
+		case "qb_username", "qbittorrent_username":
 			if cfg.Value != "" {
 				c.QBUsername = cfg.Value
 			}
-		case "qb_password":
+		case "qb_password", "qbittorrent_password":
 			if cfg.Value != "" {
 				c.QBPassword = cfg.Value
 			}
