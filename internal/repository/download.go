@@ -16,6 +16,9 @@ type DownloadRepository interface {
 	List(offset, limit int, status string) ([]model.Download, int64, error)
 	ListBySubscriptionID(subscriptionID uint) ([]model.Download, error)
 	UpdateStatus(id uint, status string) error
+	BatchDelete(ids []uint) error
+	DeleteByStatus(status string) error
+	DeleteAll() error
 }
 
 type downloadRepository struct {
@@ -103,4 +106,22 @@ func (r *downloadRepository) ListBySubscriptionID(subscriptionID uint) ([]model.
 func (r *downloadRepository) UpdateStatus(id uint, status string) error {
 	return r.db.Model(&model.Download{}).Where("id = ?", id).
 		Update("status", status).Error
+}
+
+// BatchDelete 批量删除下载任务
+func (r *downloadRepository) BatchDelete(ids []uint) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return r.db.Delete(&model.Download{}, ids).Error
+}
+
+// DeleteByStatus 按状态删除下载任务
+func (r *downloadRepository) DeleteByStatus(status string) error {
+	return r.db.Where("status = ?", status).Delete(&model.Download{}).Error
+}
+
+// DeleteAll 删除所有下载任务
+func (r *downloadRepository) DeleteAll() error {
+	return r.db.Where("1 = 1").Delete(&model.Download{}).Error
 }

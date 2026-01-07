@@ -9,6 +9,18 @@
           style="width: 150px"
           @update:value="loadDownloads"
         />
+        <n-button
+          type="error"
+          :disabled="selectedRowKeys.length === 0"
+          @click="handleBatchDelete"
+        >
+          批量删除 {{ selectedRowKeys.length > 0 ? `(${selectedRowKeys.length})` : '' }}
+        </n-button>
+        <n-dropdown :options="clearOptions" @select="handleClear">
+          <n-button type="warning">
+            一键清空
+          </n-button>
+        </n-dropdown>
       </n-space>
     </n-space>
 
@@ -18,13 +30,16 @@
       :loading="loading"
       :pagination="pagination"
       :remote="true"
+      :row-key="(row: Download) => row.id"
+      v-model:checked-row-keys="selectedRowKeys"
     />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted, h } from 'vue'
-import { NButton, NDataTable, NSelect, NSpace, NTag, useMessage, useDialog } from 'naive-ui'
+import { NButton, NDataTable, NSelect, NSpace, NTag, NDropdown, NTooltip, NIcon, useMessage, useDialog } from 'naive-ui'
+import { RefreshOutline, TrashOutline } from '@vicons/ionicons5'
 import { downloadApi, type Download } from '@/api'
 
 const message = useMessage()
@@ -32,6 +47,7 @@ const dialog = useDialog()
 const loading = ref(false)
 const downloads = ref<Download[]>([])
 const statusFilter = ref('')
+const selectedRowKeys = ref<number[]>([])
 
 const statusOptions = [
   { label: '全部', value: '' },
@@ -39,6 +55,13 @@ const statusOptions = [
   { label: '下载中', value: 'downloading' },
   { label: '已完成', value: 'completed' },
   { label: '失败', value: 'failed' }
+]
+
+const clearOptions = [
+  { label: '清空全部', key: 'all' },
+  { label: '清空已完成', key: 'completed' },
+  { label: '清空失败', key: 'failed' },
+  { label: '清空等待中', key: 'pending' }
 ]
 
 const pagination = ref({
@@ -71,6 +94,7 @@ const getStatusTag = (status: string) => {
 }
 
 const columns = [
+  { type: 'selection' as const },
   { title: 'ID', key: 'id', width: 60 },
   { title: '标题', key: 'title', ellipsis: { tooltip: true } },
   { title: '字幕组', key: 'fansub', width: 120 },
@@ -84,16 +108,38 @@ const columns = [
   {
     title: '操作',
     key: 'actions',
-    width: 150,
+    width: 120,
     render: (row: Download) => {
       const buttons = []
       if (row.status === 'failed') {
         buttons.push(
-          h(NButton, { size: 'small', onClick: () => handleRetry(row.id) }, { default: () => '重试' })
+          h(
+            NTooltip,
+            { trigger: 'hover' },
+            {
+              trigger: () => h(
+                NButton,
+                { size: 'small', circle: true, secondary: true, type: 'warning', onClick: () => handleRetry(row.id) },
+                { icon: () => h(NIcon, null, { default: () => h(RefreshOutline) }) }
+              ),
+              default: () => '重试下载'
+            }
+          )
         )
       }
       buttons.push(
-        h(NButton, { size: 'small', onClick: () => handleDelete(row.id) }, { default: () => '删除' })
+        h(
+          NTooltip,
+          { trigger: 'hover' },
+          {
+            trigger: () => h(
+              NButton,
+              { size: 'small', circle: true, secondary: true, type: 'error', onClick: () => handleDelete(row.id) },
+              { icon: () => h(NIcon, null, { default: () => h(TrashOutline) }) }
+            ),
+            default: () => '删除任务'
+          }
+        )
       )
       return h(NSpace, null, { default: () => buttons })
     }
@@ -102,6 +148,7 @@ const columns = [
 
 const loadDownloads = async () => {
   loading.value = true
+  selectedRowKeys.value = []
   try {
     const res: any = await downloadApi.list(pagination.value.page, pagination.value.pageSize, statusFilter.value)
     downloads.value = res.data?.list || []
@@ -138,6 +185,56 @@ const handleDelete = async (id: number) => {
         loadDownloads()
       } catch (error) {
         message.error('删除失败')
+      }
+    }
+  })
+}
+
+const handleBatchDelete = async () => {
+  if (selectedRowKeys.value.length === 0) {
+    message.warning('请先选择要删除的任务')
+    return
+  }
+
+  dialog.warning({
+    title: '确认批量删除',
+    content: `确定要删除选中的 ${selectedRowKeys.value.length} 个下载任务吗？此操作不可恢复。`,
+    positiveText: '确定',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      try {
+        await downloadApi.batchDelete(selectedRowKeys.value)
+        message.success(`成功删除 ${selectedRowKeys.value.length} 个任务`)
+        selectedRowKeys.value = []
+        loadDownloads()
+      } catch (error) {
+        message.error('批量删除失败')
+      }
+    }
+  })
+}
+
+const handleClear = async (key: string) => {
+  const statusText: Record<string, string> = {
+    all: '全部',
+    completed: '已完成',
+    failed: '失败',
+    pending: '等待中'
+  }
+
+  dialog.warning({
+    title: '确认清空',
+    content: `确定要清空${statusText[key]}的下载任务吗？此操作不可恢复。`,
+    positiveText: '确定',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      try {
+        const status = key === 'all' ? undefined : key
+        await downloadApi.clear(status)
+        message.success(`已清空${statusText[key]}任务`)
+        loadDownloads()
+      } catch (error) {
+        message.error('清空失败')
       }
     }
   })
