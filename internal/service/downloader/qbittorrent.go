@@ -25,6 +25,8 @@ type QBittorrentClient interface {
 	GetTorrentsByCategory(category string) ([]*TorrentInfo, error)
 	// SetCategory 设置种子分类
 	SetCategory(hash string, category string) error
+	// SetLocation 移动种子到新位置
+	SetLocation(hash string, location string) error
 	// RenameTorrentFile 重命名种子文件
 	RenameTorrentFile(hash string, oldPath string, newPath string) error
 	// DeleteTorrent 删除种子任务
@@ -524,6 +526,26 @@ func (c *qbittorrentClient) SetCategory(hash string, category string) error {
 
 	if resp.StatusCode() != 200 {
 		return fmt.Errorf("set category failed: status code %d", resp.StatusCode())
+	}
+
+	return nil
+}
+
+// SetLocation 移动种子到新位置
+func (c *qbittorrentClient) SetLocation(hash string, location string) error {
+	resp, err := c.client.R().
+		SetFormData(map[string]string{
+			"hashes":   hash,
+			"location": location,
+		}).
+		Post(c.host + "/api/v2/torrents/setLocation")
+
+	if err != nil {
+		return fmt.Errorf("set location request failed: %w", err)
+	}
+
+	if resp.StatusCode() != 200 {
+		return fmt.Errorf("set location failed: status code %d, body: %s", resp.StatusCode(), string(resp.Body()))
 	}
 
 	return nil

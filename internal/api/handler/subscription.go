@@ -3,9 +3,13 @@ package handler
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
@@ -1246,4 +1250,334 @@ func (h *SubscriptionHandler) BatchImportFromRSS(c *gin.Context) {
 			"results": results,
 		},
 	})
+}
+
+// ReorganizeFiles 重新组织订阅的已下载文件
+// 根据当前订阅的名称和季度设置，移动和重命名已下载的文件
+func (h *SubscriptionHandler) ReorganizeFiles(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Invalid subscription ID",
+		})
+		return
+	}
+
+	// 获取订阅信息
+	subscription, err := h.repo.GetByID(uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"code":    404,
+			"message": "Subscription not found",
+		})
+		return
+	}
+
+	logger.Info("Reorganizing files for subscription",
+		"id", id,
+		"name", subscription.Name,
+		"season", subscription.Season,
+		"client_ip", c.ClientIP())
+
+	// 启动异步任务
+	manager := task.GetManager()
+	taskName := fmt.Sprintf("整理文件: %s", subscription.Name)
+
+	newTask, err := manager.StartTask(task.TaskTypeCollect, uint(id), taskName, func(ctx context.Context, t *task.Task) error {
+		return h.doReorganizeFiles(ctx, t, subscription)
+	})
+
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{
+			"code":    409,
+			"message": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "文件整理任务已启动",
+		"data": gin.H{
+			"task": newTask,
+		},
+	})
+}
+
+// doReorganizeFiles 执行文件重组织的核心逻辑（通过 qBittorrent API）
+func (h *SubscriptionHandler) doReorganizeFiles(ctx context.Context, t *task.Task, subscription *model.Subscription) error {
+	manager := task.GetManager()
+	id := subscription.ID
+
+	manager.UpdateProgress(5, "获取已下载文件列表...")
+
+	// 获取该订阅的所有已完成下载
+	downloads, err := h.downloadRepo.ListBySubscriptionID(id)
+	if err != nil {
+		return fmt.Errorf("获取下载记录失败: %s", err.Error())
+	}
+
+	// 过滤出已完成的下载
+	var completedDownloads []model.Download
+	for _, d := range downloads {
+		if d.Status == "completed" && d.TorrentHash != "" {
+			completedDownloads = append(completedDownloads, d)
+		}
+	}
+
+	if len(completedDownloads) == 0 {
+		return fmt.Errorf("没有已完成的下载任务")
+	}
+
+	logger.Info("Found completed downloads",
+		"subscription_id", id,
+		"count", len(completedDownloads))
+
+	// 获取重命名模板
+	renameTemplate := "${title}/Season ${season}/${title} S${seasonFormat}E${episodeFormat}"
+	if h.configRepo != nil {
+		if templateConfig, err := h.configRepo.Get("rename_template"); err == nil && templateConfig != nil && templateConfig.Value != "" {
+			renameTemplate = templateConfig.Value
+		}
+	}
+	renameService := downloader.NewRenameService(renameTemplate)
+
+	// 获取基础下载路径
+	basePath := h.downloadPath
+	if h.configRepo != nil {
+		if pathConfig, err := h.configRepo.Get("download_path"); err == nil && pathConfig != nil && pathConfig.Value != "" {
+			basePath = pathConfig.Value
+		}
+	}
+
+	manager.UpdateProgress(10, "开始整理文件...")
+
+	totalFiles := len(completedDownloads)
+	movedCount := 0
+	renamedCount := 0
+	errorCount := 0
+
+	for i, download := range completedDownloads {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		progress := 10 + (i * 80 / totalFiles)
+		manager.UpdateProgress(progress, fmt.Sprintf("处理第 %d/%d 个文件...", i+1, totalFiles))
+
+		// 获取 qBittorrent 中的种子信息
+		torrentInfo, err := h.qbClient.GetTorrentInfo(download.TorrentHash)
+		if err != nil {
+			logger.Warn("Failed to get torrent info",
+				"hash", download.TorrentHash,
+				"error", err.Error())
+			errorCount++
+			continue
+		}
+
+		// 获取种子文件列表
+		files, err := h.qbClient.GetTorrentFiles(download.TorrentHash)
+		if err != nil {
+			logger.Warn("Failed to get torrent files",
+				"hash", download.TorrentHash,
+				"error", err.Error())
+			errorCount++
+			continue
+		}
+
+		if len(files) == 0 {
+			logger.Warn("No files found in torrent",
+				"hash", download.TorrentHash)
+			errorCount++
+			continue
+		}
+
+		// 找到主视频文件
+		var mainVideoFile *downloader.TorrentFile
+		for j := range files {
+			ext := strings.ToLower(filepath.Ext(files[j].Name))
+			if isVideoFile(ext) {
+				if mainVideoFile == nil || files[j].Size > mainVideoFile.Size {
+					mainVideoFile = &files[j]
+				}
+			}
+		}
+
+		if mainVideoFile == nil {
+			logger.Warn("No video file found in torrent",
+				"hash", download.TorrentHash)
+			errorCount++
+			continue
+		}
+
+		ext := strings.ToLower(filepath.Ext(mainVideoFile.Name))
+
+		// 生成新的文件名（带目录结构）
+		// 注意：这里使用原始集数，不应用偏移，因为文件名应该保持原始集数
+		renameCtx := &downloader.RenameContext{
+			Subscription: subscription,
+			Download: &model.Download{
+				Episode: download.Episode,
+			},
+			OriginalName: mainVideoFile.Name,
+			Extension:    ext,
+		}
+		newRelativePath := renameService.GenerateFileName(renameCtx)
+
+		// 分离目录和文件名
+		newDir := filepath.Dir(newRelativePath)
+		newFileName := filepath.Base(newRelativePath)
+		targetLocation := filepath.Join(basePath, newDir)
+
+		// 当前位置
+		currentLocation := torrentInfo.SavePath
+
+		// Step 1: 移动种子到新位置（如果需要）
+		if currentLocation != targetLocation {
+			logger.Info("Moving torrent via qBittorrent API",
+				"hash", download.TorrentHash,
+				"from", currentLocation,
+				"to", targetLocation)
+
+			if err := h.qbClient.SetLocation(download.TorrentHash, targetLocation); err != nil {
+				logger.Error("Failed to move torrent",
+					"hash", download.TorrentHash,
+					"target", targetLocation,
+					"error", err.Error())
+				errorCount++
+				continue
+			}
+			movedCount++
+			logger.Info("Torrent moved successfully",
+				"hash", download.TorrentHash,
+				"new_location", targetLocation)
+		}
+
+		// Step 2: 重命名文件（如果需要）
+		oldFileName := mainVideoFile.Name
+		// 处理文件在子目录中的情况（oldFileName 可能包含路径）
+		oldFileBaseName := filepath.Base(oldFileName)
+
+		if oldFileBaseName != newFileName {
+			// 构建新的相对路径（在种子内部）
+			newFilePath := newFileName
+			if strings.Contains(oldFileName, string(filepath.Separator)) {
+				// 如果原文件在子目录中，保持目录结构但改变文件名
+				oldDir := filepath.Dir(oldFileName)
+				newFilePath = filepath.Join(oldDir, newFileName)
+			}
+
+			logger.Info("Renaming file via qBittorrent API",
+				"hash", download.TorrentHash,
+				"from", oldFileName,
+				"to", newFilePath)
+
+			if err := h.qbClient.RenameTorrentFile(download.TorrentHash, oldFileName, newFilePath); err != nil {
+				logger.Warn("Failed to rename file (may not be supported for multi-file torrents)",
+					"hash", download.TorrentHash,
+					"error", err.Error())
+				// 重命名失败不算严重错误，继续处理
+			} else {
+				renamedCount++
+				logger.Info("File renamed successfully",
+					"hash", download.TorrentHash,
+					"new_name", newFilePath)
+			}
+		}
+	}
+
+	manager.UpdateProgress(100, "整理完成")
+
+	logger.Info("File reorganization completed",
+		"subscription_id", id,
+		"total_downloads", totalFiles,
+		"moved", movedCount,
+		"renamed", renamedCount,
+		"errors", errorCount)
+
+	if errorCount > 0 && movedCount == 0 && renamedCount == 0 {
+		return fmt.Errorf("整理失败，%d 个错误", errorCount)
+	}
+
+	manager.SetResult(map[string]interface{}{
+		"moved":   movedCount,
+		"renamed": renamedCount,
+		"errors":  errorCount,
+	})
+
+	return nil
+}
+
+// isVideoFile 检查是否是视频文件
+func isVideoFile(ext string) bool {
+	videoExts := map[string]bool{
+		".mp4": true, ".mkv": true, ".avi": true, ".wmv": true,
+		".mov": true, ".flv": true, ".webm": true, ".m4v": true,
+		".ts": true, ".m2ts": true,
+	}
+	return videoExts[ext]
+}
+
+// moveFile 移动文件（支持跨分区）
+func moveFile(src, dest string) error {
+	// 如果目标文件已存在，添加时间戳后缀
+	if _, err := os.Stat(dest); err == nil {
+		ext := filepath.Ext(dest)
+		base := strings.TrimSuffix(dest, ext)
+		timestamp := time.Now().Format("20060102_150405")
+		dest = fmt.Sprintf("%s_%s%s", base, timestamp, ext)
+		logger.Warn("Target file already exists, using new name", "new_path", dest)
+	}
+
+	// 尝试重命名（同一文件系统）
+	err := os.Rename(src, dest)
+	if err == nil {
+		return nil
+	}
+
+	// 跨文件系统，复制后删除
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	destFile, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	if _, err := io.Copy(destFile, srcFile); err != nil {
+		return err
+	}
+
+	// 复制成功后删除源文件
+	srcFile.Close()
+	return os.Remove(src)
+}
+
+// cleanEmptyDirs 递归清理空目录
+func cleanEmptyDirs(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			subDir := filepath.Join(dir, entry.Name())
+			cleanEmptyDirs(subDir)
+		}
+	}
+
+	// 重新读取，检查是否为空
+	entries, _ = os.ReadDir(dir)
+	if len(entries) == 0 {
+		os.Remove(dir)
+		logger.Debug("Removed empty directory", "dir", dir)
+	}
 }

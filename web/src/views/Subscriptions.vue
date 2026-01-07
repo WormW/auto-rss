@@ -158,6 +158,16 @@
                         </template>
                         收集剧集
                       </n-tooltip>
+                      <n-tooltip trigger="hover">
+                        <template #trigger>
+                          <n-button text @click="handleReorganizeFiles(sub.id)">
+                            <template #icon>
+                              <n-icon><FolderOpenOutlined /></n-icon>
+                            </template>
+                          </n-button>
+                        </template>
+                        整理文件
+                      </n-tooltip>
                       <n-switch
                         :value="sub.enabled"
                         @update:value="(val) => handleToggle(sub.id, val)"
@@ -299,6 +309,16 @@
                         </n-button>
                       </template>
                       收集剧集
+                    </n-tooltip>
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <n-button text @click="handleReorganizeFiles(sub.id)">
+                          <template #icon>
+                            <n-icon><FolderOpenOutlined /></n-icon>
+                          </template>
+                        </n-button>
+                      </template>
+                      整理文件
                     </n-tooltip>
                     <n-switch
                       :value="sub.enabled"
@@ -535,7 +555,7 @@ import {
 import { subscriptionApi, type Subscription } from '@/api'
 import { api } from '@/api'
 import { useRoute, useRouter } from 'vue-router'
-import { EditOutlined, DeleteOutlined, SearchOutlined, ReloadOutlined, DownloadOutlined } from '@vicons/antd'
+import { EditOutlined, DeleteOutlined, SearchOutlined, ReloadOutlined, DownloadOutlined, FolderOpenOutlined } from '@vicons/antd'
 import AnimeSearch from '@/components/AnimeSearch.vue'
 
 const route = useRoute()
@@ -922,6 +942,27 @@ const handleCollectEpisodes = async (id: number) => {
       message.warning(error.response?.data?.message || '已有任务在执行中')
     } else {
       message.error(error.response?.data?.message || error.message || '启动采集任务失败')
+    }
+  }
+}
+
+// 手动整理文件
+const handleReorganizeFiles = async (id: number) => {
+  try {
+    const response: any = await api.post(`/subscriptions/${id}/reorganize-files`)
+
+    if (response.code === 0) {
+      message.success('文件整理任务已启动，请在右上角任务管理中查看进度')
+    } else if (response.code === 409) {
+      message.warning(response.message || '已有任务在执行中')
+    } else {
+      message.error(response.message || '启动文件整理任务失败')
+    }
+  } catch (error: any) {
+    if (error.response?.status === 409) {
+      message.warning(error.response?.data?.message || '已有任务在执行中')
+    } else {
+      message.error(error.response?.data?.message || error.message || '启动文件整理任务失败')
     }
   }
 }
