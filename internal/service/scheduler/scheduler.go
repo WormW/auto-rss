@@ -28,6 +28,7 @@ type scheduler struct {
 	cron               *cron.Cron
 	subscriptionRepo   repository.SubscriptionRepository
 	downloadRepo       repository.DownloadRepository
+	configRepo         repository.ConfigRepository
 	rssCheckInterval   string
 	rssParser          rss.Parser
 	qbClient           downloader.QBittorrentClient
@@ -37,6 +38,7 @@ type scheduler struct {
 func NewScheduler(
 	subscriptionRepo repository.SubscriptionRepository,
 	downloadRepo repository.DownloadRepository,
+	configRepo repository.ConfigRepository,
 	rssCheckInterval string,
 	rssParser rss.Parser,
 	qbClient downloader.QBittorrentClient,
@@ -45,6 +47,7 @@ func NewScheduler(
 		cron:             cron.New(),
 		subscriptionRepo: subscriptionRepo,
 		downloadRepo:     downloadRepo,
+		configRepo:       configRepo,
 		rssCheckInterval: rssCheckInterval,
 		rssParser:        rssParser,
 		qbClient:         qbClient,
@@ -93,6 +96,18 @@ func (s *scheduler) Start() error {
 func (s *scheduler) checkRSSFeeds() {
 	logger.Info("Starting RSS feed check")
 
+	// 设置代理
+	if s.configRepo != nil {
+		proxyConfig, err := s.configRepo.Get("system_proxy")
+		if err == nil && proxyConfig != nil && proxyConfig.Value != "" {
+			if err := s.rssParser.SetProxy(proxyConfig.Value); err != nil {
+				logger.Warn("Failed to set proxy for RSS parser", "error", err)
+			} else {
+				logger.Debug("Proxy set for RSS parser", "proxy", proxyConfig.Value)
+			}
+		}
+	}
+
 	// 获取所有激活的订阅
 	subscriptions, err := s.subscriptionRepo.GetActiveSubscriptions()
 	if err != nil {
@@ -127,6 +142,16 @@ func (s *scheduler) checkRSSFeeds() {
 
 			// 应用关键词过滤
 			if !s.matchesFilter(&sub, item.Title) {
+				continue
+			}
+
+			// 只处理订阅创建时间之后发布的条目（定时检查不收集历史种子）
+			if !item.PubTime.IsZero() && item.PubTime.Before(sub.CreatedAt) {
+				logger.Debug("Skipping item published before subscription creation",
+					"subscription", sub.Name,
+					"item_title", item.Title,
+					"pub_time", item.PubTime,
+					"created_at", sub.CreatedAt)
 				continue
 			}
 
@@ -184,10 +209,17 @@ func (s *scheduler) checkRSSFeeds() {
 				"fansub", item.Fansub)
 
 			// 生成带番剧名的下载路径
-			downloadPath := utils.GenerateDownloadPath(sub.DownloadPath, sub.Name)
+			// 使用系统配置的下载路径，而不是订阅级别的路径
+			basePath := "/downloads" // 默认值
+			if s.configRepo != nil {
+				if downloadPathConfig, err := s.configRepo.Get("download_path"); err == nil && downloadPathConfig != nil && downloadPathConfig.Value != "" {
+					basePath = downloadPathConfig.Value
+				}
+			}
+			downloadPath := utils.GenerateDownloadPath(basePath, sub.Name)
 
 			// 添加到 qBittorrent
-			_, err = s.qbClient.AddTorrent(item.TorrentURL, downloadPath)
+			_, err = s.qbClient.AddTorrent(item.TorrentURL, downloadPath, "")
 			if err != nil {
 				logger.Error("Failed to add torrent to qBittorrent",
 					"title", item.Title,
@@ -239,7 +271,7 @@ func (s *scheduler) checkDownloadStatus() {
 		}
 
 		// 更新下载进度
-		if info.Status == "completed" || info.Progress >= 1.0 {
+		if info.State == "completed" || info.Progress >= 1.0 {
 			download.Status = "completed"
 			now := time.Now()
 			download.DownloadedAt = &now

@@ -51,7 +51,9 @@ func main() {
 	if err := cfg.LoadFromDB(db); err != nil {
 		logger.Warn("Failed to load config from database", "error", err)
 	} else {
-		logger.Info("Configuration loaded from database")
+		logger.Info("Configuration loaded from database",
+			"download_path", cfg.DownloadPath,
+			"qb_host", cfg.QBHost)
 	}
 
 	// 重新初始化日志以包含数据库写入

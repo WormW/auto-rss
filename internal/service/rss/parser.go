@@ -33,6 +33,7 @@ type RSSItem struct {
 	TorrentURL  string
 	TorrentHash string
 	PubDate     string
+	PubTime     time.Time // 解析后的发布时间
 	Fansub      string
 	Episode     int
 }
@@ -103,6 +104,11 @@ func (p *parser) FetchAndParse(rssURL string) ([]RSSItem, error) {
 		rssItem := RSSItem{
 			Title:   item.Title,
 			PubDate: item.Published,
+		}
+
+		// 解析发布时间
+		if item.PublishedParsed != nil {
+			rssItem.PubTime = *item.PublishedParsed
 		}
 
 		// 提取种子链接
