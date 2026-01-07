@@ -1,6 +1,7 @@
 package downloader
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"time"
@@ -16,6 +17,8 @@ type QBittorrentClient interface {
 	TestConnection(host, username, password string) error
 	// AddTorrent 添加种子任务
 	AddTorrent(torrentURL string, savePath string, category string) (string, error)
+	// AddTorrentFile 通过文件内容添加种子
+	AddTorrentFile(filename string, fileContent []byte, savePath string, category string) (string, error)
 	// GetTorrentInfo 获取种子信息
 	GetTorrentInfo(hash string) (*TorrentInfo, error)
 	// GetTorrentsByCategory 获取指定分类的所有种子
@@ -30,6 +33,8 @@ type QBittorrentClient interface {
 	GetTorrentFiles(hash string) ([]TorrentFile, error)
 	// GetVersion 获取qBittorrent版本信息
 	GetVersion() (string, error)
+	// SetProxy 设置代理
+	SetProxy(proxyURL string) error
 }
 
 // TorrentInfo 种子信息
@@ -53,11 +58,12 @@ type TorrentFile struct {
 }
 
 type qbittorrentClient struct {
-	host     string
-	username string
-	password string
-	cookie   string
-	client   *resty.Client
+	host        string
+	username    string
+	password    string
+	cookie      string
+	client      *resty.Client
+	proxyClient *resty.Client // 用于通过代理下载种子文件
 }
 
 // NewQBittorrentClient 创建 qBittorrent 客户端实例
@@ -66,8 +72,12 @@ func NewQBittorrentClient() QBittorrentClient {
 	// 启用 cookie jar 以保存和发送 cookies
 	client.SetCookieJar(nil) // nil 使用默认的 cookie jar
 
+	proxyClient := resty.New()
+	proxyClient.SetTimeout(30 * time.Second)
+
 	return &qbittorrentClient{
-		client: client,
+		client:      client,
+		proxyClient: proxyClient,
 	}
 }
 
@@ -118,6 +128,9 @@ func (c *qbittorrentClient) Login(host, username, password string) error {
 
 // AddTorrent 添加种子任务
 func (c *qbittorrentClient) AddTorrent(torrentURL string, savePath string, category string) (string, error) {
+	// 尝试从 URL 中提取 hash（支持 magnet link）
+	extractedHash := extractHashFromURL(torrentURL)
+
 	// 获取添加前的种子列表，用于后续识别新添加的种子
 	existingTorrents, err := c.GetTorrentsByCategory(category)
 	if err != nil {
@@ -126,7 +139,15 @@ func (c *qbittorrentClient) AddTorrent(torrentURL string, savePath string, categ
 	}
 	existingHashes := make(map[string]bool)
 	for _, t := range existingTorrents {
-		existingHashes[t.Hash] = true
+		existingHashes[strings.ToLower(t.Hash)] = true
+	}
+
+	// 如果能提取到 hash，检查种子是否已存在
+	if extractedHash != "" {
+		if existingHashes[strings.ToLower(extractedHash)] {
+			// 种子已存在，直接返回 hash
+			return strings.ToLower(extractedHash), nil
+		}
 	}
 
 	formData := map[string]string{
@@ -148,30 +169,103 @@ func (c *qbittorrentClient) AddTorrent(torrentURL string, savePath string, categ
 	}
 
 	if resp.StatusCode() != 200 {
-		return "", fmt.Errorf("add torrent failed: status code %d", resp.StatusCode())
+		return "", fmt.Errorf("add torrent failed: status code %d, body: %s", resp.StatusCode(), string(resp.Body()))
 	}
 
 	// qBittorrent API 返回 "Ok." 表示成功
-	// 等待1秒让qBittorrent处理种子
-	time.Sleep(1 * time.Second)
+	// 等待2秒让qBittorrent处理种子（增加等待时间）
+	time.Sleep(2 * time.Second)
 
 	// 获取更新后的种子列表，找出新添加的种子
 	updatedTorrents, err := c.GetTorrentsByCategory(category)
 	if err != nil {
-		// 如果无法获取种子列表，返回空hash（后续monitor会重试）
-		return "", nil
+		// 如果无法获取种子列表，尝试获取所有种子
+		updatedTorrents, err = c.getAllTorrents()
+		if err != nil {
+			return "", fmt.Errorf("failed to get torrent list: %w", err)
+		}
 	}
 
 	// 找出新添加的种子（不在之前列表中的hash）
 	for _, t := range updatedTorrents {
-		if !existingHashes[t.Hash] {
+		if !existingHashes[strings.ToLower(t.Hash)] {
 			// 找到新添加的种子
 			return t.Hash, nil
 		}
 	}
 
-	// 如果没有找到新种子，返回空hash
+	// 如果没有找到新种子，可能是种子已存在（不在指定分类中）
+	// 尝试通过提取的 hash 查找
+	if extractedHash != "" {
+		torrentInfo, err := c.GetTorrentInfo(extractedHash)
+		if err == nil && torrentInfo != nil {
+			// 种子存在，更新其分类
+			c.SetCategory(extractedHash, category)
+			return torrentInfo.Hash, nil
+		}
+	}
+
+	// 没有找到 hash，但种子可能已成功添加，返回空字符串（后续 monitor 会处理）
 	return "", nil
+}
+
+// extractHashFromURL 从 URL 中提取 hash
+func extractHashFromURL(url string) string {
+	// 处理 magnet link
+	if strings.HasPrefix(strings.ToLower(url), "magnet:") {
+		// 查找 btih (BitTorrent Info Hash)
+		url = strings.ToLower(url)
+		if idx := strings.Index(url, "btih:"); idx != -1 {
+			hash := url[idx+5:]
+			// 截取到下一个 & 或字符串结束
+			if endIdx := strings.Index(hash, "&"); endIdx != -1 {
+				hash = hash[:endIdx]
+			}
+			// hash 应该是 40 个十六进制字符
+			if len(hash) == 40 {
+				return hash
+			}
+			// 或者是 32 个 base32 字符（需要转换，暂时跳过）
+		}
+	}
+	return ""
+}
+
+// getAllTorrents 获取所有种子
+func (c *qbittorrentClient) getAllTorrents() ([]*TorrentInfo, error) {
+	var torrents []map[string]interface{}
+
+	resp, err := c.client.R().
+		SetResult(&torrents).
+		Get(c.host + "/api/v2/torrents/info")
+
+	if err != nil {
+		return nil, fmt.Errorf("get torrents request failed: %w", err)
+	}
+
+	if resp.StatusCode() != 200 {
+		return nil, fmt.Errorf("get torrents failed: status code %d", resp.StatusCode())
+	}
+
+	result := make([]*TorrentInfo, 0, len(torrents))
+	for _, t := range torrents {
+		info := &TorrentInfo{
+			Hash:     strings.ToLower(fmt.Sprintf("%v", t["hash"])),
+			Name:     fmt.Sprintf("%v", t["name"]),
+			State:    fmt.Sprintf("%v", t["state"]),
+			SavePath: fmt.Sprintf("%v", t["save_path"]),
+			Category: fmt.Sprintf("%v", t["category"]),
+		}
+		if progress, ok := t["progress"].(float64); ok {
+			info.Progress = progress
+		}
+		if size, ok := t["size"].(float64); ok {
+			info.Size = int64(size)
+		}
+		result = append(result, info)
+	}
+
+	return result, nil
 }
 
 // GetTorrentInfo 获取种子信息
@@ -454,4 +548,77 @@ func (c *qbittorrentClient) RenameTorrentFile(hash string, oldPath string, newPa
 	}
 
 	return nil
+}
+
+// SetProxy 设置代理用于下载种子文件
+func (c *qbittorrentClient) SetProxy(proxyURL string) error {
+	if proxyURL == "" {
+		c.proxyClient.RemoveProxy()
+		return nil
+	}
+	c.proxyClient.SetProxy(proxyURL)
+	return nil
+}
+
+// AddTorrentFile 通过文件内容添加种子
+func (c *qbittorrentClient) AddTorrentFile(filename string, fileContent []byte, savePath string, category string) (string, error) {
+	// 获取添加前的种子列表
+	existingTorrents, _ := c.GetTorrentsByCategory(category)
+	existingHashes := make(map[string]bool)
+	for _, t := range existingTorrents {
+		existingHashes[strings.ToLower(t.Hash)] = true
+	}
+
+	// 使用multipart/form-data上传文件
+	req := c.client.R().
+		SetFileReader("torrents", filename, bytes.NewReader(fileContent)).
+		SetFormData(map[string]string{
+			"savepath": savePath,
+		})
+
+	if category != "" {
+		req.SetFormData(map[string]string{
+			"category": category,
+		})
+	}
+
+	resp, err := req.Post(c.host + "/api/v2/torrents/add")
+	if err != nil {
+		return "", fmt.Errorf("add torrent file request failed: %w", err)
+	}
+
+	if resp.StatusCode() != 200 {
+		return "", fmt.Errorf("add torrent file failed: status code %d, body: %s", resp.StatusCode(), string(resp.Body()))
+	}
+
+	// 等待处理
+	time.Sleep(2 * time.Second)
+
+	// 获取新添加的种子
+	updatedTorrents, err := c.GetTorrentsByCategory(category)
+	if err != nil {
+		return "", nil // 不影响结果
+	}
+
+	for _, t := range updatedTorrents {
+		if !existingHashes[strings.ToLower(t.Hash)] {
+			return t.Hash, nil
+		}
+	}
+
+	return "", nil
+}
+
+// DownloadTorrentFile 通过代理下载种子文件
+func (c *qbittorrentClient) DownloadTorrentFile(url string) ([]byte, error) {
+	resp, err := c.proxyClient.R().Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("download torrent file failed: %w", err)
+	}
+
+	if resp.StatusCode() != 200 {
+		return nil, fmt.Errorf("download torrent file failed: status code %d", resp.StatusCode())
+	}
+
+	return resp.Body(), nil
 }
