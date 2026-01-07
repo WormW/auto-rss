@@ -45,3 +45,6 @@ web/.DS_Store
 
 # macOS
 .DS_Store
+
+# Serena MCP
+.serena/
