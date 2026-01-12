@@ -1810,3 +1810,268 @@ func cleanEmptyDirs(dir string) {
 		logger.Debug("Removed empty directory", "dir", dir)
 	}
 }
+
+// RenameFiles 批量重命名订阅的已下载文件
+// POST /api/subscriptions/:id/rename-files
+func (h *SubscriptionHandler) RenameFiles(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Invalid subscription ID",
+		})
+		return
+	}
+
+	// 获取订阅信息
+	subscription, err := h.repo.GetByID(uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"code":    404,
+			"message": "Subscription not found",
+		})
+		return
+	}
+
+	logger.Info("Starting batch rename for subscription",
+		"subscription_id", id,
+		"name", subscription.Name,
+		"client_ip", c.ClientIP())
+
+	// 启动异步任务
+	manager := task.GetManager()
+	taskName := fmt.Sprintf("重命名文件: %s", subscription.Name)
+
+	newTask, err := manager.StartTask(task.TaskTypeCollect, uint(id), taskName, func(ctx context.Context, t *task.Task) error {
+		return h.doRenameFiles(ctx, t, subscription)
+	})
+
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{
+			"code":    409,
+			"message": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "重命名任务已启动",
+		"data": gin.H{
+			"task": newTask,
+		},
+	})
+}
+
+// doRenameFiles 执行批量重命名
+func (h *SubscriptionHandler) doRenameFiles(ctx context.Context, t *task.Task, subscription *model.Subscription) error {
+	manager := task.GetManager()
+	manager.UpdateProgress(0, "正在查询已下载文件...")
+
+	// 获取所有已完成的下载记录
+	completedDownloads, _, err := h.downloadRepo.List(0, 1000, "completed")
+	if err != nil {
+		return fmt.Errorf("failed to get downloads: %w", err)
+	}
+
+	// 过滤出属于当前订阅的下载
+	var downloads []model.Download
+	for _, download := range completedDownloads {
+		if download.SubscriptionID == subscription.ID {
+			downloads = append(downloads, download)
+		}
+	}
+
+	if len(downloads) == 0 {
+		manager.UpdateProgress(100, "没有需要重命名的文件")
+		return nil
+	}
+
+	logger.Info("Found completed downloads",
+		"subscription_id", subscription.ID,
+		"count", len(downloads))
+
+	// 获取重命名模板
+	renameTemplate := "${title}/Season ${season}/${title} S${seasonFormat}E${episodeFormat}"
+	if h.configRepo != nil {
+		if templateConfig, err := h.configRepo.Get("rename_template"); err == nil && templateConfig != nil && templateConfig.Value != "" {
+			renameTemplate = templateConfig.Value
+		}
+	}
+	renameService := downloader.NewRenameService(renameTemplate)
+
+	// 获取基础下载路径
+	basePath := h.downloadPath
+	if h.configRepo != nil {
+		if pathConfig, err := h.configRepo.Get("download_path"); err == nil && pathConfig != nil && pathConfig.Value != "" {
+			basePath = pathConfig.Value
+		}
+	}
+
+	totalFiles := len(downloads)
+	renamedCount := 0
+	movedCount := 0
+	errorCount := 0
+
+	for i, download := range downloads {
+		// 检查取消
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		progress := int((float64(i) / float64(totalFiles)) * 100)
+		manager.UpdateProgress(progress, fmt.Sprintf("正在处理 %d/%d: 第%d集", i+1, totalFiles, download.Episode))
+
+		// 获取种子信息
+		if download.TorrentHash == "" {
+			logger.Warn("Download has no torrent hash, skipping",
+				"download_id", download.ID,
+				"episode", download.Episode)
+			errorCount++
+			continue
+		}
+
+		torrentInfo, err := h.qbClient.GetTorrentInfo(download.TorrentHash)
+		if err != nil {
+			logger.Warn("Failed to get torrent info, skipping",
+				"download_id", download.ID,
+				"hash", download.TorrentHash,
+				"error", err.Error())
+			errorCount++
+			continue
+		}
+
+		// 获取种子文件列表
+		files, err := h.qbClient.GetTorrentFiles(download.TorrentHash)
+		if err != nil {
+			logger.Warn("Failed to get torrent files, skipping",
+				"download_id", download.ID,
+				"hash", download.TorrentHash,
+				"error", err.Error())
+			errorCount++
+			continue
+		}
+
+		if len(files) == 0 {
+			logger.Warn("No files found in torrent, skipping",
+				"download_id", download.ID,
+				"hash", download.TorrentHash)
+			errorCount++
+			continue
+		}
+
+		// 提取主视频文件
+		mainVideoFile := downloader.ExtractFileInfo(files)
+		if mainVideoFile == nil {
+			logger.Warn("No video file found in torrent, skipping",
+				"download_id", download.ID,
+				"hash", download.TorrentHash)
+			errorCount++
+			continue
+		}
+
+		// 生成新的文件名和路径
+		ext := strings.ToLower(filepath.Ext(mainVideoFile.Name))
+		renameCtx := &downloader.RenameContext{
+			Subscription: subscription,
+			Download: &model.Download{
+				Episode: download.Episode,
+			},
+			OriginalName: mainVideoFile.Name,
+			Extension:    ext,
+		}
+		newRelativePath := renameService.GenerateFileName(renameCtx)
+
+		// 分离目录和文件名
+		newDir := filepath.Dir(newRelativePath)
+		newFileName := filepath.Base(newRelativePath)
+		targetLocation := filepath.Join(basePath, newDir)
+
+		// 当前位置
+		currentLocation := torrentInfo.SavePath
+
+		// Step 1: 移动种子到新位置（如果需要）
+		if currentLocation != targetLocation {
+			logger.Info("Moving torrent",
+				"hash", download.TorrentHash,
+				"from", currentLocation,
+				"to", targetLocation)
+
+			if err := h.qbClient.SetLocation(download.TorrentHash, targetLocation); err != nil {
+				logger.Error("Failed to move torrent",
+					"hash", download.TorrentHash,
+					"target", targetLocation,
+					"error", err.Error())
+				errorCount++
+				continue
+			}
+			movedCount++
+			logger.Info("Torrent moved successfully",
+				"hash", download.TorrentHash,
+				"new_location", targetLocation)
+		}
+
+		// Step 2: 重命名文件（如果需要）
+		oldFileName := mainVideoFile.Name
+		oldFileBaseName := filepath.Base(oldFileName)
+
+		if oldFileBaseName != newFileName {
+			// 构建新的相对路径（在种子内部）
+			newFilePath := newFileName
+			if strings.Contains(oldFileName, string(filepath.Separator)) {
+				// 如果原文件在子目录中，保持目录结构但改变文件名
+				oldDir := filepath.Dir(oldFileName)
+				newFilePath = filepath.Join(oldDir, newFileName)
+			}
+
+			logger.Info("Renaming file",
+				"hash", download.TorrentHash,
+				"from", oldFileName,
+				"to", newFilePath)
+
+			if err := h.qbClient.RenameTorrentFile(download.TorrentHash, oldFileName, newFilePath); err != nil {
+				logger.Warn("Failed to rename file",
+					"hash", download.TorrentHash,
+					"error", err.Error())
+				errorCount++
+				continue
+			}
+			renamedCount++
+			logger.Info("File renamed successfully",
+				"hash", download.TorrentHash,
+				"new_name", newFilePath)
+		}
+
+		// 更新数据库中的renamed_path
+		download.RenamedPath = filepath.Join(targetLocation, newFileName)
+		if err := h.downloadRepo.Update(&download); err != nil {
+			logger.Warn("Failed to update download record",
+				"download_id", download.ID,
+				"error", err.Error())
+			// 不算作错误，因为文件操作已成功
+		}
+	}
+
+	manager.UpdateProgress(100, "重命名完成")
+
+	logger.Info("Batch rename completed",
+		"subscription_id", subscription.ID,
+		"total_downloads", totalFiles,
+		"moved", movedCount,
+		"renamed", renamedCount,
+		"errors", errorCount)
+
+	if errorCount > 0 && movedCount == 0 && renamedCount == 0 {
+		return fmt.Errorf("重命名失败，%d 个错误", errorCount)
+	}
+
+	manager.SetResult(map[string]interface{}{
+		"moved":   movedCount,
+		"renamed": renamedCount,
+		"errors":  errorCount,
+	})
+
+	return nil
+}

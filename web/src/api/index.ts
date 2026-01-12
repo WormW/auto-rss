@@ -87,6 +87,8 @@ export const subscriptionApi = {
     api.put(`/subscriptions/${id}`, data),
   delete: (id: number) =>
     api.delete(`/subscriptions/${id}`),
+  renameFiles: (id: number) =>
+    api.post(`/subscriptions/${id}/rename-files`),
   batchImportFromRSS: (items: Array<{title: string, fansub?: string, rss_url?: string, source_id?: number, source_name?: string}>) =>
     api.post('/subscriptions/batch-import-from-rss', { items })
 }
