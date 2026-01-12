@@ -667,8 +667,14 @@ func (h *SubscriptionHandler) EnrichBangumi(c *gin.Context) {
 		"name", subscription.Name,
 		"client_ip", c.ClientIP())
 
+	// 保存原始名称，用于检测是否发生变化
+	originalName := subscription.Name
+
 	// 执行Bangumi数据补全（强制刷新）
 	h.enrichWithBangumiInternal(subscription, true)
+
+	// 检测名称是否发生变化
+	nameChanged := originalName != subscription.Name
 
 	// 更新到数据库
 	if err := h.repo.Update(subscription); err != nil {
@@ -685,7 +691,38 @@ func (h *SubscriptionHandler) EnrichBangumi(c *gin.Context) {
 	logger.Info("Manual Bangumi enrichment completed",
 		"id", id,
 		"bangumi_id", subscription.BangumiID,
-		"has_cover", subscription.BangumiCoverLocal != "")
+		"has_cover", subscription.BangumiCoverLocal != "",
+		"name_changed", nameChanged,
+		"original_name", originalName,
+		"new_name", subscription.Name)
+
+	// 如果名称发生变化，自动触发文件重命名
+	if nameChanged {
+		logger.Info("Subscription name changed, triggering automatic file rename",
+			"subscription_id", id,
+			"old_name", originalName,
+			"new_name", subscription.Name)
+
+		// 启动异步重命名任务
+		go func() {
+			manager := task.GetManager()
+			taskName := fmt.Sprintf("自动重命名文件: %s", subscription.Name)
+
+			_, err := manager.StartTask(task.TaskTypeCollect, uint(id), taskName, func(ctx context.Context, t *task.Task) error {
+				return h.doRenameFiles(ctx, t, subscription)
+			})
+
+			if err != nil {
+				logger.Error("Failed to start automatic rename task",
+					"subscription_id", id,
+					"error", err.Error())
+			} else {
+				logger.Info("Automatic rename task started",
+					"subscription_id", id,
+					"task_name", taskName)
+			}
+		}()
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
@@ -1838,37 +1875,38 @@ func (h *SubscriptionHandler) RenameFiles(c *gin.Context) {
 		"name", subscription.Name,
 		"client_ip", c.ClientIP())
 
-	// 创建后台任务
+	// 启动异步任务
 	manager := task.GetManager()
-	taskID := manager.CreateTask(fmt.Sprintf("重命名订阅文件: %s", subscription.Name))
+	taskName := fmt.Sprintf("重命名文件: %s", subscription.Name)
 
-	// 异步执行重命名
-	go func() {
-		if err := h.performBatchRename(subscription, manager); err != nil {
-			logger.Error("Batch rename failed",
-				"subscription_id", id,
-				"error", err.Error())
-			manager.FailTask(err.Error())
-		} else {
-			manager.CompleteTask()
-		}
-	}()
+	newTask, err := manager.StartTask(task.TaskTypeCollect, uint(id), taskName, func(ctx context.Context, t *task.Task) error {
+		return h.doRenameFiles(ctx, t, subscription)
+	})
+
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{
+			"code":    409,
+			"message": err.Error(),
+		})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
 		"message": "重命名任务已启动",
 		"data": gin.H{
-			"task_id": taskID,
+			"task": newTask,
 		},
 	})
 }
 
-// performBatchRename 执行批量重命名
-func (h *SubscriptionHandler) performBatchRename(subscription *model.Subscription, manager *task.TaskManager) error {
+// doRenameFiles 执行批量重命名
+func (h *SubscriptionHandler) doRenameFiles(ctx context.Context, t *task.Task, subscription *model.Subscription) error {
+	manager := task.GetManager()
 	manager.UpdateProgress(0, "正在查询已下载文件...")
 
 	// 获取所有已完成的下载记录
-	completedDownloads, err := h.downloadRepo.List(0, 1000, "completed")
+	completedDownloads, _, err := h.downloadRepo.List(0, 1000, "completed")
 	if err != nil {
 		return fmt.Errorf("failed to get downloads: %w", err)
 	}
@@ -1913,6 +1951,13 @@ func (h *SubscriptionHandler) performBatchRename(subscription *model.Subscriptio
 	errorCount := 0
 
 	for i, download := range downloads {
+		// 检查取消
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		progress := int((float64(i) / float64(totalFiles)) * 100)
 		manager.UpdateProgress(progress, fmt.Sprintf("正在处理 %d/%d: 第%d集", i+1, totalFiles, download.Episode))
 
