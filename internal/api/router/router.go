@@ -88,6 +88,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			subscriptions.POST("/:id/download-collection", subscriptionHandler.DownloadCollection)
 			subscriptions.POST("/:id/collect-episodes", subscriptionHandler.CollectEpisodes)
 			subscriptions.POST("/:id/reorganize-files", subscriptionHandler.ReorganizeFiles)
+			subscriptions.POST("/:id/rename-files", subscriptionHandler.RenameFiles)
 			subscriptions.POST("/batch-import-from-rss", subscriptionHandler.BatchImportFromRSS)
 		}
 

@@ -212,4 +212,134 @@ onUnmounted(() => {
     transform: rotate(360deg);
   }
 }
+
+/* 增强进度条样式 */
+:deep(.n-progress .n-progress-graph-line-fill) {
+  background: linear-gradient(90deg, #4facfe 0%, #00f2fe 100%);
+  box-shadow: 0 2px 8px rgba(79, 172, 254, 0.3);
+}
+
+/* 卡片悬浮效果 */
+.n-card {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.n-card:hover {
+  transform: translateX(2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}
+
+/* 状态标签渐变 */
+.n-tag {
+  transition: all 0.2s ease;
+  font-weight: 500;
+}
+
+/* 按钮动画增强 */
+.n-button {
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.n-button:hover {
+  transform: scale(1.05);
+}
+
+.n-button:active {
+  transform: scale(0.98);
+}
+
+/* Popover内容区域美化 */
+:deep(.n-popover) {
+  border-radius: 12px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+/* 滚动条美化 */
+:deep(.n-popover__content) {
+  overflow-y: auto;
+}
+
+:deep(.n-popover__content)::-webkit-scrollbar {
+  width: 6px;
+}
+
+:deep(.n-popover__content)::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 3px;
+}
+
+:deep(.n-popover__content)::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #d0d0d0 0%, #b0b0b0 100%);
+  border-radius: 3px;
+}
+
+:deep(.n-popover__content)::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, #b0b0b0 0%, #909090 100%);
+}
+
+/* 当前任务卡片特殊样式 */
+.n-card:first-of-type {
+  background: linear-gradient(135deg, rgba(79, 172, 254, 0.05) 0%, rgba(0, 242, 254, 0.05) 100%);
+  border: 1px solid rgba(79, 172, 254, 0.2);
+}
+
+/* 取消按钮样式 */
+.n-button[type="error"] {
+  background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+  border: none;
+  color: white;
+}
+
+.n-button[type="error"]:hover {
+  box-shadow: 0 4px 12px rgba(245, 87, 108, 0.4);
+}
+
+/* 标题样式 */
+span[style*="font-weight: bold"] {
+  background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  letter-spacing: 0.5px;
+}
+
+/* 任务名称样式 */
+.n-card span:first-child {
+  font-weight: 500;
+  color: inherit;
+}
+
+/* 空状态样式美化 */
+div[style*="text-align: center; color: #999"] {
+  padding: 24px 16px !important;
+  background: linear-gradient(135deg, rgba(102, 126, 234, 0.03) 0%, rgba(118, 75, 162, 0.03) 100%);
+  border-radius: 8px;
+  border: 1px dashed rgba(153, 153, 153, 0.3);
+}
+
+/* 历史任务卡片渐入动画 */
+@keyframes slideInRight {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.n-card {
+  animation: slideInRight 0.3s ease-out backwards;
+}
+
+.n-card:nth-child(1) { animation-delay: 0.05s; }
+.n-card:nth-child(2) { animation-delay: 0.1s; }
+.n-card:nth-child(3) { animation-delay: 0.15s; }
+.n-card:nth-child(4) { animation-delay: 0.2s; }
+.n-card:nth-child(5) { animation-delay: 0.25s; }
 </style>

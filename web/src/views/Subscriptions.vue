@@ -1020,8 +1020,8 @@ onMounted(() => {
 .grid-container {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: 16px;
+  margin-bottom: 16px;
 }
 
 @media (max-width: 768px) {
@@ -1029,4 +1029,156 @@ onMounted(() => {
     grid-template-columns: 1fr;
   }
 }
+
+/* 卡片悬浮效果增强 */
+.n-card {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  border-radius: 12px;
+  overflow: hidden;
+  position: relative;
+}
+
+.n-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 12px 24px -6px rgba(0, 0, 0, 0.12),
+              0 8px 16px -4px rgba(0, 0, 0, 0.08);
+}
+
+/* 封面图悬浮效果 */
+.n-card img {
+  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  border-radius: 8px;
+}
+
+.n-card:hover img {
+  transform: scale(1.05);
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
+}
+
+/* 封面占位渐变优化 */
+.n-card > div > div:first-child > div:last-child {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%);
+  position: relative;
+  overflow: hidden;
+}
+
+.n-card > div > div:first-child > div:last-child::before {
+  content: '';
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: linear-gradient(
+    45deg,
+    transparent 30%,
+    rgba(255, 255, 255, 0.2) 50%,
+    transparent 70%
+  );
+  animation: shine-placeholder 3s infinite;
+}
+
+@keyframes shine-placeholder {
+  0% {
+    transform: translateX(-100%) translateY(-100%) rotate(45deg);
+  }
+  100% {
+    transform: translateX(100%) translateY(100%) rotate(45deg);
+  }
+}
+
+/* 评分徽章玻璃态效果 */
+.n-card > div > div:nth-child(2) > div:first-child {
+  background: rgba(255, 255, 255, 0.95) !important;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  box-shadow: 0 4px 12px rgba(246, 211, 101, 0.3),
+              0 2px 6px rgba(253, 160, 133, 0.2);
+}
+
+@media (prefers-color-scheme: dark) {
+  .n-card > div > div:nth-child(2) > div:first-child {
+    background: rgba(50, 50, 50, 0.9) !important;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+  }
+}
+
+/* 标签渐变效果 */
+.n-tag {
+  transition: all 0.2s ease;
+  border-radius: 6px;
+}
+
+.n-tag:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+/* 按钮微动画 */
+.n-button {
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.n-button:hover {
+  transform: translateY(-1px);
+}
+
+.n-button:active {
+  transform: translateY(0);
+}
+
+/* 开关样式增强 */
+.n-switch {
+  transition: all 0.3s ease;
+}
+
+/* 工具提示样式 */
+.n-tooltip {
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+/* 标题渐变效果 */
+h3 {
+  background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+/* 操作按钮组悬浮效果 */
+.n-card:hover .n-button {
+  opacity: 1;
+}
+
+.n-button {
+  opacity: 0.8;
+  transition: all 0.2s ease;
+}
+
+/* 卡片内容渐入动画 */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.grid-container > .n-card {
+  animation: fadeInUp 0.4s ease-out backwards;
+}
+
+.grid-container > .n-card:nth-child(1) { animation-delay: 0.05s; }
+.grid-container > .n-card:nth-child(2) { animation-delay: 0.1s; }
+.grid-container > .n-card:nth-child(3) { animation-delay: 0.15s; }
+.grid-container > .n-card:nth-child(4) { animation-delay: 0.2s; }
+.grid-container > .n-card:nth-child(5) { animation-delay: 0.25s; }
+.grid-container > .n-card:nth-child(6) { animation-delay: 0.3s; }
 </style>
