@@ -140,6 +140,14 @@ func (h *SubscriptionHandler) enrichWithBangumiInternal(subscription *model.Subs
 	subscription.BangumiID = subject.ID
 	subscription.BangumiScore = subject.Score
 	subscription.BangumiSummary = subject.Summary
+
+	// 使用 name_cn 作为番剧名称（如果有的话）
+	if subject.NameCN != "" {
+		logger.Info("Using Bangumi name_cn as subscription name",
+			"original_name", subscription.Name,
+			"name_cn", subject.NameCN)
+		subscription.Name = subject.NameCN
+	}
 	if subject.Images != nil {
 		subscription.BangumiCover = subject.Images.Large
 
@@ -1424,6 +1432,11 @@ func (h *SubscriptionHandler) BatchImportFromRSS(c *gin.Context) {
 			// DownloadPath 不设置，统一使用系统配置
 		}
 
+		// 先从 Bangumi 获取数据
+		logger.Info("Fetching Bangumi data before creating subscription",
+			"title", item.Title)
+		h.enrichWithBangumi(subscription)
+
 		// 保存订阅
 		if err := h.repo.Create(subscription); err != nil {
 			result.Message = "创建订阅失败: " + err.Error()
@@ -1433,12 +1446,13 @@ func (h *SubscriptionHandler) BatchImportFromRSS(c *gin.Context) {
 			continue
 		}
 
-		// 自动获取Bangumi数据
-		h.enrichWithBangumi(subscription)
-
-		// 保存Bangumi数据
-		if err := h.repo.Update(subscription); err != nil {
-			logger.Error("Failed to update subscription with Bangumi data", "subscription_id", subscription.ID, "error", err)
+		// 如果 enrichWithBangumi 没有在创建前完成，再次尝试更新
+		if subscription.BangumiID == 0 {
+			h.enrichWithBangumi(subscription)
+			// 保存Bangumi数据
+			if err := h.repo.Update(subscription); err != nil {
+				logger.Error("Failed to update subscription with Bangumi data", "subscription_id", subscription.ID, "error", err)
+			}
 		}
 
 		result.Success = true
