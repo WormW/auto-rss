@@ -703,25 +703,33 @@ func (h *SubscriptionHandler) EnrichBangumi(c *gin.Context) {
 			"old_name", originalName,
 			"new_name", subscription.Name)
 
-		// 启动异步重命名任务
-		go func() {
-			manager := task.GetManager()
-			taskName := fmt.Sprintf("自动重命名文件: %s", subscription.Name)
+		// 从数据库重新加载 subscription，避免闭包捕获指针问题
+		subscriptionCopy, err := h.repo.GetByID(uint(id))
+		if err != nil {
+			logger.Error("Failed to reload subscription for rename task",
+				"subscription_id", id,
+				"error", err.Error())
+		} else {
+			// 启动异步重命名任务
+			go func(sub *model.Subscription) {
+				manager := task.GetManager()
+				taskName := fmt.Sprintf("自动重命名文件: %s", sub.Name)
 
-			_, err := manager.StartTask(task.TaskTypeCollect, uint(id), taskName, func(ctx context.Context, t *task.Task) error {
-				return h.doRenameFiles(ctx, t, subscription)
-			})
+				_, err := manager.StartTask(task.TaskTypeCollect, sub.ID, taskName, func(ctx context.Context, t *task.Task) error {
+					return h.doRenameFiles(ctx, t, sub)
+				})
 
-			if err != nil {
-				logger.Error("Failed to start automatic rename task",
-					"subscription_id", id,
-					"error", err.Error())
-			} else {
-				logger.Info("Automatic rename task started",
-					"subscription_id", id,
-					"task_name", taskName)
-			}
-		}()
+				if err != nil {
+					logger.Error("Failed to start automatic rename task",
+						"subscription_id", sub.ID,
+						"error", err.Error())
+				} else {
+					logger.Info("Automatic rename task started",
+						"subscription_id", sub.ID,
+						"task_name", taskName)
+				}
+			}(subscriptionCopy)
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
