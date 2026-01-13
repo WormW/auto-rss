@@ -28,165 +28,88 @@
               v-for="sub in getActiveSubscriptionsByWeekday(week.day)"
               :key="sub.id"
               hoverable
-              style="cursor: default;"
+              class="anime-card"
             >
-              <div style="display: flex; gap: 12px;">
+              <div class="card-content">
                 <!-- 封面图 -->
-                <div style="flex-shrink: 0;">
+                <div class="cover-wrapper">
                   <img
                     v-if="sub.bangumi_cover_local"
                     :src="`http://localhost:7892/covers/${sub.bangumi_cover_local}`"
                     :alt="sub.name"
-                    style="width: 92px; height: 130px; object-fit: cover; border-radius: 4px;"
+                    class="cover-img"
                   />
-                  <div
-                    v-else
-                    class="cover-placeholder"
-                    style="width: 92px; height: 130px; border-radius: 4px; display: flex; align-items: center; justify-content: center; color: white; font-size: 24px; font-weight: bold;"
-                  >
+                  <div v-else class="cover-placeholder">
                     {{ sub.name[0] }}
+                  </div>
+                  <!-- 评分徽章 -->
+                  <div v-if="sub.bangumi_score && sub.bangumi_score > 0" class="score-badge">
+                    {{ sub.bangumi_score.toFixed(1) }}
                   </div>
                 </div>
 
-                <!-- 内容区 -->
-                <div style="flex: 1; min-width: 0; position: relative; padding-right: 80px;">
-                  <!-- Bangumi评分 - 右上角 -->
-                  <div v-if="sub.bangumi_score && sub.bangumi_score > 0" class="score-badge" style="position: absolute; top: 0; right: 0;">
-                    {{ sub.bangumi_score.toFixed(1) }}
+                <!-- 信息区 -->
+                <div class="info-section">
+                  <!-- 标题行 -->
+                  <div class="title-row">
+                    <n-ellipsis class="title">{{ sub.name }}</n-ellipsis>
+                    <n-switch
+                      :value="sub.enabled"
+                      @update:value="(val) => handleToggle(sub.id, val)"
+                      size="small"
+                    />
                   </div>
 
-                  <div style="padding-bottom: 50px;">
-                    <!-- 标题 -->
-                    <n-ellipsis style="max-width: 250px; font-weight: 500; font-size: 16px; margin-bottom: 8px;">
-                      {{ sub.name }}
-                    </n-ellipsis>
+                  <!-- 标签组 -->
+                  <div class="tags-row">
+                    <n-tag v-if="sub.air_year" size="small" type="primary">
+                      {{ getYearSeasonLabel(sub.air_year, sub.air_date) }}
+                    </n-tag>
+                    <n-tag size="small">S{{ sub.season }}</n-tag>
+                    <n-tag size="small" type="info" v-if="sub.fansub">{{ sub.fansub }}</n-tag>
+                    <n-tag
+                      v-if="sub.bangumi_id"
+                      size="small"
+                      style="cursor: pointer;"
+                      @click="openBangumiPage(sub.bangumi_id)"
+                    >BGM</n-tag>
+                  </div>
 
-                    <!-- RSS 地址 -->
-                    <n-ellipsis :line-clamp="2" style="font-size: 12px; color: var(--n-text-color-2); margin-bottom: 12px;">
-                      {{ sub.rss_url }}
-                    </n-ellipsis>
-
-                    <!-- 标签组 -->
-                    <n-space :size="4" :wrap="true" style="margin-bottom: 8px; max-width: 100%;">
-                      <!-- Bangumi ID 标签 -->
-                      <n-tooltip v-if="sub.bangumi_id" trigger="hover">
-                        <template #trigger>
-                          <n-tag
-                            size="small"
-                            style="cursor: pointer;"
-                            @click="openBangumiPage(sub.bangumi_id)"
-                          >
-                            🔗 BGM:{{ sub.bangumi_id }}
-                          </n-tag>
-                        </template>
-                        点击查看 Bangumi 页面
-                      </n-tooltip>
-                      <!-- 年份季度标签 -->
-                      <n-tag v-if="sub.air_year" size="small" type="primary">
-                        {{ getYearSeasonLabel(sub.air_year, sub.air_date) }}
-                      </n-tag>
-                      <n-tag size="small">第 {{ sub.season }} 季</n-tag>
-                      <n-tag size="small" :type="sub.enabled ? 'success' : 'default'">
-                        {{ sub.enabled ? '已启用' : '未启用' }}
-                      </n-tag>
-                      <n-tag size="small" type="info" v-if="sub.fansub">
-                        {{ sub.fansub }}
-                      </n-tag>
-                      <n-tooltip trigger="hover" v-if="sub.current_episode || sub.total_episodes || sub.latest_episode">
-                        <template #trigger>
-                          <n-space :size="4">
-                            <n-tag size="small" type="info" v-if="sub.latest_episode">
-                              📺 更新至 {{ sub.latest_episode }} 集
-                            </n-tag>
-                            <n-tag
-                              size="small"
-                              :type="getCollectionTagType(sub)"
-                            >
-                              📂 收集 {{ sub.current_episode || 0 }} / {{ sub.total_episodes || '?' }}
-                            </n-tag>
-                          </n-space>
-                        </template>
-                        <div style="font-size: 13px; line-height: 1.6;">
-                          <div v-if="sub.latest_episode">
-                            <strong>📺 最新更新:</strong> 第 {{ sub.latest_episode }} 集
-                          </div>
-                          <div>
-                            <strong>📂 已收集:</strong> {{ sub.current_episode || 0 }} 集
-                          </div>
-                          <div>
-                            <strong>📊 总集数:</strong> {{ sub.total_episodes || '未知' }}
-                          </div>
-                          <div v-if="sub.downloading_count !== undefined && sub.downloading_count > 0" style="margin-top: 4px; color: #18a058;">
-                            <strong>⬇️ 下载中:</strong> {{ sub.downloading_count }} 个资源
-                          </div>
-                          <div v-if="sub.latest_episode && sub.current_episode < sub.latest_episode" style="margin-top: 4px; color: #f0a020;">
-                            ⚠️ 未收集最新 {{ sub.latest_episode - sub.current_episode }} 集
-                          </div>
-                          <div v-else-if="sub.latest_episode && sub.current_episode === sub.latest_episode" style="margin-top: 4px; color: #18a058;">
-                            ✅ 已全部收集最新剧集
-                          </div>
+                  <!-- 进度条 -->
+                  <div class="progress-row" v-if="sub.current_episode || sub.total_episodes">
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <div class="progress-info">
+                          <span>{{ sub.current_episode || 0 }} / {{ sub.total_episodes || '?' }}</span>
+                          <span v-if="sub.latest_episode" class="latest-ep">更新至 {{ sub.latest_episode }}</span>
                         </div>
-                      </n-tooltip>
-                    </n-space>
-
-                    <!-- 最后下载时间 -->
-                    <div v-if="sub.last_download_at" style="font-size: 12px; color: var(--n-text-color-3);">
-                      {{ formatTime(sub.last_download_at) }}
-                    </div>
+                      </template>
+                      <div style="font-size: 12px;">
+                        <div>已收集: {{ sub.current_episode || 0 }} 集</div>
+                        <div>总集数: {{ sub.total_episodes || '未知' }}</div>
+                        <div v-if="sub.latest_episode">最新: 第 {{ sub.latest_episode }} 集</div>
+                      </div>
+                    </n-tooltip>
                   </div>
 
-                  <!-- 操作区域 -->
-                  <div style="position: absolute; right: 0; bottom: 0; display: flex; gap: 8px; align-items: flex-end;">
-                    <!-- 控制按钮组 -->
-                    <div style="display: flex; flex-direction: column; gap: 4px;">
-                      <n-tooltip trigger="hover">
-                        <template #trigger>
-                          <n-button text @click="handleEnrichBangumi(sub.id)">
-                            <template #icon>
-                              <n-icon><ReloadOutlined /></n-icon>
-                            </template>
-                          </n-button>
-                        </template>
-                        补全番剧信息
-                      </n-tooltip>
-                      <n-tooltip trigger="hover">
-                        <template #trigger>
-                          <n-button text @click="handleCollectEpisodes(sub.id)">
-                            <template #icon>
-                              <n-icon><DownloadOutlined /></n-icon>
-                            </template>
-                          </n-button>
-                        </template>
-                        收集剧集
-                      </n-tooltip>
-                      <n-tooltip trigger="hover">
-                        <template #trigger>
-                          <n-button text @click="handleReorganizeFiles(sub.id)">
-                            <template #icon>
-                              <n-icon><FolderOpenOutlined /></n-icon>
-                            </template>
-                          </n-button>
-                        </template>
-                        整理文件
-                      </n-tooltip>
-                      <n-switch
-                        :value="sub.enabled"
-                        @update:value="(val) => handleToggle(sub.id, val)"
-                        size="small"
-                      />
-                    </div>
-
-                    <!-- 编辑删除按钮 -->
-                    <div style="display: flex; flex-direction: column; gap: 4px;">
-                      <n-button text @click="handleEdit(sub)">
-                        <template #icon>
-                          <n-icon><EditOutlined /></n-icon>
-                        </template>
+                  <!-- 底部操作栏 -->
+                  <div class="action-row">
+                    <span v-if="sub.last_download_at" class="last-time">{{ formatTime(sub.last_download_at) }}</span>
+                    <div class="action-buttons">
+                      <n-button text size="small" @click="handleEnrichBangumi(sub.id)">
+                        <template #icon><n-icon size="16"><ReloadOutlined /></n-icon></template>
                       </n-button>
-                      <n-button text type="error" @click="handleDelete(sub.id)">
-                        <template #icon>
-                          <n-icon><DeleteOutlined /></n-icon>
-                        </template>
+                      <n-button text size="small" @click="handleCollectEpisodes(sub.id)">
+                        <template #icon><n-icon size="16"><DownloadOutlined /></n-icon></template>
+                      </n-button>
+                      <n-button text size="small" @click="handleReorganizeFiles(sub.id)">
+                        <template #icon><n-icon size="16"><FolderOpenOutlined /></n-icon></template>
+                      </n-button>
+                      <n-button text size="small" @click="handleEdit(sub)">
+                        <template #icon><n-icon size="16"><EditOutlined /></n-icon></template>
+                      </n-button>
+                      <n-button text size="small" type="error" @click="handleDelete(sub.id)">
+                        <template #icon><n-icon size="16"><DeleteOutlined /></n-icon></template>
                       </n-button>
                     </div>
                   </div>
@@ -205,141 +128,59 @@
             v-for="sub in completedSubscriptions"
             :key="sub.id"
             hoverable
-            style="cursor: default;"
+            class="anime-card"
           >
-            <div style="display: flex; gap: 12px;">
+            <div class="card-content">
               <!-- 封面图 -->
-              <div style="flex-shrink: 0;">
+              <div class="cover-wrapper">
                 <img
                   v-if="sub.bangumi_cover_local"
                   :src="`http://localhost:7892/covers/${sub.bangumi_cover_local}`"
                   :alt="sub.name"
-                  style="width: 92px; height: 130px; object-fit: cover; border-radius: 4px;"
+                  class="cover-img"
                 />
-              <div
-                    v-else
-                    class="cover-placeholder"
-                    style="width: 92px; height: 130px; border-radius: 4px; display: flex; align-items: center; justify-content: center; color: white; font-size: 24px; font-weight: bold;"
-                  >
-                    {{ sub.name[0] }}
-                  </div>
-              </div>
-
-              <!-- 内容区 -->
-              <div style="flex: 1; min-width: 0; position: relative; padding-right: 80px;">
-                <!-- Bangumi评分 - 右上角 -->
-                <div v-if="sub.bangumi_score && sub.bangumi_score > 0" class="score-badge" style="position: absolute; top: 0; right: 0;">
+                <div v-else class="cover-placeholder">
+                  {{ sub.name[0] }}
+                </div>
+                <div v-if="sub.bangumi_score && sub.bangumi_score > 0" class="score-badge">
                   {{ sub.bangumi_score.toFixed(1) }}
                 </div>
+              </div>
 
-                <div style="padding-bottom: 50px;">
-                  <!-- 标题 -->
-                  <n-ellipsis style="max-width: 250px; font-weight: 500; font-size: 16px; margin-bottom: 8px;">
-                    {{ sub.name }}
-                  </n-ellipsis>
+              <!-- 信息区 -->
+              <div class="info-section">
+                <div class="title-row">
+                  <n-ellipsis class="title">{{ sub.name }}</n-ellipsis>
+                  <n-tag size="small" type="default">完结</n-tag>
+                </div>
 
-                  <!-- RSS 地址 -->
-                  <n-ellipsis :line-clamp="2" style="font-size: 12px; color: var(--n-text-color-2); margin-bottom: 12px;">
-                    {{ sub.rss_url }}
-                  </n-ellipsis>
+                <div class="tags-row">
+                  <n-tag v-if="sub.air_year" size="small" type="primary">
+                    {{ getYearSeasonLabel(sub.air_year, sub.air_date) }}
+                  </n-tag>
+                  <n-tag size="small">S{{ sub.season }}</n-tag>
+                  <n-tag size="small" type="info" v-if="sub.fansub">{{ sub.fansub }}</n-tag>
+                </div>
 
-                  <!-- 标签组 -->
-                  <n-space :size="4" :wrap="true" style="margin-bottom: 8px; max-width: 100%;">
-                    <!-- 年份季度标签 -->
-                    <n-tag v-if="sub.air_year" size="small" type="primary">
-                      {{ getYearSeasonLabel(sub.air_year, sub.air_date) }}
-                    </n-tag>
-                    <n-tag size="small">第 {{ sub.season }} 季</n-tag>
-                    <n-tag size="small" type="default">已完结</n-tag>
-                    <n-tag size="small" type="info" v-if="sub.fansub">
-                      {{ sub.fansub }}
-                    </n-tag>
-                    <n-tooltip trigger="hover" v-if="sub.current_episode || sub.total_episodes || sub.latest_episode">
-                      <template #trigger>
-                        <n-space :size="4">
-                          <n-tag size="small" type="warning" v-if="sub.latest_episode">
-                            📺 更新至 {{ sub.latest_episode }} 集
-                          </n-tag>
-                          <n-tag size="small" :type="sub.current_episode === sub.total_episodes && sub.total_episodes > 0 ? 'success' : 'info'">
-                            📂 收集 {{ sub.current_episode || 0 }} / {{ sub.total_episodes || '?' }} 集
-                          </n-tag>
-                        </n-space>
-                      </template>
-                      <div>
-                        <div v-if="sub.latest_episode">
-                          <strong>📺 最新更新:</strong> 第 {{ sub.latest_episode }} 集
-                        </div>
-                        <div>
-                          <strong>📂 已收集:</strong> {{ sub.current_episode || 0 }} 集
-                        </div>
-                        <div>
-                          <strong>📊 总集数:</strong> {{ sub.total_episodes || '未知' }}
-                        </div>
-                        <div v-if="sub.current_episode < sub.total_episodes && sub.total_episodes > 0" style="margin-top: 4px; color: #d03050;">
-                          ⚠️ 还缺 {{ sub.total_episodes - sub.current_episode }} 集
-                        </div>
-                      </div>
-                    </n-tooltip>
-                  </n-space>
-
-                  <!-- 最后下载时间 -->
-                  <div v-if="sub.last_download_at" style="font-size: 12px; color: var(--n-text-color-3);">
-                    {{ formatTime(sub.last_download_at) }}
+                <div class="progress-row" v-if="sub.current_episode || sub.total_episodes">
+                  <div class="progress-info">
+                    <span :style="{ color: sub.current_episode >= sub.total_episodes ? '#18a058' : '' }">
+                      {{ sub.current_episode || 0 }} / {{ sub.total_episodes || '?' }}
+                    </span>
                   </div>
                 </div>
 
-                <!-- 操作区域 -->
-                <div style="position: absolute; right: 0; bottom: 0; display: flex; gap: 8px; align-items: flex-end;">
-                  <!-- 控制按钮组 -->
-                  <div style="display: flex; flex-direction: column; gap: 4px;">
-                    <n-tooltip trigger="hover">
-                      <template #trigger>
-                        <n-button text @click="handleEnrichBangumi(sub.id)">
-                          <template #icon>
-                            <n-icon><ReloadOutlined /></n-icon>
-                          </template>
-                        </n-button>
-                      </template>
-                      补全番剧信息
-                    </n-tooltip>
-                    <n-tooltip trigger="hover">
-                      <template #trigger>
-                        <n-button text @click="handleCollectEpisodes(sub.id)">
-                          <template #icon>
-                            <n-icon><DownloadOutlined /></n-icon>
-                          </template>
-                        </n-button>
-                      </template>
-                      收集剧集
-                    </n-tooltip>
-                    <n-tooltip trigger="hover">
-                      <template #trigger>
-                        <n-button text @click="handleReorganizeFiles(sub.id)">
-                          <template #icon>
-                            <n-icon><FolderOpenOutlined /></n-icon>
-                          </template>
-                        </n-button>
-                      </template>
-                      整理文件
-                    </n-tooltip>
-                    <n-switch
-                      :value="sub.enabled"
-                      @update:value="(val) => handleToggle(sub.id, val)"
-                      size="small"
-                    />
-                  </div>
-
-                  <!-- 编辑删除按钮 -->
-                  <div style="display: flex; flex-direction: column; gap: 4px;">
-                    <n-button text @click="handleEdit(sub)">
-                      <template #icon>
-                        <n-icon><EditOutlined /></n-icon>
-                      </template>
+                <div class="action-row">
+                  <span v-if="sub.last_download_at" class="last-time">{{ formatTime(sub.last_download_at) }}</span>
+                  <div class="action-buttons">
+                    <n-button text size="small" @click="handleCollectEpisodes(sub.id)">
+                      <template #icon><n-icon size="16"><DownloadOutlined /></n-icon></template>
                     </n-button>
-                    <n-button text type="error" @click="handleDelete(sub.id)">
-                      <template #icon>
-                        <n-icon><DeleteOutlined /></n-icon>
-                      </template>
+                    <n-button text size="small" @click="handleEdit(sub)">
+                      <template #icon><n-icon size="16"><EditOutlined /></n-icon></template>
+                    </n-button>
+                    <n-button text size="small" type="error" @click="handleDelete(sub.id)">
+                      <template #icon><n-icon size="16"><DeleteOutlined /></n-icon></template>
                     </n-button>
                   </div>
                 </div>
@@ -1021,52 +862,129 @@ onMounted(() => {
 <style scoped>
 .grid-container {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
   gap: 16px;
-  margin-bottom: 16px;
 }
 
 @media (max-width: 768px) {
-  .grid-container {
-    grid-template-columns: 1fr;
-  }
+  .grid-container { grid-template-columns: 1fr; }
 }
 
-/* 卡片样式 */
+/* 卡片 */
+.anime-card { cursor: default; }
 :deep(.n-card) {
   border-radius: 12px;
-  transition: transform 0.3s ease, box-shadow 0.3s ease;
+  transition: transform 0.2s, box-shadow 0.2s;
 }
-
 :deep(.n-card:hover) {
-  transform: translateY(-4px);
-  box-shadow: 0 12px 24px -6px rgba(0, 0, 0, 0.12);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.1);
 }
 
-/* 封面图 */
-:deep(.n-card img) {
-  border-radius: 8px;
-  transition: transform 0.3s ease;
+/* 卡片内容布局 */
+.card-content {
+  display: flex;
+  gap: 12px;
 }
 
-:deep(.n-card:hover img) {
-  transform: scale(1.03);
+/* 封面区域 */
+.cover-wrapper {
+  position: relative;
+  flex-shrink: 0;
 }
-
-/* 封面占位 */
+.cover-img {
+  width: 80px;
+  height: 112px;
+  object-fit: cover;
+  border-radius: 6px;
+}
 .cover-placeholder {
+  width: 80px;
+  height: 112px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-size: 24px;
+  font-weight: bold;
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
 }
-
-/* 评分徽章 */
 .score-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
   background: linear-gradient(135deg, #f6d365 0%, #fda085 100%);
   color: white;
-  padding: 4px 10px;
-  border-radius: 12px;
-  font-size: 13px;
+  padding: 2px 6px;
+  border-radius: 8px;
+  font-size: 11px;
   font-weight: 600;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+/* 信息区域 */
+.info-section {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 标题行 */
+.title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.title {
+  font-weight: 600;
+  font-size: 15px;
+  flex: 1;
+  min-width: 0;
+}
+
+/* 标签行 */
+.tags-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* 进度行 */
+.progress-row {
+  font-size: 12px;
+  color: var(--n-text-color-3);
+}
+.progress-info {
+  display: flex;
+  gap: 8px;
+}
+.latest-ep {
+  color: var(--n-color-target);
+}
+
+/* 操作行 */
+.action-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: auto;
+  padding-top: 4px;
+}
+.last-time {
+  font-size: 11px;
+  color: var(--n-text-color-3);
+}
+.action-buttons {
+  display: flex;
+  gap: 2px;
+  opacity: 0.6;
+  transition: opacity 0.2s;
+}
+.anime-card:hover .action-buttons {
+  opacity: 1;
 }
 
 /* 标题渐变 */
@@ -1076,15 +994,5 @@ h3 {
   -webkit-text-fill-color: transparent;
   background-clip: text;
   font-weight: 600;
-}
-
-/* 卡片渐入动画 */
-.grid-container > :deep(.n-card) {
-  animation: fadeInUp 0.4s ease-out backwards;
-}
-
-@keyframes fadeInUp {
-  from { opacity: 0; transform: translateY(20px); }
-  to { opacity: 1; transform: translateY(0); }
 }
 </style>
