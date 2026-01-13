@@ -35,7 +35,6 @@ func InitWithDB(level string, db *gorm.DB) error {
 	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 	encoder := zapcore.NewJSONEncoder(encoderConfig)
 
-	// 标准输出
 	consoleCore := zapcore.NewCore(
 		encoder,
 		zapcore.AddSync(os.Stderr),
@@ -44,18 +43,16 @@ func InitWithDB(level string, db *gorm.DB) error {
 
 	cores := []zapcore.Core{consoleCore}
 
-	// 如果提供了数据库连接,添加数据库写入器
 	if db != nil {
 		dbWriter := NewDBWriter(db)
 		dbCore := zapcore.NewCore(
 			encoder,
 			zapcore.AddSync(dbWriter),
-			zapLevel,
+			zapcore.InfoLevel,
 		)
 		cores = append(cores, dbCore)
 	}
 
-	// 创建多核心logger
 	core := zapcore.NewTee(cores...)
 	logger := zap.New(core, zap.AddCaller())
 
