@@ -399,4 +399,14 @@ defineExpose({ show })
 .n-collapse-item :deep(.n-collapse-item__header) {
   font-weight: 500;
 }
+
+/* 字幕组卡片样式优化 */
+:deep(.n-card) {
+  background: var(--n-color);
+  border: 1px solid var(--n-border-color);
+}
+
+:deep(.n-card.n-card--hoverable:hover) {
+  border-color: var(--n-color-target);
+}
 </style>
