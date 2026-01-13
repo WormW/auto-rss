@@ -459,6 +459,10 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 		return
 	}
 
+	// 保存原始值用于检测变化
+	originalName := existing.Name
+	originalSeason := existing.Season
+
 	// 绑定更新数据到 map，只更新提供的字段
 	var updates map[string]interface{}
 	if err := c.ShouldBindJSON(&updates); err != nil {
@@ -557,6 +561,29 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 	// 如果合集种子地址发生变化，自动触发下载
 	if shouldDownloadCollection {
 		go h.downloadCollectionTorrent(existing)
+	}
+
+	// 如果名称或季度发生变化，自动触发文件重命名
+	if existing.Name != originalName || existing.Season != originalSeason {
+		logger.Info("Subscription name or season changed, triggering automatic file rename",
+			"subscription_id", id,
+			"old_name", originalName,
+			"new_name", existing.Name,
+			"old_season", originalSeason,
+			"new_season", existing.Season)
+
+		go func(sub *model.Subscription) {
+			manager := task.GetManager()
+			taskName := fmt.Sprintf("自动重命名文件: %s", sub.Name)
+			_, err := manager.StartTask(task.TaskTypeCollect, sub.ID, taskName, func(ctx context.Context, t *task.Task) error {
+				return h.doRenameFiles(ctx, t, sub)
+			})
+			if err != nil {
+				logger.Error("Failed to start automatic rename task",
+					"subscription_id", sub.ID,
+					"error", err.Error())
+			}
+		}(existing)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -1310,11 +1337,11 @@ type BatchImportFromRSSRequest struct {
 
 // RSSAnimeImportItem RSS番剧导入项
 type RSSAnimeImportItem struct {
-	Title      string `json:"title" binding:"required"`       // 番剧名称
-	Fansub     string `json:"fansub"`                          // 字幕组
-	RssURL     string `json:"rss_url"`                         // RSS URL
-	SourceID   uint   `json:"source_id"`                       // RSS源ID
-	SourceName string `json:"source_name"`                     // RSS源名称
+	Title      string `json:"title" binding:"required"` // 番剧名称
+	Fansub     string `json:"fansub"`                   // 字幕组
+	RssURL     string `json:"rss_url"`                  // RSS URL
+	SourceID   uint   `json:"source_id"`                // RSS源ID
+	SourceName string `json:"source_name"`              // RSS源名称
 }
 
 // BatchImportFromRSS 从RSS批量导入订阅
@@ -1342,10 +1369,10 @@ func (h *SubscriptionHandler) BatchImportFromRSS(c *gin.Context) {
 
 	// 批量导入结果
 	type ImportResult struct {
-		Title      string `json:"title"`
-		Success    bool   `json:"success"`
-		Message    string `json:"message"`
-		Skipped    bool   `json:"skipped"`     // 是否跳过(已存在)
+		Title        string              `json:"title"`
+		Success      bool                `json:"success"`
+		Message      string              `json:"message"`
+		Skipped      bool                `json:"skipped"` // 是否跳过(已存在)
 		Subscription *model.Subscription `json:"subscription,omitempty"`
 	}
 
