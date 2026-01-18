@@ -237,6 +237,9 @@ func (m *DownloadMonitor) updateDownloadStatus(torrent *TorrentInfo) {
 	// 检查状态是否发生变化
 	oldStatus := download.Status
 	newStatus := mapQBStateToStatus(torrent.State)
+	if newStatus == "downloading" && isTorrentComplete(torrent) {
+		newStatus = "completed"
+	}
 
 	if oldStatus == newStatus {
 		return
@@ -553,13 +556,23 @@ func mapQBStateToStatus(qbState string) string {
 	// error: 错误
 
 	switch {
-	case strings.Contains(qbState, "error"):
+	case strings.Contains(qbState, "error") || qbState == "missingFiles":
 		return "failed"
-	case qbState == "uploading" || qbState == "pausedUP" || qbState == "queuedUP" || qbState == "stalledUP":
+	case qbState == "uploading" || strings.HasSuffix(qbState, "UP"):
 		return "completed"
 	default:
 		// 所有其他状态（downloading, pausedDL, queuedDL, stalledDL, metaDL, checkingDL等）
 		// 都认为是下载中，只要种子已添加到qBittorrent就保持downloading状态
 		return "downloading"
 	}
+}
+
+func isTorrentComplete(torrent *TorrentInfo) bool {
+	if torrent == nil {
+		return false
+	}
+	if torrent.Size > 0 && torrent.Downloaded >= torrent.Size {
+		return true
+	}
+	return torrent.Progress >= 0.9999
 }
