@@ -11,6 +11,7 @@ type SubscriptionRepository interface {
 	Update(subscription *model.Subscription) error
 	Delete(id uint) error
 	GetByID(id uint) (*model.Subscription, error)
+	GetByRSSURL(rssURL string) (*model.Subscription, error)
 	List(offset, limit int) ([]model.Subscription, int64, error)
 	GetActiveSubscriptions() ([]model.Subscription, error)
 }
@@ -49,6 +50,16 @@ func (r *subscriptionRepository) GetByID(id uint) (*model.Subscription, error) {
 	return &subscription, nil
 }
 
+// GetByRSSURL 根据 RSS URL 获取订阅
+func (r *subscriptionRepository) GetByRSSURL(rssURL string) (*model.Subscription, error) {
+	var subscription model.Subscription
+	err := r.db.Where("rss_url = ?", rssURL).First(&subscription).Error
+	if err != nil {
+		return nil, err
+	}
+	return &subscription, nil
+}
+
 // List 获取订阅列表
 func (r *subscriptionRepository) List(offset, limit int) ([]model.Subscription, int64, error) {
 	var subscriptions []model.Subscription
@@ -58,6 +69,14 @@ func (r *subscriptionRepository) List(offset, limit int) ([]model.Subscription, 
 		return nil, 0, err
 	}
 
+	if limit <= 0 {
+		err := r.db.Find(&subscriptions).Error
+		return subscriptions, total, err
+	}
+
+	if offset < 0 {
+		offset = 0
+	}
 	err := r.db.Offset(offset).Limit(limit).Find(&subscriptions).Error
 	return subscriptions, total, err
 }

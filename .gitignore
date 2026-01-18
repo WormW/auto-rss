@@ -34,9 +34,13 @@ claudedocs/
 *.out
 coverage.txt
 
+# 构建缓存
+.cache/
+
 # 前端
 web/node_modules/
 web/dist/
+internal/webui/dist/
 web/.DS_Store
 
 # 环境变量

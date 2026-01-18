@@ -162,7 +162,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted } from 'vue'
 import {
   NCard,
   NForm,
@@ -226,10 +226,10 @@ const loadRenamePresets = async () => {
     if (res.code === 0 && res.data) {
       // 构建预设选项
       const presets = res.data.presets || {}
-      presetOptions.value = Object.entries(presets).map(([key, value]) => ({
-        label: getPresetLabel(key),
-        value: key
-      }))
+    presetOptions.value = Object.entries(presets).map(([key]) => ({
+      label: getPresetLabel(key),
+      value: key
+    }))
 
       // 保存变量说明
       templateVariables.value = res.data.variables || {}
@@ -455,7 +455,7 @@ const testConnection = async () => {
   }
 
   try {
-    message.loading('正在测试连接...', { duration: 0, key: 'test-qb' })
+    message.loading('正在测试连接...', { duration: 0 })
     await configApi.testQBittorrent(
       qbConfig.value.host,
       qbConfig.value.username,

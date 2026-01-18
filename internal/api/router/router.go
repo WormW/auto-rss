@@ -1,6 +1,9 @@
 package router
 
 import (
+	"io/fs"
+	"net/http"
+
 	"github.com/WormW/auto-rss/internal/api/handler"
 	"github.com/WormW/auto-rss/internal/api/middleware"
 	"github.com/WormW/auto-rss/internal/app"
@@ -8,6 +11,7 @@ import (
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/rss"
+	"github.com/WormW/auto-rss/internal/webui"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
@@ -156,11 +160,23 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	})
 
 	// 静态文件服务 (前端)
-	r.Static("/assets", "./web/dist/assets")
-	r.StaticFile("/", "./web/dist/index.html")
-	r.NoRoute(func(c *gin.Context) {
-		c.File("./web/dist/index.html")
-	})
+	if distFS, err := webui.DistFS(); err == nil {
+		if assetsFS, err := fs.Sub(distFS, "assets"); err == nil {
+			r.StaticFS("/assets", http.FS(assetsFS))
+		}
+
+		serveIndex := func(c *gin.Context) {
+			indexHTML, err := fs.ReadFile(distFS, "index.html")
+			if err != nil {
+				c.Status(http.StatusNotFound)
+				return
+			}
+			c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
+		}
+
+		r.GET("/", serveIndex)
+		r.NoRoute(serveIndex)
+	}
 
 	return r
 }

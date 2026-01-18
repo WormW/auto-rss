@@ -1,4 +1,7 @@
-.PHONY: all build clean run test docker-build docker-run web-install web-build web-dev
+.PHONY: all build build-embed clean run test docker-build docker-run web-install web-build web-dev web-embed
+
+GOCACHE_DIR ?= $(CURDIR)/.cache/go-build
+GOMODCACHE_DIR ?= $(CURDIR)/.cache/go-mod
 
 # 默认目标
 all: build
@@ -6,18 +9,24 @@ all: build
 # 构建后端
 build:
 	@echo "Building backend..."
-	@go build -ldflags="-s -w" -o bin/auto-rss ./cmd/server
+	@GOCACHE=$(GOCACHE_DIR) GOMODCACHE=$(GOMODCACHE_DIR) go build -ldflags="-s -w" -o bin/auto-rss ./cmd/server
+
+# 构建后端 (嵌入前端资源)
+build-embed: web-embed
+	@echo "Building backend with embedded frontend..."
+	@GOCACHE=$(GOCACHE_DIR) GOMODCACHE=$(GOMODCACHE_DIR) go build -tags embed -ldflags="-s -w" -o bin/auto-rss ./cmd/server
 
 # 构建用于生产的静态链接二进制
 build-static:
 	@echo "Building static binary..."
-	@CGO_ENABLED=1 go build -ldflags="-s -w -extldflags '-static'" -o bin/auto-rss ./cmd/server
+	@GOCACHE=$(GOCACHE_DIR) GOMODCACHE=$(GOMODCACHE_DIR) CGO_ENABLED=1 go build -ldflags="-s -w -extldflags '-static'" -o bin/auto-rss ./cmd/server
 
 # 清理构建产物
 clean:
 	@echo "Cleaning..."
 	@rm -rf bin/
 	@rm -rf web/dist/
+	@rm -rf internal/webui/dist/
 	@rm -rf data/
 
 # 运行后端
@@ -39,6 +48,13 @@ web-install:
 web-build: web-install
 	@echo "Building frontend..."
 	@cd web && npm run build
+
+# 准备嵌入的前端资源
+web-embed: web-build
+	@echo "Preparing embedded frontend..."
+	@rm -rf internal/webui/dist/
+	@mkdir -p internal/webui/dist
+	@cp -R web/dist/* internal/webui/dist/
 
 # 运行前端开发服务器
 web-dev: web-install
@@ -80,12 +96,14 @@ deps:
 help:
 	@echo "Available targets:"
 	@echo "  make build         - Build backend"
+	@echo "  make build-embed   - Build backend with embedded frontend"
 	@echo "  make build-static  - Build static binary"
 	@echo "  make clean         - Clean build artifacts"
 	@echo "  make run           - Run backend"
 	@echo "  make test          - Run tests"
 	@echo "  make web-install   - Install frontend dependencies"
 	@echo "  make web-build     - Build frontend"
+	@echo "  make web-embed     - Prepare embedded frontend assets"
 	@echo "  make web-dev       - Run frontend dev server"
 	@echo "  make docker-build  - Build Docker image"
 	@echo "  make docker-run    - Run Docker container"
