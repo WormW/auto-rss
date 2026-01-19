@@ -12,7 +12,6 @@ type Subscription struct {
 	FilterKeywords  string     `json:"filter_keywords" gorm:"type:text"`   // JSON array
 	ExcludeKeywords string     `json:"exclude_keywords" gorm:"type:text"`  // JSON array
 	SubgroupID      *int       `json:"subgroup_id" gorm:"index"`           // 字幕组 ID (可选)
-	DownloadPath    string     `json:"download_path"`
 	RenameEnabled   bool       `json:"rename_enabled" gorm:"default:true"`
 	LastCheckTime   *time.Time `json:"last_check_time"`
 

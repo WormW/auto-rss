@@ -24,7 +24,6 @@ export interface Subscription {
   filter_keywords: string
   exclude_keywords: string
   subgroup_id?: number
-  download_path: string
   rename_enabled: boolean
   last_check_time?: string
   created_at: string

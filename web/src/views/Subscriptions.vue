@@ -337,10 +337,6 @@
                 <n-input-number v-model:value="formData.episode_offset" style="width: 100%;" />
               </n-form-item>
 
-              <n-form-item label="下载路径">
-                <n-input v-model:value="formData.download_path" placeholder="/downloads" />
-              </n-form-item>
-
               <n-form-item label="合集种子 (可选)">
                 <n-input
                   v-model:value="formData.collection_torrent"
@@ -468,7 +464,6 @@ const formData = ref({
   bangumi_id: 0,
   total_episodes: 0,
   episode_offset: 0,
-  download_path: '/downloads',
   collection_torrent: '',
   filter_rules: '',
   enabled: true,
@@ -582,7 +577,6 @@ const showAddDialog = () => {
     bangumi_id: 0,
     total_episodes: 0,
     episode_offset: 0,
-    download_path: '/downloads',
     collection_torrent: '',
     filter_rules: '',
     enabled: true,
@@ -633,7 +627,6 @@ const handleEdit = (sub: Subscription) => {
     bangumi_id: sub.bangumi_id || 0,
     total_episodes: sub.total_episodes || 0,
     episode_offset: sub.episode_offset || 0,
-    download_path: sub.download_path,
     collection_torrent: sub.collection_torrent || '',
     filter_rules: sub.filter_rules || '',
     enabled: sub.enabled !== false,
@@ -850,7 +843,6 @@ onMounted(() => {
       bangumi_id: 0,
       total_episodes: 0,
       episode_offset: 0,
-      download_path: '/downloads',
       collection_torrent: '',
       filter_rules: '',
       enabled: true,

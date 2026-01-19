@@ -11,6 +11,7 @@ import (
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
+	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
 )
 
@@ -30,6 +31,7 @@ type DownloadMonitor struct {
 	qbClient         QBittorrentClient
 	downloadRepo     repository.DownloadRepository
 	subscriptionRepo repository.SubscriptionRepository
+	configRepo       repository.ConfigRepository
 	renameService    *RenameService
 	ticker           *time.Ticker
 	stopChan         chan struct{}
@@ -40,12 +42,14 @@ func NewDownloadMonitor(
 	qbClient QBittorrentClient,
 	downloadRepo repository.DownloadRepository,
 	subscriptionRepo repository.SubscriptionRepository,
+	configRepo repository.ConfigRepository,
 	renameTemplate string,
 ) *DownloadMonitor {
 	return &DownloadMonitor{
 		qbClient:         qbClient,
 		downloadRepo:     downloadRepo,
 		subscriptionRepo: subscriptionRepo,
+		configRepo:       configRepo,
 		renameService:    NewRenameService(renameTemplate),
 		stopChan:         make(chan struct{}),
 	}
@@ -148,11 +152,14 @@ func (m *DownloadMonitor) processPendingDownloads() {
 			continue
 		}
 
-		// 确定保存路径
-		savePath := "/downloads" // 默认路径
-		if subscription.DownloadPath != "" {
-			savePath = subscription.DownloadPath
+		// 确定保存路径（使用系统配置的下载路径）
+		basePath := "/downloads" // 默认路径
+		if m.configRepo != nil {
+			if downloadPathConfig, err := m.configRepo.Get("download_path"); err == nil && downloadPathConfig != nil && downloadPathConfig.Value != "" {
+				basePath = downloadPathConfig.Value
+			}
 		}
+		savePath := utils.GenerateDownloadPath(basePath, subscription.Name)
 
 		// 添加到qBittorrent
 		torrentHash, err := m.qbClient.AddTorrent(
