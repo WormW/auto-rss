@@ -1,13 +1,45 @@
 <template>
-  <div>
-    <n-space justify="space-between" style="margin-bottom: 16px">
+  <div class="rss-sources-page">
+    <div class="page-header">
       <h2>RSS 源管理</h2>
-      <n-button type="primary" @click="showCreateModal = true">
-        添加 RSS 源
+      <n-button type="primary" size="small" @click="showCreateModal = true">
+        <template #icon><n-icon><AddOutline /></n-icon></template>
+        <span class="btn-text">添加 RSS 源</span>
       </n-button>
-    </n-space>
+    </div>
 
+    <!-- 移动端卡片列表 -->
+    <div class="mobile-list" v-if="isMobile">
+      <n-spin :show="loading">
+        <n-empty v-if="sources.length === 0 && !loading" description="暂无 RSS 源" />
+        <div v-else class="source-cards">
+          <n-card v-for="source in sources" :key="source.id" size="small" class="source-card">
+            <div class="card-header">
+              <span class="card-title">{{ source.name }}</span>
+              <n-tag size="tiny" :type="source.enabled ? 'success' : 'default'">
+                {{ source.enabled ? '启用' : '禁用' }}
+              </n-tag>
+            </div>
+            <div class="card-url">{{ source.base_url }}</div>
+            <div v-if="source.description" class="card-desc">{{ source.description }}</div>
+            <div class="card-actions">
+              <n-button text size="small" type="info" @click="handleViewAnimes(source)">
+                <template #icon><n-icon><ListOutline /></n-icon></template>
+                番剧列表
+              </n-button>
+              <n-button text size="small" type="error" @click="handleDelete(source.id)">
+                <template #icon><n-icon><TrashOutline /></n-icon></template>
+                删除
+              </n-button>
+            </div>
+          </n-card>
+        </div>
+      </n-spin>
+    </div>
+
+    <!-- 桌面端表格 -->
     <n-data-table
+      v-else
       :columns="columns"
       :data="sources"
       :loading="loading"
@@ -16,7 +48,7 @@
 
     <!-- 添加/编辑 RSS 源对话框 -->
     <n-modal v-model:show="showCreateModal" preset="dialog" title="添加 RSS 源">
-      <n-form ref="formRef" :model="formData" :rules="formRules">
+      <n-form ref="formRef" :model="formData" :rules="formRules" label-placement="top">
         <n-form-item label="名称" path="name">
           <n-input v-model:value="formData.name" placeholder="如：Mikanani" />
         </n-form-item>
@@ -47,7 +79,7 @@
       v-model:show="showAnimesModal"
       preset="card"
       :title="`${currentSource?.name} - 番剧列表`"
-      style="width: 90%; max-width: 1400px"
+      class="animes-modal"
       :segmented="{content: true, footer: 'soft'}"
     >
       <template #header-extra>
@@ -128,7 +160,7 @@
       v-model:show="showResultModal"
       preset="card"
       title="批量导入结果"
-      style="width: 80%; max-width: 1000px"
+      class="result-modal"
       :segmented="{content: true}"
     >
       <n-alert v-if="importResults" :type="getResultAlertType()" style="margin-bottom: 16px">
@@ -168,7 +200,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, h } from 'vue'
+import { ref, onMounted, h, onUnmounted } from 'vue'
 import {
   NButton,
   NDataTable,
@@ -189,10 +221,11 @@ import {
   NAlert,
   NIcon,
   NTooltip,
+  NCard,
   useMessage,
   useDialog
 } from 'naive-ui'
-import { CalendarOutline, FilmOutline, ListOutline, TrashOutline } from '@vicons/ionicons5'
+import { CalendarOutline, FilmOutline, ListOutline, TrashOutline, AddOutline } from '@vicons/ionicons5'
 import { rssSourceApi, subscriptionApi, type RSSSource, type RSSAnime } from '@/api'
 import { useRouter } from 'vue-router'
 import type { FormInst } from 'naive-ui'
@@ -213,6 +246,20 @@ const selectedAnimes = ref<RSSAnime[]>([])
 const importingAnimes = ref<Set<string>>(new Set())
 const currentSource = ref<RSSSource | null>(null)
 const importResults = ref<any>(null)
+
+// Mobile detection
+const isMobile = ref(false)
+const checkMobile = () => {
+  isMobile.value = window.innerWidth < 768
+}
+onMounted(() => {
+  checkMobile()
+  window.addEventListener('resize', checkMobile)
+  loadSources()
+})
+onUnmounted(() => {
+  window.removeEventListener('resize', checkMobile)
+})
 
 const formData = ref({
   name: '',
@@ -498,8 +545,138 @@ const handleGoToSubscriptions = () => {
   importResults.value = null
   router.push({ name: 'subscriptions' })
 }
-
-onMounted(() => {
-  loadSources()
-})
 </script>
+
+<style scoped>
+.rss-sources-page {
+  max-width: 100%;
+}
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.page-header h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+/* 移动端列表 */
+.mobile-list {
+  display: none;
+}
+
+.source-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.source-card {
+  border-radius: 8px;
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.card-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.card-url {
+  font-size: 12px;
+  color: var(--n-text-color-3);
+  word-break: break-all;
+  margin-bottom: 4px;
+}
+
+.card-desc {
+  font-size: 13px;
+  color: var(--n-text-color-2);
+  margin-bottom: 8px;
+}
+
+.card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--n-border-color);
+}
+
+/* Modal 响应式 */
+.animes-modal {
+  width: 90%;
+  max-width: 1400px;
+}
+
+.result-modal {
+  width: 80%;
+  max-width: 1000px;
+}
+
+/* 移动端响应式 */
+@media (max-width: 768px) {
+  .page-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .page-header h2 {
+    font-size: 18px;
+    margin-bottom: 8px;
+  }
+
+  .btn-text {
+    display: none;
+  }
+
+  .mobile-list {
+    display: block;
+  }
+
+  .n-data-table {
+    display: none;
+  }
+
+  .animes-modal,
+  .result-modal {
+    width: 95vw !important;
+    max-width: none !important;
+    margin: 8px;
+  }
+
+  .animes-modal :deep(.n-card__content),
+  .result-modal :deep(.n-card__content) {
+    padding: 12px !important;
+  }
+
+  /* 番剧列表移动端优化 */
+  .animes-modal :deep(.n-list-item) {
+    padding: 12px 8px;
+  }
+
+  .animes-modal :deep(.n-thing-header) {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+}
+
+/* 桌面端隐藏移动列表 */
+@media (min-width: 769px) {
+  .mobile-list {
+    display: none !important;
+  }
+}
+</style>

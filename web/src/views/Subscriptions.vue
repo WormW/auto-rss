@@ -1,19 +1,22 @@
 <template>
-  <div>
-    <n-space justify="space-between" style="margin-bottom: 16px">
+  <div class="subscriptions-page">
+    <div class="page-header">
       <h2>订阅管理</h2>
-      <n-space>
-        <n-button @click="showAnimeSearch">
+      <n-space :size="8" class="header-actions">
+        <n-button @click="showAnimeSearch" size="small" class="hide-text-mobile">
           <template #icon>
             <n-icon><SearchOutlined /></n-icon>
           </template>
-          搜索番剧
+          <span class="btn-text">搜索番剧</span>
         </n-button>
-        <n-button type="primary" @click="showAddDialog">
-          添加订阅
+        <n-button type="primary" @click="showAddDialog" size="small">
+          <template #icon>
+            <n-icon><PlusOutlined /></n-icon>
+          </template>
+          <span class="btn-text">添加订阅</span>
         </n-button>
       </n-space>
-    </n-space>
+    </div>
 
     <!-- 番剧搜索组件 -->
     <AnimeSearch ref="animeSearchRef" @subscribe="handleSearchSubscribe" />
@@ -201,7 +204,7 @@
     <!-- 添加/编辑订阅对话框 - 两步式流程 -->
     <n-modal v-model:show="showModal" :mask-closable="!step2Loading">
       <n-card
-        style="width: 600px;"
+        class="modal-card"
         :title="editingId ? '编辑订阅' : '添加订阅'"
         :bordered="false"
         size="huge"
@@ -403,7 +406,7 @@ import {
 import { subscriptionApi, type Subscription } from '@/api'
 import { api } from '@/api'
 import { useRoute } from 'vue-router'
-import { EditOutlined, DeleteOutlined, SearchOutlined, ReloadOutlined, DownloadOutlined, FolderOpenOutlined } from '@vicons/antd'
+import { EditOutlined, DeleteOutlined, SearchOutlined, ReloadOutlined, DownloadOutlined, FolderOpenOutlined, PlusOutlined } from '@vicons/antd'
 import AnimeSearch from '@/components/AnimeSearch.vue'
 
 const route = useRoute()
@@ -855,14 +858,123 @@ onMounted(() => {
 </script>
 
 <style scoped>
+/* 页面容器 */
+.subscriptions-page {
+  max-width: 100%;
+}
+
+/* 页面头部 */
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.page-header h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.header-actions {
+  flex-wrap: wrap;
+}
+
+/* 网格容器 */
 .grid-container {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
   gap: 16px;
 }
 
+/* 移动端响应式 */
 @media (max-width: 768px) {
-  .grid-container { grid-template-columns: 1fr; }
+  .page-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .page-header h2 {
+    font-size: 18px;
+    margin-bottom: 8px;
+  }
+
+  .header-actions {
+    justify-content: flex-end;
+  }
+
+  .btn-text {
+    display: none;
+  }
+
+  .grid-container {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  /* 移动端卡片内容布局 */
+  .card-content {
+    flex-direction: column;
+  }
+
+  .cover-wrapper {
+    align-self: center;
+    margin-bottom: 8px;
+  }
+
+  .cover-img,
+  .cover-placeholder {
+    width: 100px !important;
+    height: 140px !important;
+  }
+
+  .info-section {
+    width: 100%;
+  }
+
+  .title-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .title {
+    font-size: 14px !important;
+  }
+
+  .tags-row {
+    margin-top: 4px;
+  }
+
+  .action-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .action-buttons {
+    justify-content: center;
+    opacity: 1 !important;
+  }
+
+  .last-time {
+    text-align: center;
+  }
+
+  /* 移动端弹窗 */
+  .modal-card {
+    width: 95vw !important;
+    max-width: 600px;
+    margin: 12px;
+  }
+
+  /* 移动端分组标题 */
+  h3 {
+    font-size: 14px !important;
+    margin: 12px 0 8px 4px !important;
+  }
 }
 
 /* 卡片 */
@@ -989,5 +1101,25 @@ h3 {
   -webkit-text-fill-color: transparent;
   background-clip: text;
   font-weight: 600;
+}
+
+/* Modal 响应式 */
+.modal-card {
+  width: 600px;
+  max-width: 95vw;
+}
+
+@media (max-width: 768px) {
+  .modal-card :deep(.n-card__content) {
+    padding: 12px !important;
+  }
+
+  .modal-card :deep(.n-form-item) {
+    margin-bottom: 12px;
+  }
+
+  .modal-card :deep(.n-form-item-label) {
+    padding-bottom: 4px;
+  }
 }
 </style>

@@ -2,7 +2,73 @@
   <n-config-provider :theme="theme" :locale="zhCN" :date-locale="dateZhCN">
     <n-message-provider>
       <n-dialog-provider>
-        <n-layout has-sider style="height: 100vh">
+        <!-- 移动端布局 -->
+        <n-layout v-if="isMobile" style="height: 100vh">
+          <!-- 移动端 Header -->
+          <n-layout-header bordered class="mobile-header">
+            <div class="mobile-header-left">
+              <n-button text @click="mobileDrawerVisible = true">
+                <template #icon>
+                  <n-icon size="24"><MenuOutline /></n-icon>
+                </template>
+              </n-button>
+              <n-icon size="24" color="#18a058" style="margin-left: 8px;">
+                <Leaf />
+              </n-icon>
+              <span class="mobile-logo-text">Auto-RSS</span>
+            </div>
+            <n-space align="center" :size="8">
+              <TaskManager />
+              <n-button text @click="toggleTheme">
+                <template #icon>
+                  <n-icon size="20">
+                    <Moon v-if="isDark" />
+                    <Sunny v-else />
+                  </n-icon>
+                </template>
+              </n-button>
+            </n-space>
+          </n-layout-header>
+
+          <!-- 移动端内容区 -->
+          <n-layout-content class="mobile-content">
+            <router-view v-slot="{ Component }">
+              <transition name="fade" mode="out-in">
+                <component :is="Component" />
+              </transition>
+            </router-view>
+          </n-layout-content>
+
+          <!-- 移动端抽屉菜单 -->
+          <n-drawer v-model:show="mobileDrawerVisible" placement="left" :width="280">
+            <n-drawer-content>
+              <template #header>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <n-icon size="24" color="#18a058"><Leaf /></n-icon>
+                  <span style="font-weight: bold; font-size: 16px;">Auto-RSS</span>
+                </div>
+              </template>
+              <n-menu
+                :value="currentRoute"
+                :options="menuOptions"
+                @update:value="handleMobileMenuSelect"
+              />
+              <template #footer>
+                <n-dropdown :options="userOptions" @select="handleUserSelect" trigger="click">
+                  <n-button block secondary>
+                    <template #icon>
+                      <n-avatar round size="small" src="https://0.gravatar.com/avatar/0?d=mp&f=y" />
+                    </template>
+                    个人设置
+                  </n-button>
+                </n-dropdown>
+              </template>
+            </n-drawer-content>
+          </n-drawer>
+        </n-layout>
+
+        <!-- 桌面端布局 -->
+        <n-layout v-else has-sider style="height: 100vh">
           <n-layout-sider
             bordered
             collapse-mode="width"
@@ -29,7 +95,7 @@
               @update:value="handleMenuSelect"
             />
           </n-layout-sider>
-          
+
           <n-layout>
             <n-layout-header bordered style="height: 64px; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); transition: all 0.3s ease;">
               <!-- Left side of header (Breadcrumb or Page Title could go here) -->
@@ -62,7 +128,7 @@
                 </n-dropdown>
               </n-space>
             </n-layout-header>
-            
+
             <n-layout-content content-style="padding: 24px; min-height: calc(100vh - 64px);">
               <router-view v-slot="{ Component }">
                 <transition name="fade" mode="out-in">
@@ -78,7 +144,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, h } from 'vue'
+import { ref, computed, h, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
   NConfigProvider,
@@ -94,6 +160,8 @@ import {
   NIcon,
   NAvatar,
   NDropdown,
+  NDrawer,
+  NDrawerContent,
   darkTheme,
   zhCN,
   dateZhCN
@@ -109,7 +177,8 @@ import {
   Sunny,
   Leaf,
   LogOutOutline,
-  PersonOutline
+  PersonOutline,
+  MenuOutline
 } from '@vicons/ionicons5'
 import TaskManager from './components/TaskManager.vue'
 
@@ -125,6 +194,23 @@ const toggleTheme = () => {
   isDark.value = !isDark.value
   localStorage.setItem('theme', isDark.value ? 'dark' : 'light')
 }
+
+// Mobile detection
+const isMobile = ref(false)
+const mobileDrawerVisible = ref(false)
+
+const checkMobile = () => {
+  isMobile.value = window.innerWidth < 768
+}
+
+onMounted(() => {
+  checkMobile()
+  window.addEventListener('resize', checkMobile)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', checkMobile)
+})
 
 // Sidebar logic
 const collapsed = ref(false)
@@ -179,6 +265,11 @@ const handleMenuSelect = (key: string) => {
   router.push({ name: key })
 }
 
+const handleMobileMenuSelect = (key: string) => {
+  router.push({ name: key })
+  mobileDrawerVisible.value = false
+}
+
 const handleUserSelect = (key: string) => {
   if (key === 'logout') {
     // Implement logout logic here
@@ -188,6 +279,41 @@ const handleUserSelect = (key: string) => {
 </script>
 
 <style scoped>
+/* 移动端 Header */
+.mobile-header {
+  height: 56px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.mobile-header-left {
+  display: flex;
+  align-items: center;
+}
+
+.mobile-logo-text {
+  margin-left: 8px;
+  font-size: 16px;
+  font-weight: bold;
+  background: linear-gradient(90deg, #18a058 0%, #52c41a 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.mobile-content {
+  padding: 12px;
+  min-height: calc(100vh - 56px);
+  overflow-y: auto;
+}
+
 /* 侧边栏菜单项悬浮效果 */
 :deep(.n-menu-item) {
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);

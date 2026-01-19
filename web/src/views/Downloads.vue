@@ -1,30 +1,81 @@
 <template>
-  <div>
-    <n-space justify="space-between" style="margin-bottom: 16px">
+  <div class="downloads-page">
+    <div class="page-header">
       <h2>下载任务</h2>
-      <n-space>
+      <div class="header-actions">
         <n-select
           v-model:value="statusFilter"
           :options="statusOptions"
-          style="width: 150px"
+          class="status-select"
+          size="small"
           @update:value="loadDownloads"
         />
         <n-button
           type="error"
+          size="small"
           :disabled="selectedRowKeys.length === 0"
           @click="handleBatchDelete"
         >
-          批量删除 {{ selectedRowKeys.length > 0 ? `(${selectedRowKeys.length})` : '' }}
+          <template #icon><n-icon><TrashOutline /></n-icon></template>
+          <span class="btn-text">删除 {{ selectedRowKeys.length > 0 ? `(${selectedRowKeys.length})` : '' }}</span>
         </n-button>
         <n-dropdown :options="clearOptions" @select="handleClear">
-          <n-button type="warning">
-            一键清空
+          <n-button type="warning" size="small">
+            <span class="btn-text">清空</span>
           </n-button>
         </n-dropdown>
-      </n-space>
-    </n-space>
+      </div>
+    </div>
 
+    <!-- 移动端卡片列表 -->
+    <div class="mobile-list" v-if="isMobile">
+      <n-spin :show="loading">
+        <n-empty v-if="downloads.length === 0 && !loading" description="暂无下载任务" />
+        <div v-else class="download-cards">
+          <n-card v-for="item in downloads" :key="item.id" size="small" class="download-card">
+            <div class="card-header">
+              <n-checkbox
+                :checked="selectedRowKeys.includes(item.id)"
+                @update:checked="(checked) => toggleSelect(item.id, checked)"
+              />
+              <span class="card-title">{{ item.title }}</span>
+            </div>
+            <div class="card-info">
+              <n-space :size="4" wrap>
+                <n-tag size="tiny" v-if="item.fansub">{{ item.fansub }}</n-tag>
+                <n-tag size="tiny" v-if="item.episode">第{{ item.episode }}集</n-tag>
+                <n-tag size="tiny" :type="getStatusConfig(item.status).type">
+                  {{ getStatusConfig(item.status).text }}
+                </n-tag>
+              </n-space>
+            </div>
+            <div class="card-actions">
+              <n-button v-if="item.status === 'failed'" text size="small" type="warning" @click="handleRetry(item.id)">
+                <template #icon><n-icon><RefreshOutline /></n-icon></template>
+                重试
+              </n-button>
+              <n-button text size="small" type="error" @click="handleDelete(item.id)">
+                <template #icon><n-icon><TrashOutline /></n-icon></template>
+                删除
+              </n-button>
+            </div>
+          </n-card>
+        </div>
+        <div class="mobile-pagination" v-if="pagination.itemCount > pagination.pageSize">
+          <n-pagination
+            v-model:page="pagination.page"
+            :page-count="pagination.pageCount"
+            :page-size="pagination.pageSize"
+            simple
+            @update:page="loadDownloads"
+          />
+        </div>
+      </n-spin>
+    </div>
+
+    <!-- 桌面端表格 -->
     <n-data-table
+      v-else
       :columns="columns"
       :data="downloads"
       :loading="loading"
@@ -37,8 +88,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, h } from 'vue'
-import { NButton, NDataTable, NSelect, NSpace, NTag, NDropdown, NTooltip, NIcon, useMessage, useDialog } from 'naive-ui'
+import { ref, onMounted, h, onUnmounted } from 'vue'
+import { NButton, NDataTable, NSelect, NSpace, NTag, NDropdown, NTooltip, NIcon, NCard, NCheckbox, NSpin, NEmpty, NPagination, useMessage, useDialog } from 'naive-ui'
 import { RefreshOutline, TrashOutline } from '@vicons/ionicons5'
 import { downloadApi, type Download } from '@/api'
 
@@ -48,6 +99,42 @@ const loading = ref(false)
 const downloads = ref<Download[]>([])
 const statusFilter = ref('')
 const selectedRowKeys = ref<number[]>([])
+
+// Mobile detection
+const isMobile = ref(false)
+const checkMobile = () => {
+  isMobile.value = window.innerWidth < 768
+}
+onMounted(() => {
+  checkMobile()
+  window.addEventListener('resize', checkMobile)
+  loadDownloads()
+})
+onUnmounted(() => {
+  window.removeEventListener('resize', checkMobile)
+})
+
+// Toggle selection for mobile
+const toggleSelect = (id: number, checked: boolean) => {
+  if (checked) {
+    if (!selectedRowKeys.value.includes(id)) {
+      selectedRowKeys.value.push(id)
+    }
+  } else {
+    selectedRowKeys.value = selectedRowKeys.value.filter(k => k !== id)
+  }
+}
+
+// Status config helper
+const getStatusConfig = (status: string) => {
+  const statusMap: Record<string, { type: 'success' | 'warning' | 'error' | 'info', text: string }> = {
+    pending: { type: 'info', text: '等待中' },
+    downloading: { type: 'warning', text: '下载中' },
+    completed: { type: 'success', text: '已完成' },
+    failed: { type: 'error', text: '失败' }
+  }
+  return statusMap[status] || { type: 'info', text: status }
+}
 
 const statusOptions = [
   { label: '全部', value: '' },
@@ -83,13 +170,7 @@ const pagination = ref({
 })
 
 const getStatusTag = (status: string) => {
-  const statusMap: Record<string, { type: 'success' | 'warning' | 'error' | 'info', text: string }> = {
-    pending: { type: 'info', text: '等待中' },
-    downloading: { type: 'warning', text: '下载中' },
-    completed: { type: 'success', text: '已完成' },
-    failed: { type: 'error', text: '失败' }
-  }
-  const config = statusMap[status] || { type: 'info', text: status }
+  const config = getStatusConfig(status)
   return h(NTag, { type: config.type }, { default: () => config.text })
 }
 
@@ -239,8 +320,124 @@ const handleClear = async (key: string) => {
     }
   })
 }
-
-onMounted(() => {
-  loadDownloads()
-})
 </script>
+
+<style scoped>
+.downloads-page {
+  max-width: 100%;
+}
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.page-header h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.status-select {
+  width: 120px;
+}
+
+/* 移动端列表 */
+.mobile-list {
+  display: none;
+}
+
+.download-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.download-card {
+  border-radius: 8px;
+}
+
+.card-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.card-title {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.card-info {
+  margin-bottom: 8px;
+  padding-left: 26px;
+}
+
+.card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--n-border-color);
+}
+
+.mobile-pagination {
+  margin-top: 16px;
+  display: flex;
+  justify-content: center;
+}
+
+/* 移动端响应式 */
+@media (max-width: 768px) {
+  .page-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .page-header h2 {
+    font-size: 18px;
+    margin-bottom: 8px;
+  }
+
+  .header-actions {
+    justify-content: space-between;
+  }
+
+  .status-select {
+    width: 100px;
+  }
+
+  .btn-text {
+    display: none;
+  }
+
+  .mobile-list {
+    display: block;
+  }
+
+  .n-data-table {
+    display: none;
+  }
+}
+
+/* 桌面端隐藏移动列表 */
+@media (min-width: 769px) {
+  .mobile-list {
+    display: none !important;
+  }
+}
+</style>

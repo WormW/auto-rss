@@ -1,28 +1,74 @@
 <template>
-  <div>
-    <n-space justify="space-between" style="margin-bottom: 16px">
+  <div class="logs-page">
+    <div class="page-header">
       <h2>系统日志</h2>
-      <n-space>
+      <div class="header-actions">
         <n-select
           v-model:value="moduleFilter"
           :options="moduleOptions"
-          style="width: 120px"
+          class="filter-select"
+          size="small"
           placeholder="模块"
           @update:value="loadLogs"
         />
         <n-select
           v-model:value="levelFilter"
           :options="levelOptions"
-          style="width: 120px"
-          placeholder="日志级别"
+          class="filter-select"
+          size="small"
+          placeholder="级别"
           @update:value="loadLogs"
         />
-        <n-button @click="handleRefresh">刷新</n-button>
-        <n-button @click="handleClear" type="warning">清空日志</n-button>
-      </n-space>
-    </n-space>
+        <n-button size="small" @click="handleRefresh">
+          <template #icon><n-icon><RefreshOutline /></n-icon></template>
+        </n-button>
+        <n-button size="small" @click="handleClear" type="warning">
+          <template #icon><n-icon><TrashOutline /></n-icon></template>
+        </n-button>
+      </div>
+    </div>
 
-    <n-card>
+    <!-- 移动端卡片列表 -->
+    <div class="mobile-list" v-if="isMobile">
+      <n-spin :show="loading">
+        <n-empty v-if="logs.length === 0 && !loading" description="暂无日志" />
+        <div v-else class="log-cards">
+          <n-card
+            v-for="log in logs"
+            :key="log.id"
+            size="small"
+            class="log-card"
+            :class="{ 'log-card-error': log.level === 'error', 'log-card-warn': log.level === 'warn' }"
+          >
+            <div class="log-header">
+              <n-space :size="4">
+                <n-tag size="tiny" :type="getLevelConfig(log.level).type">
+                  {{ getLevelConfig(log.level).text }}
+                </n-tag>
+                <n-tag size="tiny">{{ getModuleText(log.module) }}</n-tag>
+              </n-space>
+              <span class="log-time">{{ formatTime(log.created_at) }}</span>
+            </div>
+            <div class="log-message">{{ log.message }}</div>
+            <div v-if="formatContext(log.context)" class="log-context">
+              {{ formatContext(log.context) }}
+            </div>
+          </n-card>
+        </div>
+        <div class="mobile-pagination" v-if="pagination.itemCount > pagination.pageSize">
+          <n-pagination
+            v-model:page="pagination.page"
+            :page-count="Math.ceil(pagination.itemCount / pagination.pageSize)"
+            :page-size="pagination.pageSize"
+            simple
+            @update:page="loadLogs"
+          />
+        </div>
+      </n-spin>
+    </div>
+
+    <!-- 桌面端表格 -->
+    <n-card v-else>
       <n-data-table
         :columns="columns"
         :data="logs"
@@ -37,8 +83,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, h } from 'vue'
-import { NButton, NDataTable, NSelect, NSpace, NCard, NTag, useMessage, useDialog } from 'naive-ui'
+import { ref, onMounted, onUnmounted, h } from 'vue'
+import { NButton, NDataTable, NSelect, NSpace, NCard, NTag, NSpin, NEmpty, NPagination, NIcon, useMessage, useDialog } from 'naive-ui'
+import { RefreshOutline, TrashOutline } from '@vicons/ionicons5'
 import { api } from '@/api'
 
 const message = useMessage()
@@ -47,6 +94,53 @@ const loading = ref(false)
 const logs = ref<any[]>([])
 const levelFilter = ref('')
 const moduleFilter = ref('')
+
+// Mobile detection
+const isMobile = ref(false)
+const checkMobile = () => {
+  isMobile.value = window.innerWidth < 768
+}
+onMounted(() => {
+  checkMobile()
+  window.addEventListener('resize', checkMobile)
+  loadLogs()
+})
+onUnmounted(() => {
+  window.removeEventListener('resize', checkMobile)
+})
+
+// Helper for mobile
+const getLevelConfig = (level: string) => {
+  const levelMap: Record<string, { type: 'success' | 'warning' | 'error' | 'info', text: string }> = {
+    info: { type: 'success', text: 'INFO' },
+    warn: { type: 'warning', text: 'WARN' },
+    error: { type: 'error', text: 'ERROR' }
+  }
+  return levelMap[level.toLowerCase()] || { type: 'info', text: level.toUpperCase() }
+}
+
+const getModuleText = (module: string) => {
+  const moduleMap: Record<string, string> = {
+    rss: 'RSS',
+    download: '下载',
+    organizer: '整理',
+    bangumi: 'Bangumi',
+    subscription: '订阅',
+    config: '配置',
+    system: '系统'
+  }
+  return moduleMap[module] || module
+}
+
+const formatTime = (time: string) => {
+  const date = new Date(time)
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  })
+}
 
 const levelOptions = [
   { label: '全部', value: '' },
@@ -221,13 +315,131 @@ const handleClear = () => {
     }
   })
 }
-
-onMounted(() => {
-  loadLogs()
-})
 </script>
 
 <style scoped>
+.logs-page {
+  max-width: 100%;
+}
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.page-header h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.filter-select {
+  width: 90px;
+}
+
+/* 移动端列表 */
+.mobile-list {
+  display: none;
+}
+
+.log-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.log-card {
+  border-radius: 8px;
+}
+
+.log-card-error {
+  border-left: 3px solid #d03050;
+  background-color: rgba(208, 48, 80, 0.05);
+}
+
+.log-card-warn {
+  border-left: 3px solid #f0a020;
+  background-color: rgba(240, 160, 32, 0.05);
+}
+
+.log-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.log-time {
+  font-size: 11px;
+  color: var(--n-text-color-3);
+}
+
+.log-message {
+  font-size: 13px;
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.log-context {
+  font-size: 11px;
+  color: var(--n-text-color-3);
+  margin-top: 4px;
+  word-break: break-all;
+}
+
+.mobile-pagination {
+  margin-top: 16px;
+  display: flex;
+  justify-content: center;
+}
+
+/* 移动端响应式 */
+@media (max-width: 768px) {
+  .page-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .page-header h2 {
+    font-size: 18px;
+    margin-bottom: 8px;
+  }
+
+  .header-actions {
+    justify-content: space-between;
+  }
+
+  .filter-select {
+    width: 80px;
+  }
+
+  .mobile-list {
+    display: block;
+  }
+
+  .n-card {
+    display: none;
+  }
+}
+
+/* 桌面端隐藏移动列表 */
+@media (min-width: 769px) {
+  .mobile-list {
+    display: none !important;
+  }
+}
+
+/* 表格行颜色 */
 :deep(.log-row-error) {
   background-color: rgba(208, 48, 80, 0.1);
 }

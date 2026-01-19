@@ -1,9 +1,9 @@
 <template>
-  <div>
-    <h2>系统配置</h2>
+  <div class="config-page">
+    <h2 class="page-title">系统配置</h2>
 
-    <n-card title="qBittorrent 配置" style="margin-top: 16px">
-      <n-form :model="qbConfig" label-placement="left" label-width="120">
+    <n-card title="qBittorrent 配置" class="config-card">
+      <n-form :model="qbConfig" label-placement="top" class="config-form">
         <n-form-item label="主机地址">
           <n-input v-model:value="qbConfig.host" placeholder="http://localhost:8080" />
         </n-form-item>
@@ -27,8 +27,8 @@
       </n-form>
     </n-card>
 
-    <n-card title="RSS 配置" style="margin-top: 16px">
-      <n-form :model="rssConfig" label-placement="left" label-width="120">
+    <n-card title="RSS 配置" class="config-card">
+      <n-form :model="rssConfig" label-placement="top" class="config-form">
         <n-form-item label="检查间隔">
           <n-input-number
             v-model:value="rssConfig.interval"
@@ -48,8 +48,8 @@
       </n-form>
     </n-card>
 
-    <n-card title="系统设置" style="margin-top: 16px">
-      <n-form :model="systemConfig" label-placement="left" label-width="120">
+    <n-card title="系统设置" class="config-card">
+      <n-form :model="systemConfig" label-placement="top" class="config-form">
         <n-form-item label="日志级别">
           <n-select
             v-model:value="systemConfig.logLevel"
@@ -72,8 +72,8 @@
       </n-form>
     </n-card>
 
-    <n-card title="文件整理配置" style="margin-top: 16px">
-      <n-form :model="fileOrganizerConfig" label-placement="left" label-width="120">
+    <n-card title="文件整理配置" class="config-card">
+      <n-form :model="fileOrganizerConfig" label-placement="top" class="config-form">
         <n-form-item label="启用文件整理">
           <n-switch v-model:value="fileOrganizerConfig.enabled" />
         </n-form-item>
@@ -95,8 +95,8 @@
       </n-form>
     </n-card>
 
-    <n-card title="文件重命名规则" style="margin-top: 16px">
-      <n-form label-placement="left" label-width="120">
+    <n-card title="文件重命名规则" class="config-card">
+      <n-form label-placement="top" class="config-form">
         <n-form-item label="模板预设">
           <n-select
             v-model:value="selectedPreset"
@@ -151,8 +151,8 @@
       </n-form>
     </n-card>
 
-    <n-card title="操作" style="margin-top: 16px">
-      <n-space>
+    <n-card title="操作" class="config-card">
+      <n-space wrap>
         <n-button type="info" @click="handleManualRefresh">手动刷新 RSS</n-button>
         <n-button type="success" @click="handleTriggerFileOrganizer">手动整理文件</n-button>
         <n-button type="warning" @click="handleClearCache">清理缓存</n-button>
@@ -500,3 +500,68 @@ onMounted(() => {
   loadRenameTemplate()
 })
 </script>
+
+<style scoped>
+.config-page {
+  max-width: 100%;
+}
+
+.page-title {
+  margin: 0 0 16px 0;
+  font-size: 20px;
+}
+
+.config-card {
+  margin-bottom: 16px;
+}
+
+.config-form {
+  max-width: 600px;
+}
+
+/* 移动端响应式 */
+@media (max-width: 768px) {
+  .page-title {
+    font-size: 18px;
+  }
+
+  .config-card :deep(.n-card__content) {
+    padding: 12px;
+  }
+
+  .config-form {
+    max-width: 100%;
+  }
+
+  .config-form :deep(.n-form-item) {
+    margin-bottom: 12px;
+  }
+
+  .config-form :deep(.n-input-number) {
+    width: 100% !important;
+  }
+
+  .config-form :deep(.n-select) {
+    width: 100% !important;
+  }
+
+  /* 可用变量标签换行显示 */
+  .config-form :deep(.n-space) {
+    gap: 6px !important;
+  }
+
+  .config-form :deep(.n-tag) {
+    font-size: 11px;
+  }
+
+  /* 操作按钮组 */
+  .config-card .n-space {
+    width: 100%;
+  }
+
+  .config-card .n-space .n-button {
+    flex: 1;
+    min-width: 0;
+  }
+}
+</style>
