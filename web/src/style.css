@@ -152,3 +152,139 @@ button, a, input, textarea, select {
 .float {
   animation: float 3s ease-in-out infinite;
 }
+
+/* ==================== Mobile Responsive Styles ==================== */
+
+/* 移动端基础适配 */
+@media (max-width: 768px) {
+  /* 减少移动端的默认间距 */
+  .n-layout-content {
+    padding: 12px !important;
+  }
+
+  /* 移动端按钮优化 */
+  .n-button {
+    min-height: 36px;
+  }
+
+  /* 移动端表单优化 */
+  .n-form-item {
+    margin-bottom: 12px;
+  }
+
+  .n-form-item-label {
+    padding-bottom: 4px;
+  }
+
+  /* 移动端卡片优化 */
+  .n-card {
+    border-radius: 8px;
+  }
+
+  .n-card > .n-card__content {
+    padding: 12px;
+  }
+
+  /* 移动端表格优化 - 如果无法使用卡片替代 */
+  .n-data-table {
+    font-size: 13px;
+  }
+
+  .n-data-table .n-data-table-th,
+  .n-data-table .n-data-table-td {
+    padding: 8px 6px;
+  }
+
+  /* 移动端弹窗优化 */
+  .n-modal {
+    margin: 8px;
+  }
+
+  .n-dialog {
+    width: 95vw !important;
+    max-width: none;
+    margin: 8px;
+  }
+
+  /* 移动端标签优化 */
+  .n-tag {
+    font-size: 11px;
+    padding: 0 6px;
+    height: 20px;
+  }
+
+  /* 移动端滚动条隐藏 */
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+
+  /* 移动端空状态优化 */
+  .n-empty {
+    padding: 24px 16px;
+  }
+
+  /* 移动端分页优化 */
+  .n-pagination {
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: center;
+  }
+
+  /* 防止移动端横向滚动 */
+  body {
+    overflow-x: hidden;
+  }
+}
+
+/* 小屏手机适配 (< 375px) */
+@media (max-width: 375px) {
+  .n-layout-content {
+    padding: 8px !important;
+  }
+
+  .n-card > .n-card__content {
+    padding: 8px;
+  }
+
+  .n-button {
+    font-size: 13px;
+    padding: 0 10px;
+  }
+
+  .n-tag {
+    font-size: 10px;
+    padding: 0 4px;
+  }
+}
+
+/* 触摸优化 - 增大点击区域 */
+@media (hover: none) and (pointer: coarse) {
+  .n-button,
+  .n-switch,
+  .n-checkbox,
+  .n-radio {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .n-menu-item {
+    min-height: 48px;
+  }
+
+  /* 移动端链接点击区域 */
+  a, button {
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+/* 横屏优化 */
+@media (max-height: 500px) and (orientation: landscape) {
+  .n-layout-header {
+    height: 48px !important;
+  }
+
+  .n-layout-content {
+    min-height: calc(100vh - 48px) !important;
+  }
+}
