@@ -365,23 +365,70 @@ func (m *DownloadMonitor) renameFile(download *model.Download, subscription *mod
 		Resolution:   fileInfo.Resolution,
 	}
 
-	// 生成新文件路径 (包含目录结构)
+	// 生成新文件路径 (包含目录结构，如: 剑来/Season 2/剑来 S02E01.mp4)
 	newRelativePath := m.renameService.GenerateFileName(ctx)
 
-	// 调用qBittorrent API重命名文件
-	if err := m.qbClient.RenameTorrentFile(torrent.Hash, fileInfo.Name, newRelativePath); err != nil {
-		// 如果是409错误(文件已存在)，不视为失败
-		if strings.Contains(err.Error(), "409") {
-			logger.Info("File already renamed, skipping",
+	// 分离目录和文件名
+	newDir := filepath.Dir(newRelativePath)
+	newFileName := filepath.Base(newRelativePath)
+
+	// Step 1: 移动种子到新位置（如果需要）
+	// 目标位置 = 当前保存路径的基础路径 + 新目录结构
+	targetLocation := filepath.Join(torrent.SavePath, newDir)
+	if torrent.SavePath != targetLocation {
+		logger.Info("Moving torrent to new location",
+			"download_id", download.ID,
+			"from", torrent.SavePath,
+			"to", targetLocation)
+
+		if err := m.qbClient.SetLocation(torrent.Hash, targetLocation); err != nil {
+			logger.Warn("Failed to move torrent location",
 				"download_id", download.ID,
-				"path", newRelativePath)
-			return newRelativePath, nil
+				"error", err.Error())
+			// 移动失败不阻止重命名
 		}
-		return "", fmt.Errorf("failed to rename in qBittorrent: %w", err)
+	}
+
+	// Step 2: 重命名文件
+	// 注意：需要将文件从原位置（可能在子目录中）重命名到目标位置（不带子目录）
+	oldFileName := fileInfo.Name
+	oldFileBaseName := filepath.Base(oldFileName)
+
+	if oldFileName != newFileName {
+		logger.Info("Renaming file via qBittorrent API",
+			"download_id", download.ID,
+			"from", oldFileName,
+			"to", newFileName)
+
+		if err := m.qbClient.RenameTorrentFile(torrent.Hash, oldFileName, newFileName); err != nil {
+			// 如果是409错误(文件已存在)，不视为失败
+			if strings.Contains(err.Error(), "409") {
+				logger.Info("File already renamed, skipping",
+					"download_id", download.ID,
+					"path", newFileName)
+			} else {
+				// 如果重命名失败，尝试只改文件名不改路径
+				if oldFileBaseName != newFileName {
+					// 构建保持原目录结构的新路径
+					newFilePathWithDir := newFileName
+					if strings.Contains(oldFileName, string(filepath.Separator)) || strings.Contains(oldFileName, "/") {
+						oldDir := filepath.Dir(oldFileName)
+						newFilePathWithDir = filepath.Join(oldDir, newFileName)
+					}
+					if err2 := m.qbClient.RenameTorrentFile(torrent.Hash, oldFileName, newFilePathWithDir); err2 != nil {
+						if !strings.Contains(err2.Error(), "409") {
+							return "", fmt.Errorf("failed to rename in qBittorrent: %w", err)
+						}
+					}
+				} else {
+					return "", fmt.Errorf("failed to rename in qBittorrent: %w", err)
+				}
+			}
+		}
 	}
 
 	// 返回完整路径
-	fullPath := filepath.Join(torrent.SavePath, newRelativePath)
+	fullPath := filepath.Join(targetLocation, newFileName)
 	return fullPath, nil
 }
 
@@ -441,6 +488,35 @@ func (m *DownloadMonitor) renameCollectionFiles(download *model.Download, subscr
 		"first_episode", videoFiles[0].episode,
 		"last_episode", videoFiles[len(videoFiles)-1].episode)
 
+	// 先移动种子到目标目录（只需要执行一次）
+	// 使用第一个文件生成目标目录路径
+	firstCtx := &RenameContext{
+		Subscription: subscription,
+		Download: &model.Download{
+			Episode: videoFiles[0].episode,
+		},
+		OriginalName: videoFiles[0].file.Name,
+		Extension:    filepath.Ext(videoFiles[0].file.Name),
+		Resolution:   extractResolution(videoFiles[0].file.Name),
+	}
+	firstRelativePath := m.renameService.GenerateFileName(firstCtx)
+	newDir := filepath.Dir(firstRelativePath)
+	targetLocation := filepath.Join(torrent.SavePath, newDir)
+
+	if torrent.SavePath != targetLocation {
+		logger.Info("Moving collection torrent to new location",
+			"download_id", download.ID,
+			"from", torrent.SavePath,
+			"to", targetLocation)
+
+		if err := m.qbClient.SetLocation(torrent.Hash, targetLocation); err != nil {
+			logger.Warn("Failed to move collection torrent location",
+				"download_id", download.ID,
+				"error", err.Error())
+			// 移动失败不阻止重命名
+		}
+	}
+
 	renamedCount := 0
 
 	for _, vf := range videoFiles {
@@ -457,23 +533,59 @@ func (m *DownloadMonitor) renameCollectionFiles(download *model.Download, subscr
 			Resolution:   extractResolution(vf.file.Name),
 		}
 
-		// 生成新文件路径
+		// 生成新文件路径（完整路径，如: 剑来/Season 2/剑来 S02E01.mp4）
 		newRelativePath := m.renameService.GenerateFileName(ctx)
+		newFileName := filepath.Base(newRelativePath)
 
-		// 调用 qBittorrent API 重命名文件
-		if err := m.qbClient.RenameTorrentFile(torrent.Hash, vf.file.Name, newRelativePath); err != nil {
+		oldFileName := vf.file.Name
+		oldFileBaseName := filepath.Base(oldFileName)
+
+		if oldFileName == newFileName {
+			// 文件名相同，跳过
+			renamedCount++
+			continue
+		}
+
+		// 尝试将文件重命名到根目录（去掉原有子目录）
+		if err := m.qbClient.RenameTorrentFile(torrent.Hash, oldFileName, newFileName); err != nil {
 			// 如果是409错误(文件已存在)，不视为失败
 			if strings.Contains(err.Error(), "409") {
 				logger.Debug("File already renamed, skipping",
 					"episode", vf.episode,
-					"path", newRelativePath)
+					"path", newFileName)
 				renamedCount++
 				continue
 			}
+
+			// 如果重命名到根目录失败，尝试保持原目录结构只改文件名
+			if oldFileBaseName != newFileName {
+				newFilePathWithDir := newFileName
+				if strings.Contains(oldFileName, string(filepath.Separator)) || strings.Contains(oldFileName, "/") {
+					oldDir := filepath.Dir(oldFileName)
+					newFilePathWithDir = filepath.Join(oldDir, newFileName)
+				}
+				if err2 := m.qbClient.RenameTorrentFile(torrent.Hash, oldFileName, newFilePathWithDir); err2 != nil {
+					if !strings.Contains(err2.Error(), "409") {
+						logger.Warn("Failed to rename file in collection",
+							"episode", vf.episode,
+							"original", oldFileName,
+							"target", newFilePathWithDir,
+							"error", err2.Error())
+						continue
+					}
+				}
+				renamedCount++
+				logger.Debug("Renamed collection file (kept directory structure)",
+					"episode", vf.episode,
+					"original", oldFileBaseName,
+					"new", newFileName)
+				continue
+			}
+
 			logger.Warn("Failed to rename file in collection",
 				"episode", vf.episode,
-				"original", vf.file.Name,
-				"target", newRelativePath,
+				"original", oldFileName,
+				"target", newFileName,
 				"error", err.Error())
 			continue
 		}
@@ -481,8 +593,8 @@ func (m *DownloadMonitor) renameCollectionFiles(download *model.Download, subscr
 		renamedCount++
 		logger.Debug("Renamed collection file",
 			"episode", vf.episode,
-			"original", filepath.Base(vf.file.Name),
-			"new", newRelativePath)
+			"original", oldFileBaseName,
+			"new", newFileName)
 	}
 
 	return renamedCount, nil
