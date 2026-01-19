@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/WormW/auto-rss/internal/service/task"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // SubscriptionHandler 订阅处理器
@@ -402,6 +404,28 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		"rss_url", subscription.RssURL,
 		"client_ip", c.ClientIP())
 
+	if subscription.RssURL != "" {
+		existing, err := h.repo.GetByRSSURL(subscription.RssURL)
+		if err == nil {
+			c.JSON(http.StatusConflict, gin.H{
+				"code":    409,
+				"message": "Subscription already exists",
+				"data":    existing,
+			})
+			return
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			logger.Error("Failed to check existing subscription by RSS URL",
+				"rss_url", subscription.RssURL,
+				"error", err.Error())
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"code":    500,
+				"message": "Failed to check existing subscription",
+			})
+			return
+		}
+	}
+
 	// 自动获取Bangumi数据
 	h.enrichWithBangumi(&subscription)
 
@@ -509,9 +533,6 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 	}
 	if epOffset, ok := updates["episode_offset"].(float64); ok {
 		existing.EpisodeOffset = int(epOffset)
-	}
-	if downloadPath, ok := updates["download_path"].(string); ok {
-		existing.DownloadPath = downloadPath
 	}
 	if filterRules, ok := updates["filter_rules"].(string); ok {
 		existing.FilterRules = filterRules
@@ -842,18 +863,7 @@ func (h *SubscriptionHandler) GetByID(c *gin.Context) {
 
 // List 获取订阅列表
 func (h *SubscriptionHandler) List(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-
-	if page < 1 {
-		page = 1
-	}
-	if pageSize < 1 || pageSize > 100 {
-		pageSize = 20
-	}
-
-	offset := (page - 1) * pageSize
-	subscriptions, total, err := h.repo.List(offset, pageSize)
+	subscriptions, _, err := h.repo.List(0, 0)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
@@ -891,9 +901,7 @@ func (h *SubscriptionHandler) List(c *gin.Context) {
 		"code":    0,
 		"message": "Success",
 		"data": gin.H{
-			"list":  subscriptionsWithStats,
-			"total": total,
-			"page":  page,
+			"list": subscriptionsWithStats,
 		},
 	})
 }

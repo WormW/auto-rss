@@ -41,11 +41,8 @@ func (r *renamer) Rename(download *model.Download, sourcePath string) (string, e
 	subscription := download.Subscription
 	newFileName := r.GenerateFileName(&subscription, download.Episode, filepath.Base(sourcePath))
 
-	// 构建目标路径
-	destDir := subscription.DownloadPath
-	if destDir == "" {
-		destDir = filepath.Dir(sourcePath)
-	}
+	// 构建目标路径（使用源文件所在目录）
+	destDir := filepath.Dir(sourcePath)
 
 	// 确保目标目录存在
 	if err := os.MkdirAll(destDir, 0755); err != nil {

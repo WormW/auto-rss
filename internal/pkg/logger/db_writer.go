@@ -21,41 +21,72 @@ func NewDBWriter(db *gorm.DB) *DBWriter {
 
 // Write 实现 io.Writer 接口
 func (w *DBWriter) Write(p []byte) (n int, err error) {
-	// 解析日志JSON
 	var logEntry map[string]interface{}
 	if err := json.Unmarshal(p, &logEntry); err != nil {
-		return len(p), nil // 解析失败不影响日志输出
+		return len(p), nil
 	}
 
-	// 提取字段
 	level, _ := logEntry["level"].(string)
 	msg, _ := logEntry["msg"].(string)
+	caller, _ := logEntry["caller"].(string)
 
-	// 移除已处理的字段,剩下的作为context
+	// 从 caller 路径推断模块
+	module := inferModule(caller)
+
+	// 移除已处理的字段
 	delete(logEntry, "level")
 	delete(logEntry, "msg")
 	delete(logEntry, "ts")
 	delete(logEntry, "caller")
 
-	// 序列化context
 	contextBytes, _ := json.Marshal(logEntry)
 
-	// 创建日志记录
 	log := &model.Log{
 		Level:     level,
+		Module:    module,
 		Message:   msg,
 		Context:   string(contextBytes),
 		CreatedAt: time.Now(),
 	}
 
-	// 写入数据库 (异步,不阻塞)
 	go func() {
-		if err := w.db.Create(log).Error; err != nil {
-			// 写入失败只打印到标准输出,不影响程序运行
-		}
+		_ = w.db.Create(log).Error
 	}()
 
 	return len(p), nil
+}
+
+// inferModule 从 caller 路径推断模块名
+func inferModule(caller string) string {
+	switch {
+	case contains(caller, "scheduler"):
+		return "rss"
+	case contains(caller, "downloader"), contains(caller, "download"):
+		return "download"
+	case contains(caller, "organizer"):
+		return "organizer"
+	case contains(caller, "bangumi"):
+		return "bangumi"
+	case contains(caller, "subscription"):
+		return "subscription"
+	case contains(caller, "config"):
+		return "config"
+	default:
+		return "system"
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsImpl(s, substr))
+}
+
+func containsImpl(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
 
 // Sync 实现 zapcore.WriteSyncer 接口

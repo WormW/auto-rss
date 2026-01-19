@@ -110,7 +110,7 @@ const columns = [
     key: 'actions',
     width: 120,
     render: (row: Download) => {
-      const buttons = []
+      const buttons: Array<ReturnType<typeof h>> = []
       if (row.status === 'failed') {
         buttons.push(
           h(

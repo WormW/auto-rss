@@ -193,7 +193,7 @@ const seasonOptions = computed(() => {
 })
 
 // 显示对话框
-const show = (sourceId?: number, searchQuery?: string) => {
+const show = (searchQuery?: string) => {
   visible.value = true
   searchText.value = searchQuery || ''
   animeList.value = []
@@ -204,35 +204,6 @@ const show = (sourceId?: number, searchQuery?: string) => {
   // 只有传入搜索关键词时才自动搜索，否则等待用户点击搜索按钮
   if (searchQuery) {
     handleSearch()
-  }
-}
-
-// 加载当前季度
-const loadCurrentSeason = async () => {
-  loading.value = true
-  try {
-    const currentYear = new Date().getFullYear()
-    const currentMonth = new Date().getMonth() + 1
-
-    // 根据月份判断季度
-    let season = '春季'
-    if (currentMonth >= 1 && currentMonth <= 3) {
-      season = '冬季'
-    } else if (currentMonth >= 4 && currentMonth <= 6) {
-      season = '春季'
-    } else if (currentMonth >= 7 && currentMonth <= 9) {
-      season = '夏季'
-    } else {
-      season = '秋季'
-    }
-
-    // 获取当前季度番剧
-    const result: any = await mikanApi.getBySeason(currentYear, season)
-    processSearchResult(result.data)
-  } catch (error: any) {
-    message.error(error.message || '加载失败')
-  } finally {
-    loading.value = false
   }
 }
 

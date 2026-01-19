@@ -260,6 +260,12 @@ go mod download
 go build -o auto-rss ./cmd/server
 ```
 
+### 构建单文件可执行 (包含前端)
+
+```bash
+make build-embed
+```
+
 ### 运行开发环境
 
 ```bash

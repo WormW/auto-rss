@@ -24,6 +24,7 @@ func (h *LogHandler) List(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
 	level := c.Query("level")
+	module := c.Query("module")
 
 	if page < 1 {
 		page = 1
@@ -32,7 +33,7 @@ func (h *LogHandler) List(c *gin.Context) {
 		pageSize = 50
 	}
 
-	logs, total, err := h.repo.List(page, pageSize, level)
+	logs, total, err := h.repo.List(page, pageSize, level, module)
 	if err != nil {
 		logger.Error("Failed to query logs",
 			"page", page,

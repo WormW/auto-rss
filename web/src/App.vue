@@ -78,7 +78,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, h, onMounted } from 'vue'
+import { ref, computed, h } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
   NConfigProvider,

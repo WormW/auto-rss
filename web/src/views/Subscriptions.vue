@@ -35,7 +35,7 @@
                 <div class="cover-wrapper">
                   <img
                     v-if="sub.bangumi_cover_local"
-                    :src="`http://localhost:7892/covers/${sub.bangumi_cover_local}`"
+                    :src="`/covers/${sub.bangumi_cover_local}`"
                     :alt="sub.name"
                     class="cover-img"
                   />
@@ -135,7 +135,7 @@
               <div class="cover-wrapper">
                 <img
                   v-if="sub.bangumi_cover_local"
-                  :src="`http://localhost:7892/covers/${sub.bangumi_cover_local}`"
+                  :src="`/covers/${sub.bangumi_cover_local}`"
                   :alt="sub.name"
                   class="cover-img"
                 />
@@ -164,7 +164,7 @@
 
                 <div class="progress-row" v-if="sub.current_episode || sub.total_episodes">
                   <div class="progress-info">
-                    <span :style="{ color: sub.current_episode >= sub.total_episodes ? '#18a058' : '' }">
+                    <span :style="{ color: isSeasonComplete(sub) ? '#18a058' : '' }">
                       {{ sub.current_episode || 0 }} / {{ sub.total_episodes || '?' }}
                     </span>
                   </div>
@@ -337,10 +337,6 @@
                 <n-input-number v-model:value="formData.episode_offset" style="width: 100%;" />
               </n-form-item>
 
-              <n-form-item label="下载路径">
-                <n-input v-model:value="formData.download_path" placeholder="/downloads" />
-              </n-form-item>
-
               <n-form-item label="合集种子 (可选)">
                 <n-input
                   v-model:value="formData.collection_torrent"
@@ -406,12 +402,11 @@ import {
 } from 'naive-ui'
 import { subscriptionApi, type Subscription } from '@/api'
 import { api } from '@/api'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute } from 'vue-router'
 import { EditOutlined, DeleteOutlined, SearchOutlined, ReloadOutlined, DownloadOutlined, FolderOpenOutlined } from '@vicons/antd'
 import AnimeSearch from '@/components/AnimeSearch.vue'
 
 const route = useRoute()
-const router = useRouter()
 const message = useMessage()
 const dialog = useDialog()
 const loading = ref(false)
@@ -469,7 +464,6 @@ const formData = ref({
   bangumi_id: 0,
   total_episodes: 0,
   episode_offset: 0,
-  download_path: '/downloads',
   collection_torrent: '',
   filter_rules: '',
   enabled: true,
@@ -583,7 +577,6 @@ const showAddDialog = () => {
     bangumi_id: 0,
     total_episodes: 0,
     episode_offset: 0,
-    download_path: '/downloads',
     collection_torrent: '',
     filter_rules: '',
     enabled: true,
@@ -634,7 +627,6 @@ const handleEdit = (sub: Subscription) => {
     bangumi_id: sub.bangumi_id || 0,
     total_episodes: sub.total_episodes || 0,
     episode_offset: sub.episode_offset || 0,
-    download_path: sub.download_path,
     collection_torrent: sub.collection_torrent || '',
     filter_rules: sub.filter_rules || '',
     enabled: sub.enabled !== false,
@@ -697,7 +689,23 @@ const handleSubmit = async () => {
     showModal.value = false
     loadSubscriptions()
   } catch (error: any) {
-    message.error(error.message || '操作失败')
+    const status = error?.response?.status
+    const responseData = error?.response?.data
+    if (!editingId.value && status === 409) {
+      message.warning(responseData?.message || '订阅已存在')
+      const existing = responseData?.data as Subscription | undefined
+      if (existing) {
+        const index = subscriptions.value.findIndex((sub) => sub.id === existing.id)
+        if (index >= 0) {
+          subscriptions.value[index] = { ...subscriptions.value[index], ...existing }
+        } else {
+          subscriptions.value.unshift(existing)
+        }
+      }
+      showModal.value = false
+      return
+    }
+    message.error(responseData?.message || error.message || '操作失败')
   } finally {
     submitLoading.value = false
   }
@@ -769,25 +777,13 @@ const handleEnrichBangumi = async (id: number) => {
   }
 }
 
-// 获取收集状态的标签类型
-const getCollectionTagType = (sub: Subscription): string => {
-  // 如果有最新集数信息
-  if (sub.latest_episode) {
-    if (sub.current_episode === sub.latest_episode) {
-      return 'success' // 已全部收集最新剧集
-    }
-    return 'warning' // 有未收集的最新剧集
+const isSeasonComplete = (sub: Subscription): boolean => {
+  const currentEpisode = sub.current_episode ?? 0
+  const totalEpisodes = sub.total_episodes ?? 0
+  if (totalEpisodes <= 0) {
+    return false
   }
-
-  // 如果有总集数信息
-  if (sub.total_episodes && sub.total_episodes > 0) {
-    if (sub.current_episode >= sub.total_episodes) {
-      return 'success' // 已完成收集
-    }
-    return 'info' // 收集中
-  }
-
-  return 'default' // 没有集数信息
+  return currentEpisode >= totalEpisodes
 }
 
 // 手动收集剧集
@@ -847,7 +843,6 @@ onMounted(() => {
       bangumi_id: 0,
       total_episodes: 0,
       episode_offset: 0,
-      download_path: '/downloads',
       collection_torrent: '',
       filter_rules: '',
       enabled: true,
