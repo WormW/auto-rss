@@ -97,7 +97,7 @@
           </n-layout-sider>
 
           <n-layout>
-            <n-layout-header bordered style="height: 64px; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); transition: all 0.3s ease;">
+            <n-layout-header bordered style="height: 64px; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); transition: all 0.3s ease; position: sticky; top: 0; z-index: 100;">
               <!-- Left side of header (Breadcrumb or Page Title could go here) -->
               <div style="display: flex; align-items: center;">
                 <!-- Placeholder for future breadcrumb -->
