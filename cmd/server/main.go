@@ -98,6 +98,7 @@ func main() {
 		qbClient,
 		downloadRepo,
 		subscriptionRepo,
+		configRepo,
 		renameTemplate,
 	)
 

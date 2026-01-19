@@ -534,9 +534,6 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 	if epOffset, ok := updates["episode_offset"].(float64); ok {
 		existing.EpisodeOffset = int(epOffset)
 	}
-	if downloadPath, ok := updates["download_path"].(string); ok {
-		existing.DownloadPath = downloadPath
-	}
 	if filterRules, ok := updates["filter_rules"].(string); ok {
 		existing.FilterRules = filterRules
 	}
