@@ -3,6 +3,7 @@ package downloader
 import (
 	"bytes"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -44,7 +45,7 @@ type TorrentInfo struct {
 	Hash       string
 	Name       string
 	Progress   float64
-	State      string  // 状态：downloading, uploading, pausedUP, pausedDL, queuedUP, queuedDL, checkingUP, checkingDL, stalledUP, stalledDL, metaDL, forcedUP, forcedDL, allocating, unknown, missingFiles, error
+	State      string // 状态：downloading, uploading, pausedUP, pausedDL, queuedUP, queuedDL, checkingUP, checkingDL, stalledUP, stalledDL, metaDL, forcedUP, forcedDL, allocating, unknown, missingFiles, error
 	SavePath   string
 	Category   string
 	Size       int64
@@ -203,8 +204,13 @@ func (c *qbittorrentClient) AddTorrent(torrentURL string, savePath string, categ
 		if err == nil && torrentInfo != nil {
 			// 种子存在，更新其分类
 			c.SetCategory(extractedHash, category)
-			return torrentInfo.Hash, nil
+			return strings.ToLower(torrentInfo.Hash), nil
 		}
+	}
+
+	// 对于 mikan 的 .torrent URL，可从链接中提取 40 位 info-hash，避免返回空 hash。
+	if guessedHash := extractHashFromTorrentURL(torrentURL); guessedHash != "" {
+		return guessedHash, nil
 	}
 
 	// 没有找到 hash，但种子可能已成功添加，返回空字符串（后续 monitor 会处理）
@@ -225,10 +231,20 @@ func extractHashFromURL(url string) string {
 			}
 			// hash 应该是 40 个十六进制字符
 			if len(hash) == 40 {
-				return hash
+				return strings.ToLower(hash)
 			}
 			// 或者是 32 个 base32 字符（需要转换，暂时跳过）
 		}
+	}
+	return ""
+}
+
+// extractHashFromTorrentURL 从 .torrent URL 提取 40 位十六进制 hash（mikan 链接可用）
+func extractHashFromTorrentURL(torrentURL string) string {
+	re := regexp.MustCompile(`(?i)/([a-f0-9]{40})\.torrent(?:$|\?)`)
+	m := re.FindStringSubmatch(torrentURL)
+	if len(m) == 2 {
+		return strings.ToLower(m[1])
 	}
 	return ""
 }

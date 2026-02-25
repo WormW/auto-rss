@@ -161,12 +161,43 @@ func (m *DownloadMonitor) processPendingDownloads() {
 		}
 		savePath := utils.GenerateDownloadPath(basePath, subscription.Name)
 
-		// 添加到qBittorrent
-		torrentHash, err := m.qbClient.AddTorrent(
-			download.TorrentURL,
-			savePath,
-			AutoRssCategory,
-		)
+		// 添加到qBittorrent：对于 .torrent URL 优先走“先下载文件再上传”路径，兼容需要代理/重定向的站点。
+		var torrentHash string
+		if strings.HasSuffix(strings.ToLower(download.TorrentURL), ".torrent") || strings.Contains(download.TorrentURL, "/Download/") {
+			if m.configRepo != nil {
+				if proxyConfig, proxyErr := m.configRepo.Get("system_proxy"); proxyErr == nil && proxyConfig != nil && proxyConfig.Value != "" {
+					_ = m.qbClient.SetProxy(proxyConfig.Value)
+				}
+			}
+
+			if qbDownloader, ok := m.qbClient.(interface {
+				DownloadTorrentFile(url string) ([]byte, error)
+			}); ok {
+				fileContent, downloadErr := qbDownloader.DownloadTorrentFile(download.TorrentURL)
+				if downloadErr != nil {
+					err = fmt.Errorf("download torrent file failed: %w", downloadErr)
+				} else {
+					torrentHash, err = m.qbClient.AddTorrentFile(
+						"torrent.torrent",
+						fileContent,
+						savePath,
+						AutoRssCategory,
+					)
+				}
+			} else {
+				torrentHash, err = m.qbClient.AddTorrent(
+					download.TorrentURL,
+					savePath,
+					AutoRssCategory,
+				)
+			}
+		} else {
+			torrentHash, err = m.qbClient.AddTorrent(
+				download.TorrentURL,
+				savePath,
+				AutoRssCategory,
+			)
+		}
 
 		if err != nil {
 			logger.Error("Failed to add pending download to qBittorrent",
@@ -186,6 +217,19 @@ func (m *DownloadMonitor) processPendingDownloads() {
 				"download_id", download.ID,
 				"title", download.Title)
 			continue
+		}
+
+		// 返回 hash 若与当前记录不同，先做去重检查，避免产生重复 hash 记录。
+		if torrentHash != download.TorrentHash {
+			existing, _ := m.downloadRepo.GetByHash(torrentHash)
+			if existing != nil && existing.ID != download.ID {
+				logger.Warn("Torrent hash already belongs to another download, removing duplicate pending task",
+					"download_id", download.ID,
+					"existing_download_id", existing.ID,
+					"hash", torrentHash)
+				_ = m.downloadRepo.Delete(download.ID)
+				continue
+			}
 		}
 
 		// 更新下载记录
@@ -610,13 +654,13 @@ func extractEpisodeFromFilename(filename string) int {
 	// - [01], [12] (方括号内的数字)
 	// - _01_, _12_ (下划线包围)
 	patterns := []string{
-		`第?\s*(\d+)\s*[集话話]`,           // 第12集, 12话
-		`[Ee][Pp]?\.?\s*(\d+)`,          // E12, EP12, Ep.12
-		`Episode\s*(\d+)`,               // Episode 12
-		`[Ss]\d{1,2}[Ee](\d+)`,          // S01E12, S1E12
-		`[\[\(](\d{2,3})[\]\)]`,         // [01], (12)
-		`[\s\-_](\d{2})[\s\-_\[\.]`,     // -01-, _12_, 空格01空格
-		`[\s\-](\d{2})$`,                // 以-01或空格01结尾
+		`第?\s*(\d+)\s*[集话話]`,        // 第12集, 12话
+		`[Ee][Pp]?\.?\s*(\d+)`,      // E12, EP12, Ep.12
+		`Episode\s*(\d+)`,           // Episode 12
+		`[Ss]\d{1,2}[Ee](\d+)`,      // S01E12, S1E12
+		`[\[\(](\d{2,3})[\]\)]`,     // [01], (12)
+		`[\s\-_](\d{2})[\s\-_\[\.]`, // -01-, _12_, 空格01空格
+		`[\s\-](\d{2})$`,            // 以-01或空格01结尾
 	}
 
 	for _, pattern := range patterns {

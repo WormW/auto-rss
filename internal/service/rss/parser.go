@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mmcdole/gofeed"
+	ext "github.com/mmcdole/gofeed/extensions"
 )
 
 // Parser RSS 解析器接口
@@ -118,10 +119,15 @@ func (p *parser) FetchAndParse(rssURL string) ([]RSSItem, error) {
 			rssItem.TorrentURL = item.Link
 		}
 
-		// 生成种子 Hash (使用 URL 的 MD5 作为临时 hash)
-		if rssItem.TorrentURL != "" {
-			hash := md5.Sum([]byte(rssItem.TorrentURL))
-			rssItem.TorrentHash = fmt.Sprintf("%x", hash)
+		// 优先使用 RSS 扩展字段中的 info-hash（如 nyaa:infoHash），其次尝试从 URL 提取。
+		if extHash := extractInfoHashFromExtensions(item.Extensions); extHash != "" {
+			rssItem.TorrentHash = extHash
+		} else if rssItem.TorrentURL != "" {
+			rssItem.TorrentHash = extractInfoHashFromTorrentURL(rssItem.TorrentURL)
+			if rssItem.TorrentHash == "" {
+				hash := md5.Sum([]byte(rssItem.TorrentURL))
+				rssItem.TorrentHash = fmt.Sprintf("%x", hash)
+			}
 		}
 
 		// 提取字幕组
@@ -148,6 +154,39 @@ func (p *parser) ExtractFansub(title string) string {
 }
 
 // ExtractEpisode 从标题中提取集数
+func extractInfoHashFromTorrentURL(torrentURL string) string {
+	re := regexp.MustCompile(`(?i)/([a-f0-9]{40})\.torrent(?:$|\?)`)
+	m := re.FindStringSubmatch(torrentURL)
+	if len(m) == 2 {
+		return strings.ToLower(m[1])
+	}
+	return ""
+}
+
+func extractInfoHashFromExtensions(extensions ext.Extensions) string {
+	if len(extensions) == 0 {
+		return ""
+	}
+
+	for ns, fields := range extensions {
+		for key, values := range fields {
+			if !strings.EqualFold(ns, "nyaa") || !strings.EqualFold(key, "infoHash") {
+				continue
+			}
+			for _, ext := range values {
+				v := strings.TrimSpace(ext.Value)
+				if len(v) == 40 {
+					if ok, _ := regexp.MatchString(`(?i)^[a-f0-9]{40}$`, v); ok {
+						return strings.ToLower(v)
+					}
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
 func (p *parser) ExtractEpisode(title string) int {
 	// 常见集数格式:
 	// - [xx] 第12集
@@ -156,12 +195,12 @@ func (p *parser) ExtractEpisode(title string) int {
 	// - S01E12
 	// - Title - 176 (1080p)
 	patterns := []string{
-		`第?\s*(\d+)\s*[集话話]`,           // 第12集, 12话
-		`[Ee][Pp]?\.?\s*(\d+)`,          // E12, EP12, Ep.12
-		`Episode\s*(\d+)`,               // Episode 12
-		`\[\s*(\d+)\s*\]`,               // [12]
-		`S\d+E(\d+)`,                    // S01E12
-		`-\s*(\d+)\s*[([\-]`,            // - 12 (, - 12 [, - 12 -
+		`第?\s*(\d+)\s*[集话話]`,                    // 第12集, 12话
+		`[Ee][Pp]?\.?\s*(\d+)`,                  // E12, EP12, Ep.12
+		`Episode\s*(\d+)`,                       // Episode 12
+		`\[\s*(\d+)\s*\]`,                       // [12]
+		`S\d+E(\d+)`,                            // S01E12
+		`-\s*(\d+)\s*(?:v\d+)?\s*(?:$|\[|\(|-)`, // - 12, - 12 v2, - 12 [
 	}
 
 	for _, pattern := range patterns {

@@ -16,16 +16,17 @@ type Subscription struct {
 	LastCheckTime   *time.Time `json:"last_check_time"`
 
 	// 新增字段 - 参考ani-rss
-	Fansub          string     `json:"fansub" gorm:"type:varchar(100)"`         // 字幕组名称
-	Language        string     `json:"language" gorm:"type:varchar(10)"`        // 字幕语言 (CHS, CHT, etc.)
-	UpdateDay       string     `json:"update_day" gorm:"type:varchar(10)"`      // 更新星期 (0-6)
-	TotalEpisodes   int        `json:"total_episodes" gorm:"default:0"`         // 总集数 (0表示未知)
-	CurrentEpisode  int        `json:"current_episode" gorm:"default:0"`        // 当前集数（已收集的集数）
-	LatestEpisode   int        `json:"latest_episode" gorm:"default:0"`         // 最新更新的集数（从RSS/番剧源获取）
-	EpisodeOffset   int        `json:"episode_offset" gorm:"default:0"`         // 集数偏移
-	FilterRules     string     `json:"filter_rules" gorm:"type:text"`           // 过滤规则
-	Enabled         bool       `json:"enabled" gorm:"default:true;index"`       // 是否启用
-	LastDownloadAt  *time.Time `json:"last_download_at"`                        // 最后下载时间
+	Fansub         string     `json:"fansub" gorm:"type:varchar(100)"`    // 字幕组名称
+	Language       string     `json:"language" gorm:"type:varchar(10)"`   // 字幕语言 (CHS, CHT, etc.)
+	UpdateDay      string     `json:"update_day" gorm:"type:varchar(10)"` // 更新星期 (0-6)
+	TotalEpisodes  int        `json:"total_episodes" gorm:"default:0"`    // 总集数 (0表示未知)
+	CurrentEpisode int        `json:"current_episode" gorm:"default:0"`   // 当前集数（已收集的集数）
+	LatestEpisode  int        `json:"latest_episode" gorm:"default:0"`    // 最新更新的集数（从RSS/番剧源获取）
+	EpisodeOffset  int        `json:"episode_offset" gorm:"default:0"`    // 集数偏移
+	FilterRules    string     `json:"filter_rules" gorm:"type:text"`      // 过滤规则
+	Enabled        bool       `json:"enabled" gorm:"default:true;index"`  // 是否启用
+	LastDownloadAt *time.Time `json:"last_download_at"`                   // 最后下载时间
+	LastRSSPubTime *time.Time `json:"last_rss_pub_time"`                  // RSS增量水位线（仅接受更大的发布时间）
 
 	// Bangumi相关字段
 	BangumiID         int     `json:"bangumi_id" gorm:"index"`                      // Bangumi条目ID
@@ -39,13 +40,13 @@ type Subscription struct {
 	AirYear           int     `json:"air_year"`                                     // 开播年份
 
 	// RSS源相关
-	RSSSourceID *uint  `json:"rss_source_id" gorm:"index"`            // RSS源ID（如果从RSS源创建）
-	SourceType  string `json:"source_type" gorm:"default:manual"`     // manual: 手动填写, rss_source: 从RSS源选择
+	RSSSourceID *uint  `json:"rss_source_id" gorm:"index"`        // RSS源ID（如果从RSS源创建）
+	SourceType  string `json:"source_type" gorm:"default:manual"` // manual: 手动填写, rss_source: 从RSS源选择
 
 	// 合集种子
 	CollectionTorrent string `json:"collection_torrent" gorm:"type:text"` // 合集种子地址(磁力链接或.torrent URL)
 
-		CreatedAt time.Time `json:"created_at"`
+	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 
 	Downloads []Download `json:"downloads,omitempty" gorm:"foreignKey:SubscriptionID"`

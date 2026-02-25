@@ -3,6 +3,7 @@ package scheduler
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
@@ -22,16 +23,19 @@ type Scheduler interface {
 	Stop()
 	// AddJob 添加定时任务
 	AddJob(spec string, cmd func()) (cron.EntryID, error)
+	// RunRSSCheckNow 手动触发一次 RSS 检查（异步）
+	RunRSSCheckNow() error
 }
 
 type scheduler struct {
-	cron               *cron.Cron
-	subscriptionRepo   repository.SubscriptionRepository
-	downloadRepo       repository.DownloadRepository
-	configRepo         repository.ConfigRepository
-	rssCheckInterval   string
-	rssParser          rss.Parser
-	qbClient           downloader.QBittorrentClient
+	cron             *cron.Cron
+	subscriptionRepo repository.SubscriptionRepository
+	downloadRepo     repository.DownloadRepository
+	configRepo       repository.ConfigRepository
+	rssCheckInterval string
+	rssParser        rss.Parser
+	qbClient         downloader.QBittorrentClient
+	rssCheckRunning  atomic.Bool
 }
 
 // NewScheduler 创建调度器实例
@@ -78,13 +82,6 @@ func (s *scheduler) Start() error {
 	}
 	logger.Info("RSS check job added", "interval", cronSpec)
 
-	// 添加下载状态检查任务（每 5 分钟）
-	_, err = s.AddJob("@every 5m", s.checkDownloadStatus)
-	if err != nil {
-		return fmt.Errorf("failed to add download status check job: %w", err)
-	}
-	logger.Info("Download status check job added", "interval", "@every 5m")
-
 	// 启动调度器
 	s.cron.Start()
 	logger.Info("Scheduler started")
@@ -92,8 +89,23 @@ func (s *scheduler) Start() error {
 	return nil
 }
 
+// RunRSSCheckNow 手动触发一次 RSS 检查（异步）
+func (s *scheduler) RunRSSCheckNow() error {
+	if s.rssCheckRunning.Load() {
+		return fmt.Errorf("rss check is already running")
+	}
+	go s.checkRSSFeeds()
+	return nil
+}
+
 // checkRSSFeeds RSS 检查任务
 func (s *scheduler) checkRSSFeeds() {
+	if !s.rssCheckRunning.CompareAndSwap(false, true) {
+		logger.Warn("RSS feed check skipped because another run is still active")
+		return
+	}
+	defer s.rssCheckRunning.Store(false)
+
 	logger.Info("Starting RSS feed check")
 
 	// 设置代理
@@ -132,8 +144,76 @@ func (s *scheduler) checkRSSFeeds() {
 			"subscription", sub.Name,
 			"items", len(items))
 
-		// 处理每个 RSS 条目
+		// 首次启用时间水位线时，优先按“已存在下载记录”回推到对应的最新 pubDate，避免误跳过后续新集。
+		if sub.LastRSSPubTime == nil {
+			bootstrapFromExisting := false
+			existingDownloads, err := s.downloadRepo.ListBySubscriptionID(sub.ID)
+			if err == nil && len(existingDownloads) > 0 {
+				existingHashes := make(map[string]struct{}, len(existingDownloads))
+				for _, d := range existingDownloads {
+					if d.TorrentHash != "" {
+						existingHashes[d.TorrentHash] = struct{}{}
+					}
+				}
+
+				for _, item := range items {
+					if item.PubTime.IsZero() {
+						continue
+					}
+					if _, ok := existingHashes[item.TorrentHash]; !ok {
+						continue
+					}
+					if sub.LastRSSPubTime == nil || item.PubTime.After(*sub.LastRSSPubTime) {
+						pubCopy := item.PubTime
+						sub.LastRSSPubTime = &pubCopy
+						bootstrapFromExisting = true
+					}
+				}
+
+				if bootstrapFromExisting {
+					now := time.Now()
+					sub.LastCheckTime = &now
+					s.subscriptionRepo.Update(&sub)
+					logger.Info("Bootstrapped last_rss_pub_time from existing downloads",
+						"subscription", sub.Name,
+						"last_rss_pub_time", sub.LastRSSPubTime,
+						"existing_downloads", len(existingDownloads))
+				}
+			}
+
+			// 没有历史下载时，按当前 RSS 最新发布时间初始化，避免历史回灌。
+			if sub.LastRSSPubTime == nil {
+				for _, item := range items {
+					if !item.PubTime.IsZero() {
+						pubCopy := item.PubTime
+						sub.LastRSSPubTime = &pubCopy
+						now := time.Now()
+						sub.LastCheckTime = &now
+						s.subscriptionRepo.Update(&sub)
+						logger.Info("Initialized last_rss_pub_time for subscription",
+							"subscription", sub.Name,
+							"last_rss_pub_time", sub.LastRSSPubTime)
+						break
+					}
+				}
+				if sub.LastRSSPubTime != nil {
+					continue
+				}
+			}
+		}
+
+		maxPubTime := sub.LastRSSPubTime
 		for _, item := range items {
+			if !item.PubTime.IsZero() {
+				if maxPubTime == nil || item.PubTime.After(*maxPubTime) {
+					pubCopy := item.PubTime
+					maxPubTime = &pubCopy
+				}
+				if sub.LastRSSPubTime != nil && !item.PubTime.After(*sub.LastRSSPubTime) {
+					continue
+				}
+			}
+
 			// 检查是否已存在相同 hash
 			existing, _ := s.downloadRepo.GetByHash(item.TorrentHash)
 			if existing != nil {
@@ -266,56 +346,16 @@ func (s *scheduler) checkRSSFeeds() {
 			s.downloadRepo.Update(download)
 		}
 
-		// 更新最后检查时间
 		now := time.Now()
 		sub.LastCheckTime = &now
+		if maxPubTime != nil {
+			pubCopy := *maxPubTime
+			sub.LastRSSPubTime = &pubCopy
+		}
 		s.subscriptionRepo.Update(&sub)
 	}
 
 	logger.Info("RSS feed check completed")
-}
-
-// checkDownloadStatus 下载状态检查任务
-func (s *scheduler) checkDownloadStatus() {
-	logger.Info("Checking download status")
-
-	// 获取正在下载的任务
-	downloads, _, err := s.downloadRepo.List(0, 1000, "downloading")
-	if err != nil {
-		logger.Error("Failed to get downloading tasks", "error", err)
-		return
-	}
-
-	for _, download := range downloads {
-		// 查询 qBittorrent 状态
-		info, err := s.qbClient.GetTorrentInfo(download.TorrentHash)
-		if err != nil {
-			logger.Error("Failed to get torrent info",
-				"hash", download.TorrentHash,
-				"error", err)
-			continue
-		}
-
-		// 更新下载进度
-		if info.State == "completed" || info.Progress >= 1.0 {
-			download.Status = "completed"
-			now := time.Now()
-			download.DownloadedAt = &now
-			download.FilePath = info.SavePath
-
-			if err := s.downloadRepo.Update(&download); err != nil {
-				logger.Error("Failed to update download status",
-					"id", download.ID,
-					"error", err)
-			}
-
-			logger.Info("Download completed",
-				"title", download.Title,
-				"path", info.SavePath)
-		}
-	}
-
-	logger.Info("Download status check completed")
 }
 
 // matchesFilter 检查标题是否匹配过滤条件

@@ -11,6 +11,7 @@ import (
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/rss"
+	"github.com/WormW/auto-rss/internal/service/scheduler"
 	"github.com/WormW/auto-rss/internal/webui"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -38,10 +39,13 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	rssSourceRepo := repository.NewRSSSourceRepository(db)
 	logRepo := repository.NewLogRepository(db)
 
+	// 初始化调度器
+	rssScheduler := scheduler.NewScheduler(subscriptionRepo, downloadRepo, configRepo, cfg.RSSInterval, rssParser, qbClient)
+
 	// 初始化处理器
 	subscriptionHandler := handler.NewSubscriptionHandler(subscriptionRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath)
 	downloadHandler := handler.NewDownloadHandler(downloadRepo, qbClient)
-	rssHandler := handler.NewRSSHandler()
+	rssHandler := handler.NewRSSHandler(rssScheduler)
 	configHandler := handler.NewConfigHandler(configRepo)
 	rssSourceHandler := handler.NewRSSSourceHandler(rssSourceRepo, configRepo, rssParser)
 	mikanHandler := handler.NewMikanHandler(configRepo, subscriptionRepo)
@@ -150,6 +154,11 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			tasks.GET("/history", taskHandler.GetHistory)
 			tasks.POST("/cancel", taskHandler.Cancel)
 		}
+	}
+
+	// 启动后台调度器
+	if err := rssScheduler.Start(); err != nil {
+		panic(err)
 	}
 
 	// 健康检查

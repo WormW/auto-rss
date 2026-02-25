@@ -1028,6 +1028,7 @@ func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Tas
 	// RSS items 是按发布时间降序排列的（最新的在前）
 	// 所以我们遍历时，先遇到的就是最新的版本
 	processedEpisodes := make(map[int]bool)
+	maxPubTime := subscription.LastRSSPubTime
 
 	manager.UpdateProgress(25, "分析RSS条目...")
 
@@ -1046,6 +1047,16 @@ func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Tas
 		processedItems++
 		progress := 25 + (processedItems * 60 / totalItems) // 25-85%
 		manager.UpdateProgress(progress, fmt.Sprintf("处理第 %d/%d 个条目...", processedItems, totalItems))
+
+		if !item.PubTime.IsZero() {
+			if maxPubTime == nil || item.PubTime.After(*maxPubTime) {
+				pubCopy := item.PubTime
+				maxPubTime = &pubCopy
+			}
+			if subscription.LastRSSPubTime != nil && !item.PubTime.After(*subscription.LastRSSPubTime) {
+				continue
+			}
+		}
 
 		// 计算相对集数（考虑偏移）
 		offset := subscription.EpisodeOffset
@@ -1320,13 +1331,22 @@ func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Tas
 		}
 	}
 
+	if maxPubTime != nil {
+		pubCopy := *maxPubTime
+		subscription.LastRSSPubTime = &pubCopy
+		if err := h.repo.Update(subscription); err != nil {
+			logger.Warn("Failed to persist last RSS pub time", "subscription_id", id, "error", err.Error())
+		}
+	}
+
 	logger.Info("Episode collection completed",
 		"subscription_id", id,
 		"new_downloads", len(newDownloads),
 		"deleted_old_tasks", deletedCount,
 		"total_rss_items", len(items),
 		"latest_episode", latestEpisode,
-		"current_episode", maxCollectedEpisode)
+		"current_episode", maxCollectedEpisode,
+		"last_rss_pub_time", subscription.LastRSSPubTime)
 
 	// 设置任务结果
 	manager.SetResult(gin.H{
