@@ -59,6 +59,18 @@ func TestGenerateDownloadPath(t *testing.T) {
 			animeName: "Princess Session Orchestra",
 			expected:  "/downloads/princesssessionorchestra",
 		},
+		{
+			name:      "简繁与季信息归一到同一目录",
+			basePath:  "/downloads/差點在迷宮深處",
+			animeName: "差点在迷宫深处 第2季",
+			expected:  "/downloads/差點在迷宮深處",
+		},
+		{
+			name:      "全角Season与半角路径归一",
+			basePath:  "/downloads/JianLai",
+			animeName: "ＪｉａｎＬａｉ　Ｓｅａｓｏｎ　２",
+			expected:  "/downloads/JianLai",
+		},
 	}
 
 	for _, tt := range tests {

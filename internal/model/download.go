@@ -13,7 +13,7 @@ type Download struct {
 	TorrentHash    string     `json:"torrent_hash" gorm:"unique;index"`
 	FilePath       string     `json:"file_path"`
 	RenamedPath    string     `json:"renamed_path"`
-	Status         string     `json:"status" gorm:"default:pending;index"` // pending, downloading, completed, failed
+	Status         string     `json:"status" gorm:"default:pending;index"` // pending, downloading, stalled, completed, failed
 	QbTaskID       string     `json:"qb_task_id"`
 	ErrorMessage   string     `json:"error_message" gorm:"type:text"`
 	DownloadedAt   *time.Time `json:"downloaded_at"`

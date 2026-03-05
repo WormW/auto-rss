@@ -268,9 +268,13 @@ func (s *scheduler) checkRSSFeeds() {
 					// 删除旧的下载任务（通常是非V2版本）
 					logger.Info("Found duplicate episode, removing old version",
 						"subscription", sub.Name,
+						"subscription_id", sub.ID,
 						"episode", item.Episode,
 						"old_title", existingEpisode.Title,
-						"new_title", item.Title)
+						"old_hash", existingEpisode.TorrentHash,
+						"new_title", item.Title,
+						"new_hash", item.TorrentHash,
+						"trigger_context", "scheduler_rss_check")
 
 					// 如果旧任务有 qBittorrent hash，尝试删除种子
 					if existingEpisode.TorrentHash != "" {

@@ -130,6 +130,7 @@ const getStatusConfig = (status: string) => {
   const statusMap: Record<string, { type: 'success' | 'warning' | 'error' | 'info', text: string }> = {
     pending: { type: 'info', text: '等待中' },
     downloading: { type: 'warning', text: '下载中' },
+    stalled: { type: 'warning', text: '下载停滞' },
     completed: { type: 'success', text: '已完成' },
     failed: { type: 'error', text: '失败' }
   }
@@ -140,6 +141,7 @@ const statusOptions = [
   { label: '全部', value: '' },
   { label: '等待中', value: 'pending' },
   { label: '下载中', value: 'downloading' },
+  { label: '下载停滞', value: 'stalled' },
   { label: '已完成', value: 'completed' },
   { label: '失败', value: 'failed' }
 ]
@@ -300,7 +302,8 @@ const handleClear = async (key: string) => {
     all: '全部',
     completed: '已完成',
     failed: '失败',
-    pending: '等待中'
+    pending: '等待中',
+    stalled: '下载停滞'
   }
 
   dialog.warning({

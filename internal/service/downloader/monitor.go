@@ -24,6 +24,9 @@ const (
 	StateCompleted   = "uploading" // qBittorrent完成后会变成uploading状态
 	StatePaused      = "pausedDL"
 	StateError       = "error"
+
+	// ReconcileGracePeriod 避免把刚创建/刚入队的任务误判为丢失
+	ReconcileGracePeriod = 10 * time.Minute
 )
 
 // DownloadMonitor 下载监控服务
@@ -272,6 +275,9 @@ func (m *DownloadMonitor) checkDownloads() {
 	for _, torrent := range torrents {
 		m.updateDownloadStatus(torrent)
 	}
+
+	// 对账：数据库里仍是 downloading/stalled，但 qB 中已不存在的任务应尽快回收。
+	m.reconcileMissingDownloadingTasks(torrents)
 }
 
 // updateDownloadStatus 更新下载状态
@@ -723,9 +729,11 @@ func mapQBStateToStatus(qbState string) string {
 		return "failed"
 	case qbState == "uploading" || strings.HasSuffix(qbState, "UP"):
 		return "completed"
+	case qbState == "stalledDL":
+		return "stalled"
 	default:
-		// 所有其他状态（downloading, pausedDL, queuedDL, stalledDL, metaDL, checkingDL等）
-		// 都认为是下载中，只要种子已添加到qBittorrent就保持downloading状态
+		// 其他下载态（downloading, pausedDL, queuedDL, metaDL, checkingDL等）
+		// 都归类为 downloading。
 		return "downloading"
 	}
 }
@@ -738,4 +746,73 @@ func isTorrentComplete(torrent *TorrentInfo) bool {
 		return true
 	}
 	return torrent.Progress >= 0.9999
+}
+
+func shouldSkipReconcileByGracePeriod(download *model.Download, now time.Time) bool {
+	if download == nil {
+		return true
+	}
+	return now.Sub(download.UpdatedAt) < ReconcileGracePeriod
+}
+
+// reconcileMissingDownloadingTasks 将已不在 qB 中的 downloading/stalled 任务回收为 failed，避免状态长期漂移。
+func (m *DownloadMonitor) reconcileMissingDownloadingTasks(torrents []*TorrentInfo) {
+	torrentHashSet := make(map[string]struct{}, len(torrents))
+	for _, torrent := range torrents {
+		hash := strings.ToLower(strings.TrimSpace(torrent.Hash))
+		if hash != "" {
+			torrentHashSet[hash] = struct{}{}
+		}
+	}
+
+	downloadingTasks, _, err := m.downloadRepo.List(0, 10000, "downloading")
+	if err != nil {
+		logger.Error("Failed to list downloading tasks for reconciliation", "error", err.Error())
+		return
+	}
+	stalledTasks, _, err := m.downloadRepo.List(0, 10000, "stalled")
+	if err != nil {
+		logger.Error("Failed to list stalled tasks for reconciliation", "error", err.Error())
+		return
+	}
+	tasks := append(downloadingTasks, stalledTasks...)
+
+	now := time.Now()
+	reconciled := 0
+	skippedGrace := 0
+
+	for i := range tasks {
+		download := &tasks[i]
+		hash := strings.ToLower(strings.TrimSpace(download.TorrentHash))
+		if hash == "" {
+			continue
+		}
+		if _, exists := torrentHashSet[hash]; exists {
+			continue
+		}
+
+		if shouldSkipReconcileByGracePeriod(download, now) {
+			skippedGrace++
+			continue
+		}
+
+		download.Status = "failed"
+		download.ErrorMessage = "Torrent missing in qBittorrent during monitor reconciliation"
+		if err := m.downloadRepo.Update(download); err != nil {
+			logger.Error("Failed to reconcile missing downloading task",
+				"download_id", download.ID,
+				"hash", hash,
+				"error", err.Error())
+			continue
+		}
+		reconciled++
+	}
+
+	if reconciled > 0 || skippedGrace > 0 {
+		logger.Info("Download task reconciliation completed",
+			"reconciled_to_failed", reconciled,
+			"skipped_in_grace_period", skippedGrace,
+			"grace_period", ReconcileGracePeriod.String(),
+			"scanned_statuses", "downloading,stalled")
+	}
 }

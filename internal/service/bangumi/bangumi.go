@@ -441,12 +441,12 @@ func parseChineseDate(s string) string {
 func extractSeasonFromName(name, nameCN string) int {
 	// 尝试从各种格式中提取季度
 	patterns := []string{
-		`第(\d+)季`,      // 第2季
-		`第(\d+)期`,      // 第2期
-		`Season\s*(\d+)`, // Season 2
-		`S(\d+)`,         // S2
-		` (\d+)期$`,      // 空格+数字+期
-		`\s+(\d+)$`,      // 末尾的数字
+		`第([0-9一二三四五六七八九十两]+)季`,                     // 第2季 / 第二季
+		`第([0-9一二三四五六七八九十两]+)期`,                     // 第2期 / 第二期
+		`(?i)Season\s*([0-9IVX]+)`,                           // Season 2 / Season II
+		`(?i)(?:^|\s|\()S([0-9]{1,2})(?:$|\s|\))`,         // S2
+		` ([0-9一二三四五六七八九十两]+)期$`,                     // 空格+数字+期
+		`\s+([0-9]{1,2})$`,                                    // 末尾数字（限制两位，避免把年份识别为季数）
 	}
 
 	texts := []string{name, nameCN}
@@ -459,8 +459,8 @@ func extractSeasonFromName(name, nameCN string) int {
 		for _, pattern := range patterns {
 			re := regexp.MustCompile(pattern)
 			if matches := re.FindStringSubmatch(text); len(matches) > 1 {
-				season, err := strconv.Atoi(matches[1])
-				if err == nil && season > 0 {
+				season := parseSeasonToken(matches[1])
+				if season > 0 && season <= 30 {
 					return season
 				}
 			}
@@ -469,4 +469,115 @@ func extractSeasonFromName(name, nameCN string) int {
 
 	// 默认为第1季
 	return 1
+}
+
+func parseSeasonToken(token string) int {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return 0
+	}
+
+	if n, err := strconv.Atoi(token); err == nil {
+		return n
+	}
+
+	if n := romanToInt(strings.ToUpper(token)); n > 0 {
+		return n
+	}
+
+	if n := chineseNumeralToInt(token); n > 0 {
+		return n
+	}
+
+	return 0
+}
+
+func romanToInt(s string) int {
+	if s == "" {
+		return 0
+	}
+
+	vals := map[rune]int{'I': 1, 'V': 5, 'X': 10}
+	total := 0
+	prev := 0
+
+	for i := len(s) - 1; i >= 0; i-- {
+		v, ok := vals[rune(s[i])]
+		if !ok {
+			return 0
+		}
+		if v < prev {
+			total -= v
+		} else {
+			total += v
+		}
+		prev = v
+	}
+
+	return total
+}
+
+func chineseNumeralToInt(s string) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+
+	digits := map[rune]int{
+		'零': 0,
+		'一': 1,
+		'二': 2,
+		'三': 3,
+		'四': 4,
+		'五': 5,
+		'六': 6,
+		'七': 7,
+		'八': 8,
+		'九': 9,
+		'两': 2,
+	}
+
+	if s == "十" {
+		return 10
+	}
+
+	if strings.ContainsRune(s, '十') {
+		parts := strings.SplitN(s, "十", 2)
+		tens := 1
+		if parts[0] != "" {
+			r := []rune(parts[0])
+			if len(r) != 1 {
+				return 0
+			}
+			v, ok := digits[r[0]]
+			if !ok {
+				return 0
+			}
+			tens = v
+		}
+
+		ones := 0
+		if len(parts) == 2 && parts[1] != "" {
+			r := []rune(parts[1])
+			if len(r) != 1 {
+				return 0
+			}
+			v, ok := digits[r[0]]
+			if !ok {
+				return 0
+			}
+			ones = v
+		}
+
+		return tens*10 + ones
+	}
+
+	r := []rune(s)
+	if len(r) == 1 {
+		if v, ok := digits[r[0]]; ok {
+			return v
+		}
+	}
+
+	return 0
 }
