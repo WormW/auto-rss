@@ -1261,8 +1261,10 @@ func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Tas
 			// 该集数已有任务，且是不同的 hash（不同版本）
 			// RSS feed 中靠前的是更新的版本，删除旧版本
 			logger.Info("Found newer version of episode, replacing old task",
+				"subscription", subscription.Name,
 				"subscription_id", id,
 				"episode", item.Episode,
+				"old_download_id", existingDownload.ID,
 				"old_title", existingDownload.Title,
 				"old_hash", existingDownload.TorrentHash,
 				"new_title", item.Title,
