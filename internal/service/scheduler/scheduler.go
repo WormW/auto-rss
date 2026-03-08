@@ -267,8 +267,10 @@ func (s *scheduler) checkRSSFeeds() {
 				if existingEpisode != nil {
 					// 删除旧的下载任务（通常是非V2版本）
 					logger.Info("Found duplicate episode, removing old version",
+						"task_action", "replace_old_task",
 						"subscription", sub.Name,
 						"subscription_id", sub.ID,
+						"download_id", existingEpisode.ID,
 						"episode", item.Episode,
 						"old_title", existingEpisode.Title,
 						"old_hash", existingEpisode.TorrentHash,
@@ -280,7 +282,12 @@ func (s *scheduler) checkRSSFeeds() {
 					if existingEpisode.TorrentHash != "" {
 						if err := s.qbClient.DeleteTorrent(existingEpisode.TorrentHash, true); err != nil {
 							logger.Error("Failed to delete old torrent from qBittorrent",
-								"hash", existingEpisode.TorrentHash,
+								"task_action", "replace_old_task_delete_torrent",
+								"subscription_id", sub.ID,
+								"download_id", existingEpisode.ID,
+								"episode", item.Episode,
+								"torrent_hash_prefix", hashPrefix(existingEpisode.TorrentHash),
+								"trigger_context", "scheduler_rss_check",
 								"error", err)
 						}
 					}
@@ -288,7 +295,11 @@ func (s *scheduler) checkRSSFeeds() {
 					// 删除数据库记录
 					if err := s.downloadRepo.Delete(existingEpisode.ID); err != nil {
 						logger.Error("Failed to delete old download record",
-							"id", existingEpisode.ID,
+							"task_action", "replace_old_task_delete_record",
+							"subscription_id", sub.ID,
+							"download_id", existingEpisode.ID,
+							"episode", item.Episode,
+							"trigger_context", "scheduler_rss_check",
 							"error", err)
 					}
 				}
@@ -307,16 +318,24 @@ func (s *scheduler) checkRSSFeeds() {
 
 			if err := s.downloadRepo.Create(download); err != nil {
 				logger.Error("Failed to create download",
+					"task_action", "create_download_task",
+					"subscription_id", sub.ID,
+					"episode", item.Episode,
 					"title", item.Title,
+					"trigger_context", "scheduler_rss_check",
 					"error", err)
 				continue
 			}
 
 			logger.Info("Download task created",
+				"task_action", "create_download_task",
 				"subscription", sub.Name,
+				"subscription_id", sub.ID,
+				"download_id", download.ID,
 				"title", item.Title,
 				"episode", item.Episode,
-				"fansub", item.Fansub)
+				"fansub", item.Fansub,
+				"trigger_context", "scheduler_rss_check")
 
 			// 生成带番剧名的下载路径
 			// 使用系统配置的下载路径，而不是订阅级别的路径
@@ -332,8 +351,13 @@ func (s *scheduler) checkRSSFeeds() {
 			_, err = s.qbClient.AddTorrent(item.TorrentURL, downloadPath, "")
 			if err != nil {
 				logger.Error("Failed to add torrent to qBittorrent",
+					"task_action", "add_torrent",
+					"subscription_id", sub.ID,
+					"download_id", download.ID,
+					"episode", item.Episode,
 					"title", item.Title,
 					"download_path", downloadPath,
+					"trigger_context", "scheduler_rss_check",
 					"error", err)
 				download.Status = "failed"
 				download.ErrorMessage = err.Error()
@@ -342,9 +366,13 @@ func (s *scheduler) checkRSSFeeds() {
 			}
 
 			logger.Debug("Torrent added with path",
+				"task_action", "add_torrent",
 				"subscription", sub.Name,
+				"subscription_id", sub.ID,
+				"download_id", download.ID,
 				"episode", item.Episode,
-				"download_path", downloadPath)
+				"download_path", downloadPath,
+				"trigger_context", "scheduler_rss_check")
 
 			download.Status = "downloading"
 			s.downloadRepo.Update(download)
@@ -400,4 +428,12 @@ func (s *scheduler) Stop() {
 // AddJob 添加定时任务
 func (s *scheduler) AddJob(spec string, cmd func()) (cron.EntryID, error) {
 	return s.cron.AddFunc(spec, cmd)
+}
+
+func hashPrefix(hash string) string {
+	hash = strings.TrimSpace(hash)
+	if len(hash) <= 8 {
+		return hash
+	}
+	return hash[:8]
 }
