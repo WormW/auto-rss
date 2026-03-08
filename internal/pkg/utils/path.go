@@ -77,6 +77,7 @@ func normalizePath(path string) string {
 	path = foldHanVariants(path)
 	path = replaceChineseNumerals(path)
 	path = stripSeasonSuffix(path)
+	path = normalizeCommonAliases(path)
 	path = strings.ToLower(path)
 
 	var result strings.Builder
@@ -153,6 +154,14 @@ func canonicalHanRune(r rune) rune {
 		'與': '与',
 		'劍': '剑',
 		'來': '来',
+		'靈': '灵',
+		'籠': '笼',
+		'轉': '转',
+		'聲': '声',
+		'優': '优',
+		'樂': '乐',
+		'國': '国',
+		'風': '风',
 	}
 	if c, ok := variants[r]; ok {
 		return c
@@ -173,6 +182,25 @@ func stripSeasonSuffix(s string) string {
 
 	out := s
 	for _, p := range patterns {
+		re := regexp.MustCompile(p)
+		out = re.ReplaceAllString(out, " ")
+	}
+	out = regexp.MustCompile(`\s+`).ReplaceAllString(out, " ")
+	return strings.TrimSpace(out)
+}
+
+func normalizeCommonAliases(s string) string {
+	if s == "" {
+		return s
+	}
+
+	out := s
+	// 常见标题别名噪声：同一作品附带英文副标题时统一去除，避免双目录。
+	aliasNoise := []string{
+		`(?i)\bincarnation\b`,
+		`(?i)\banimation\b`,
+	}
+	for _, p := range aliasNoise {
 		re := regexp.MustCompile(p)
 		out = re.ReplaceAllString(out, " ")
 	}

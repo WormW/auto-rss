@@ -71,6 +71,12 @@ func TestGenerateDownloadPath(t *testing.T) {
 			animeName: "ＪｉａｎＬａｉ　Ｓｅａｓｏｎ　２",
 			expected:  "/downloads/JianLai",
 		},
+		{
+			name:      "常见别名噪声归一",
+			basePath:  "/downloads/灵笼",
+			animeName: "灵笼 Incarnation 第2季",
+			expected:  "/downloads/灵笼",
+		},
 	}
 
 	for _, tt := range tests {
