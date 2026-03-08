@@ -729,12 +729,13 @@ func mapQBStateToStatus(qbState string) string {
 		return "failed"
 	case qbState == "uploading" || strings.HasSuffix(qbState, "UP"):
 		return "completed"
-	case qbState == "stalledDL":
-		return "stalled"
-	default:
-		// 其他下载态（downloading, pausedDL, queuedDL, metaDL, checkingDL等）
-		// 都归类为 downloading。
+	case qbState == "downloading" || qbState == "forcedDL":
+		// 仅把真实下载态归为 downloading。
 		return "downloading"
+	default:
+		// 其他 DL 态（stalled/paused/queued/checking/meta 等）统一归为 stalled，
+		// 避免前端把非活跃下载显示成 downloading。
+		return "stalled"
 	}
 }
 
