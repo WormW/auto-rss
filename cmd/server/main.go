@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -124,6 +125,15 @@ func main() {
 	// 初始化文件整理服务
 	if err := appCtx.InitializeFileOrganizer(); err != nil {
 		logger.Error("Failed to initialize file organizer", "error", err)
+	}
+
+	// Ensure we serve the correct web/dist when running as a standalone binary.
+	// When started from a different working directory, relative os.DirFS("web/dist") would break.
+	if exePath, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exePath)
+		if err := os.Chdir(exeDir); err == nil {
+			logger.Info("Changed working directory to executable dir", "dir", exeDir)
+		}
 	}
 
 	// 初始化路由（传递应用上下文）
