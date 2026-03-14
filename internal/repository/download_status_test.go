@@ -9,8 +9,8 @@ import (
 )
 
 func TestDownloadRepository_StalledDownloadingFilter(t *testing.T) {
-	// Setup in-memory test DB
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	// Setup in-memory test DB (each test gets isolated DB)
+	db, err := gorm.Open(sqlite.Open("file::memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("failed to open test DB: %v", err)
 	}

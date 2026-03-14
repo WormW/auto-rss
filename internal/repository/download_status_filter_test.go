@@ -9,7 +9,7 @@ import (
 )
 
 func TestDownloadRepositoryListFiltersByStalledAndDownloading(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open("file::memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("Failed to open sqlite in-memory DB: %v", err)
 	}
