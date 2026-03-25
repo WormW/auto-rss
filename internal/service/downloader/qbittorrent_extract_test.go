@@ -1,6 +1,10 @@
 package downloader
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/WormW/auto-rss/internal/pkg/utils"
+)
 
 func TestExtractHashFromTorrentURL(t *testing.T) {
 	cases := []struct {
@@ -22,8 +26,8 @@ func TestExtractHashFromTorrentURL(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		if got := extractHashFromTorrentURL(tc.url); got != tc.hash {
-			t.Fatalf("extractHashFromTorrentURL(%q) = %q, want %q", tc.url, got, tc.hash)
+		if got := utils.ExtractInfoHashFromTorrentURL(tc.url); got != tc.hash {
+			t.Fatalf("ExtractInfoHashFromTorrentURL(%q) = %q, want %q", tc.url, got, tc.hash)
 		}
 	}
 }

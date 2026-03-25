@@ -3,6 +3,7 @@ package rss
 import (
 	"testing"
 
+	"github.com/WormW/auto-rss/internal/pkg/utils"
 	ext "github.com/mmcdole/gofeed/extensions"
 )
 
@@ -107,7 +108,7 @@ func TestExtractInfoHashFromExtensions(t *testing.T) {
 		},
 	}
 
-	got := extractInfoHashFromExtensions(exts)
+	got := utils.ExtractInfoHashFromExtensions(exts)
 	want := "58a7526e95fe511b80cbdae8a7ddb7d107be9871"
 	if got != want {
 		t.Fatalf("extractInfoHashFromExtensions() = %q, want %q", got, want)
@@ -116,7 +117,7 @@ func TestExtractInfoHashFromExtensions(t *testing.T) {
 
 func TestExtractInfoHashFromTorrentURL(t *testing.T) {
 	url := "https://mikanime.tv/Download/20260218/4f9c570f6b9ff86278629d352ba8272633a18c3b.torrent"
-	got := extractInfoHashFromTorrentURL(url)
+	got := utils.ExtractInfoHashFromTorrentURL(url)
 	want := "4f9c570f6b9ff86278629d352ba8272633a18c3b"
 	if got != want {
 		t.Fatalf("extractInfoHashFromTorrentURL() = %q, want %q", got, want)
