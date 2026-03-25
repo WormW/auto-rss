@@ -429,11 +429,3 @@ func (s *scheduler) Stop() {
 func (s *scheduler) AddJob(spec string, cmd func()) (cron.EntryID, error) {
 	return s.cron.AddFunc(spec, cmd)
 }
-
-func hashPrefix(hash string) string {
-	hash = strings.TrimSpace(hash)
-	if len(hash) <= 8 {
-		return hash
-	}
-	return hash[:8]
-}

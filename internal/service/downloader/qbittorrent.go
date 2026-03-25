@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/WormW/auto-rss/internal/pkg/constants"
 	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/go-resty/resty/v2"
 )
@@ -216,38 +215,6 @@ func (c *qbittorrentClient) AddTorrent(torrentURL string, savePath string, categ
 
 	// 没有找到 hash，但种子可能已成功添加，返回空字符串（后续 monitor 会处理）
 	return "", nil
-}
-
-// extractHashFromURL 从 URL 中提取 hash
-func extractHashFromURL(url string) string {
-	// 处理 magnet link
-	if strings.HasPrefix(strings.ToLower(url), "magnet:") {
-		// 查找 btih (BitTorrent Info Hash)
-		url = strings.ToLower(url)
-		if idx := strings.Index(url, "btih:"); idx != -1 {
-			hash := url[idx+5:]
-			// 截取到下一个 & 或字符串结束
-			if endIdx := strings.Index(hash, "&"); endIdx != -1 {
-				hash = hash[:endIdx]
-			}
-			// hash 应该是 40 个十六进制字符
-			if len(hash) == 40 {
-				return strings.ToLower(hash)
-			}
-			// 或者是 32 个 base32 字符（需要转换，暂时跳过）
-		}
-	}
-	return ""
-}
-
-// extractHashFromTorrentURL 从 .torrent URL 提取 40 位十六进制 hash（mikan 链接可用）
-func extractHashFromTorrentURL(torrentURL string) string {
-	re := regexp.MustCompile(`(?i)/([a-f0-9]{40})\.torrent(?:$|\?)`)
-	m := re.FindStringSubmatch(torrentURL)
-	if len(m) == 2 {
-		return strings.ToLower(m[1])
-	}
-	return ""
 }
 
 // getAllTorrents 获取所有种子

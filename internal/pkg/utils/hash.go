@@ -3,6 +3,8 @@ package utils
 import (
 	"regexp"
 	"strings"
+
+	ext "github.com/mmcdole/gofeed/extensions"
 )
 
 // ExtractInfoHashFromTorrentURL 从 .torrent URL 提取 40 位十六进制 hash
@@ -29,6 +31,31 @@ func ExtractHashFromURL(url string) string {
 			}
 		}
 	}
+	return ""
+}
+
+// ExtractInfoHashFromExtensions 从 RSS 扩展字段中提取 info-hash
+func ExtractInfoHashFromExtensions(extensions ext.Extensions) string {
+	if len(extensions) == 0 {
+		return ""
+	}
+
+	for ns, fields := range extensions {
+		for key, values := range fields {
+			if !strings.EqualFold(ns, "nyaa") || !strings.EqualFold(key, "infoHash") {
+				continue
+			}
+			for _, ext := range values {
+				v := strings.TrimSpace(ext.Value)
+				if len(v) == 40 {
+					if ok, _ := regexp.MatchString(`(?i)^[a-f0-9]{40}$`, v); ok {
+						return strings.ToLower(v)
+					}
+				}
+			}
+		}
+	}
+
 	return ""
 }
 
