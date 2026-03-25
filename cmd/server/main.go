@@ -48,6 +48,12 @@ func main() {
 	}
 	logger.Info("Database migration completed")
 
+	// 运行额外迁移（索引创建等）
+	if err := database.RunMigrations(db); err != nil {
+		logger.Fatal("Failed to run migrations", "error", err)
+	}
+	logger.Info("Database index migration completed")
+
 	// 从数据库加载配置并覆盖默认配置
 	if err := cfg.LoadFromDB(db); err != nil {
 		logger.Warn("Failed to load config from database", "error", err)
