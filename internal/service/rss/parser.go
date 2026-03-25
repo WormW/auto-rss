@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/mmcdole/gofeed"
 	ext "github.com/mmcdole/gofeed/extensions"
 )
@@ -123,7 +124,7 @@ func (p *parser) FetchAndParse(rssURL string) ([]RSSItem, error) {
 		if extHash := extractInfoHashFromExtensions(item.Extensions); extHash != "" {
 			rssItem.TorrentHash = extHash
 		} else if rssItem.TorrentURL != "" {
-			rssItem.TorrentHash = extractInfoHashFromTorrentURL(rssItem.TorrentURL)
+			rssItem.TorrentHash = utils.ExtractInfoHashFromTorrentURL(rssItem.TorrentURL)
 			if rssItem.TorrentHash == "" {
 				hash := md5.Sum([]byte(rssItem.TorrentURL))
 				rssItem.TorrentHash = fmt.Sprintf("%x", hash)
@@ -149,16 +150,6 @@ func (p *parser) ExtractFansub(title string) string {
 	matches := re.FindStringSubmatch(title)
 	if len(matches) > 1 {
 		return strings.TrimSpace(matches[1])
-	}
-	return ""
-}
-
-// ExtractEpisode 从标题中提取集数
-func extractInfoHashFromTorrentURL(torrentURL string) string {
-	re := regexp.MustCompile(`(?i)/([a-f0-9]{40})\.torrent(?:$|\?)`)
-	m := re.FindStringSubmatch(torrentURL)
-	if len(m) == 2 {
-		return strings.ToLower(m[1])
 	}
 	return ""
 }
