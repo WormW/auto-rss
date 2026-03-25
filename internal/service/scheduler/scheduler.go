@@ -2,11 +2,11 @@ package scheduler
 
 import (
 	"fmt"
-	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"github.com/WormW/auto-rss/internal/pkg/constants"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
@@ -286,7 +286,7 @@ func (s *scheduler) checkRSSFeeds() {
 								"subscription_id", sub.ID,
 								"download_id", existingEpisode.ID,
 								"episode", item.Episode,
-								"torrent_hash_prefix", hashPrefix(existingEpisode.TorrentHash),
+								"torrent_hash_prefix", utils.HashPrefix(existingEpisode.TorrentHash),
 								"trigger_context", "scheduler_rss_check",
 								"error", err)
 						}
@@ -339,7 +339,7 @@ func (s *scheduler) checkRSSFeeds() {
 
 			// 生成带番剧名的下载路径
 			// 使用系统配置的下载路径，而不是订阅级别的路径
-			basePath := "/downloads" // 默认值
+			basePath := constants.DefaultDownloadPath // 默认值
 			if s.configRepo != nil {
 				if downloadPathConfig, err := s.configRepo.Get("download_path"); err == nil && downloadPathConfig != nil && downloadPathConfig.Value != "" {
 					basePath = downloadPathConfig.Value

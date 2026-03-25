@@ -3,10 +3,11 @@ package downloader
 import (
 	"bytes"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
+	"github.com/WormW/auto-rss/internal/pkg/constants"
+	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/go-resty/resty/v2"
 )
 
@@ -132,7 +133,7 @@ func (c *qbittorrentClient) Login(host, username, password string) error {
 // AddTorrent 添加种子任务
 func (c *qbittorrentClient) AddTorrent(torrentURL string, savePath string, category string) (string, error) {
 	// 尝试从 URL 中提取 hash（支持 magnet link）
-	extractedHash := extractHashFromURL(torrentURL)
+	extractedHash := utils.ExtractHashFromURL(torrentURL)
 
 	// 获取添加前的种子列表，用于后续识别新添加的种子
 	existingTorrents, err := c.GetTorrentsByCategory(category)
@@ -209,7 +210,7 @@ func (c *qbittorrentClient) AddTorrent(torrentURL string, savePath string, categ
 	}
 
 	// 对于 mikan 的 .torrent URL，可从链接中提取 40 位 info-hash，避免返回空 hash。
-	if guessedHash := extractHashFromTorrentURL(torrentURL); guessedHash != "" {
+	if guessedHash := utils.ExtractInfoHashFromTorrentURL(torrentURL); guessedHash != "" {
 		return guessedHash, nil
 	}
 

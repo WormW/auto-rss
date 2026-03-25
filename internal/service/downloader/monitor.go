@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"github.com/WormW/auto-rss/internal/pkg/constants"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
@@ -167,7 +168,7 @@ func (m *DownloadMonitor) processPendingDownloads() {
 		}
 
 		// 确定保存路径（使用系统配置的下载路径）
-		basePath := "/downloads" // 默认路径
+		basePath := constants.DefaultDownloadPath // 默认路径
 		if m.configRepo != nil {
 			if downloadPathConfig, err := m.configRepo.Get("download_path"); err == nil && downloadPathConfig != nil && downloadPathConfig.Value != "" {
 				basePath = downloadPathConfig.Value
