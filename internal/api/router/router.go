@@ -10,6 +10,7 @@ import (
 	"github.com/WormW/auto-rss/internal/config"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/downloader"
+	"github.com/WormW/auto-rss/internal/service/notification"
 	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/WormW/auto-rss/internal/service/scheduler"
 	"github.com/WormW/auto-rss/internal/webui"
@@ -42,6 +43,10 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	// 初始化调度器
 	rssScheduler := scheduler.NewScheduler(subscriptionRepo, downloadRepo, configRepo, cfg.RSSInterval, rssParser, qbClient)
 
+	// 初始化通知服务
+	notificationSvc := notification.NewService(db)
+	wsHub := notificationSvc.GetWebSocketHub()
+
 	// 初始化处理器
 	subscriptionHandler := handler.NewSubscriptionHandler(subscriptionRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath)
 	downloadHandler := handler.NewDownloadHandler(downloadRepo, qbClient)
@@ -52,6 +57,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	bangumiHandler := handler.NewBangumiHandler(configRepo)
 	logHandler := handler.NewLogHandler(logRepo)
 	fileOrganizerHandler := handler.NewFileOrganizerHandler(appCtx)
+	notificationHandler := handler.NewNotificationHandler(db, notificationSvc, wsHub)
 
 	// API v1 路由组
 	v1 := r.Group("/api/v1")
@@ -154,7 +160,22 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			tasks.GET("/history", taskHandler.GetHistory)
 			tasks.POST("/cancel", taskHandler.Cancel)
 		}
+
+		// 通知管理
+		notifications := v1.Group("/notifications")
+		{
+			notifications.GET("", notificationHandler.ListNotifications)
+			notifications.GET("/settings", notificationHandler.GetSettings)
+			notifications.GET("/settings/:channel", notificationHandler.GetSetting)
+			notifications.PUT("/settings", notificationHandler.UpdateSetting)
+			notifications.DELETE("/settings/:channel", notificationHandler.DeleteSetting)
+			notifications.POST("/test", notificationHandler.TestChannel)
+			notifications.GET("/websocket/status", notificationHandler.GetWebSocketStatus)
+		}
 	}
+
+	// WebSocket 端点
+	r.GET("/ws/notifications", notificationHandler.WebSocketHandler)
 
 	// 启动后台调度器
 	if err := rssScheduler.Start(); err != nil {
