@@ -38,5 +38,7 @@ func Migrate(db *gorm.DB) error {
 		&model.Download{},
 		&model.Config{},
 		&model.Log{},
+		&model.Notification{},
+		&model.NotificationSetting{},
 	)
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"github.com/WormW/auto-rss/internal/pkg/constants"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
@@ -36,6 +37,7 @@ type DownloadMonitor struct {
 	subscriptionRepo repository.SubscriptionRepository
 	configRepo       repository.ConfigRepository
 	renameService    *RenameService
+	notificationSvc  NotificationService
 	ticker           *time.Ticker
 	stopChan         chan struct{}
 }
@@ -56,6 +58,16 @@ func NewDownloadMonitor(
 		renameService:    NewRenameService(renameTemplate),
 		stopChan:         make(chan struct{}),
 	}
+}
+
+// NotificationService 通知服务接口（避免循环导入）
+type NotificationService interface {
+	Send(payload model.NotificationPayload)
+}
+
+// SetNotificationService 设置通知服务
+func (m *DownloadMonitor) SetNotificationService(svc NotificationService) {
+	m.notificationSvc = svc
 }
 
 // Start 启动监控服务
@@ -156,7 +168,7 @@ func (m *DownloadMonitor) processPendingDownloads() {
 		}
 
 		// 确定保存路径（使用系统配置的下载路径）
-		basePath := "/downloads" // 默认路径
+		basePath := constants.DefaultDownloadPath // 默认路径
 		if m.configRepo != nil {
 			if downloadPathConfig, err := m.configRepo.Get("download_path"); err == nil && downloadPathConfig != nil && downloadPathConfig.Value != "" {
 				basePath = downloadPathConfig.Value
@@ -211,6 +223,10 @@ func (m *DownloadMonitor) processPendingDownloads() {
 			download.Status = "failed"
 			download.ErrorMessage = fmt.Sprintf("Failed to add to qBittorrent: %v", err)
 			m.downloadRepo.Update(&download)
+			// 发送下载失败通知
+			if m.notificationSvc != nil {
+				m.sendFailedNotification(&download, download.ErrorMessage)
+			}
 			continue
 		}
 
@@ -345,6 +361,29 @@ func (m *DownloadMonitor) handleDownloadComplete(download *model.Download, torre
 			"subscription_id", download.SubscriptionID,
 			"error", err.Error())
 		return
+	}
+
+	// 发送下载完成通知
+	if m.notificationSvc != nil {
+		var episodeInfo string
+		if download.Episode > 0 {
+			episodeInfo = fmt.Sprintf("第 %d 集", download.Episode)
+		} else {
+			episodeInfo = "合集"
+		}
+		m.notificationSvc.Send(model.NotificationPayload{
+			Event:   model.EventDownloadComplete,
+			Title:   fmt.Sprintf("✅ 下载完成: %s", subscription.Name),
+			Message: fmt.Sprintf("%s %s\n文件名: %s", subscription.Name, episodeInfo, download.Title),
+			Data: map[string]any{
+				"download_id":     download.ID,
+				"subscription_id": download.SubscriptionID,
+				"subscription":    subscription.Name,
+				"episode":         download.Episode,
+				"title":           download.Title,
+			},
+			Timestamp: time.Now(),
+		})
 	}
 
 	// 记录下载完成时间
@@ -807,6 +846,10 @@ func (m *DownloadMonitor) reconcileMissingDownloadingTasks(torrents []*TorrentIn
 			continue
 		}
 		reconciled++
+		// 发送下载失败通知
+		if m.notificationSvc != nil {
+			m.sendFailedNotification(download, download.ErrorMessage)
+		}
 	}
 
 	if reconciled > 0 || skippedGrace > 0 {
@@ -816,4 +859,38 @@ func (m *DownloadMonitor) reconcileMissingDownloadingTasks(torrents []*TorrentIn
 			"grace_period", ReconcileGracePeriod.String(),
 			"scanned_statuses", "downloading,stalled")
 	}
+}
+
+// sendFailedNotification 发送下载失败通知
+func (m *DownloadMonitor) sendFailedNotification(download *model.Download, errorMsg string) {
+	subscription, err := m.subscriptionRepo.GetByID(download.SubscriptionID)
+	if err != nil {
+		logger.Error("Failed to get subscription for failed notification",
+			"subscription_id", download.SubscriptionID,
+			"error", err.Error())
+		subscription = &model.Subscription{Name: "Unknown"}
+	}
+	var episodeInfo string
+	if download.Episode > 0 {
+		episodeInfo = fmt.Sprintf("第 %d 集", download.Episode)
+	} else {
+		episodeInfo = "合集"
+	}
+	if len(errorMsg) > 200 {
+		errorMsg = errorMsg[:200] + "..."
+	}
+	m.notificationSvc.Send(model.NotificationPayload{
+		Event:   model.EventDownloadFailed,
+		Title:   fmt.Sprintf("❌ 下载失败: %s", subscription.Name),
+		Message: fmt.Sprintf("%s %s\n文件名: %s\n错误: %s", subscription.Name, episodeInfo, download.Title, errorMsg),
+		Data: map[string]any{
+			"download_id":     download.ID,
+			"subscription_id": download.SubscriptionID,
+			"subscription":    subscription.Name,
+			"episode":         download.Episode,
+			"title":           download.Title,
+			"error":           errorMsg,
+		},
+		Timestamp: time.Now(),
+	})
 }
