@@ -297,12 +297,46 @@
                 <n-tag type="info">{{ formData.language === 'CHS' ? '简体中文' : formData.language === 'CHT' ? '繁體中文' : formData.language }}</n-tag>
               </n-form-item>
 
+              <n-form-item label="语言偏好">
+                <n-select
+                  v-model:value="formData.language_preference"
+                  :options="languagePreferenceOptions"
+                  placeholder="选择语言偏好"
+                />
+              </n-form-item>
+
               <n-form-item label="更新日期">
                 <n-select
-                  v-model:value="formData.update_day"
+                  v-model:value="formData.air_day"
                   :options="weekdayOptions"
                   placeholder="选择更新日"
                 />
+              </n-form-item>
+
+              <n-form-item label="更新时间">
+                <n-time-picker
+                  v-model:value="airTimeValue"
+                  format="HH:mm"
+                  placeholder="选择更新时间"
+                  style="width: 100%;"
+                />
+              </n-form-item>
+
+              <n-form-item label="时区">
+                <n-select
+                  v-model:value="formData.air_timezone"
+                  :options="timezoneOptions"
+                  placeholder="选择时区"
+                />
+              </n-form-item>
+
+              <n-form-item label="更新提醒">
+                <n-space align="center">
+                  <n-switch v-model:value="formData.notify_enabled" />
+                  <span v-if="formData.notify_enabled">
+                    提前 <n-input-number v-model:value="formData.notify_before_min" :min="0" :max="120" style="width: 80px;" /> 分钟提醒
+                  </span>
+                </n-space>
               </n-form-item>
 
               <n-form-item label="季数">
@@ -400,6 +434,7 @@ import {
   NEmpty,
   NIcon,
   NTooltip,
+  NTimePicker,
   useMessage,
   useDialog
 } from 'naive-ui'
@@ -439,6 +474,40 @@ const weekdayOptions = weekList.map(w => ({
   value: w.day.toString()
 }))
 
+// 语言偏好选项
+const languagePreferenceOptions = [
+  { label: '自动学习', value: 'auto' },
+  { label: '简体中文优先', value: 'chs' },
+  { label: '繁体中文优先', value: 'cht' },
+  { label: '同时保留', value: 'both' }
+]
+
+// 时区选项
+const timezoneOptions = [
+  { label: 'JST (日本)', value: 'JST' },
+  { label: 'CST (中国)', value: 'CST' },
+  { label: 'UTC', value: 'UTC' }
+]
+
+// 更新时间（用于时间选择器）
+const airTimeValue = computed({
+  get: () => {
+    if (!formData.value.air_time) return null
+    const [hours, minutes] = formData.value.air_time.split(':').map(Number)
+    const date = new Date()
+    date.setHours(hours, minutes, 0, 0)
+    return date.getTime()
+  },
+  set: (val: number | null) => {
+    if (!val) {
+      formData.value.air_time = ''
+      return
+    }
+    const date = new Date(val)
+    formData.value.air_time = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  }
+})
+
 // 按照当前星期排序的星期列表（从今天开始往后排列）
 const sortedWeekList = computed(() => {
   const today = new Date().getDay() // 0-6, 0是星期日
@@ -462,7 +531,13 @@ const formData = ref({
   rss_url: '',
   fansub: '',
   language: '',
+  language_preference: 'auto',
   update_day: '',
+  air_day: '',
+  air_time: '',
+  air_timezone: 'JST',
+  notify_enabled: true,
+  notify_before_min: 10,
   season: 1,
   bangumi_id: 0,
   total_episodes: 0,
@@ -478,8 +553,10 @@ const formData = ref({
 const getActiveSubscriptionsByWeekday = (day: number) => {
   return subscriptions.value.filter(sub => {
     if (isCompleted(sub)) return false  // 已完结的不显示在这里
-    if (!sub.update_day) return day === 0 // 未设置更新日的放在星期日
-    return parseInt(sub.update_day) === day
+    // 优先使用 air_day，兼容旧数据使用 update_day
+    const dayValue = sub.air_day || sub.update_day
+    if (!dayValue) return day === 0 // 未设置更新日的放在星期日
+    return parseInt(dayValue) === day
   })
 }
 
@@ -575,7 +652,13 @@ const showAddDialog = () => {
     rss_url: '',
     fansub: '',
     language: '',
+    language_preference: 'auto',
     update_day: '',
+    air_day: '',
+    air_time: '',
+    air_timezone: 'JST',
+    notify_enabled: true,
+    notify_before_min: 10,
     season: 1,
     bangumi_id: 0,
     total_episodes: 0,
@@ -610,6 +693,7 @@ const handleSearchSubscribe = (data: {
     rss_url: data.rss_url,
     fansub: data.fansub,
     language: data.language || '',
+    language_preference: 'auto',
     rss_source_id: data.rss_source_id,
     source_type: data.rss_source_id ? 'rss_source' : 'manual'
   }
@@ -625,7 +709,13 @@ const handleEdit = (sub: Subscription) => {
     rss_url: sub.rss_url,
     fansub: sub.fansub || '',
     language: sub.language || '',
+    language_preference: sub.language_preference || 'auto',
     update_day: sub.update_day || '',
+    air_day: sub.air_day || '',
+    air_time: sub.air_time || '',
+    air_timezone: sub.air_timezone || 'JST',
+    notify_enabled: sub.notify_enabled !== false,
+    notify_before_min: sub.notify_before_min || 10,
     season: sub.season,
     bangumi_id: sub.bangumi_id || 0,
     total_episodes: sub.total_episodes || 0,
@@ -841,7 +931,13 @@ onMounted(() => {
       rss_url: (route.query.rss_url as string) || '',
       fansub: (route.query.fansub as string) || '',
       language: '',
+      language_preference: 'auto',
       update_day: '',
+      air_day: '',
+      air_time: '',
+      air_timezone: 'JST',
+      notify_enabled: true,
+      notify_before_min: 10,
       season: 1,
       bangumi_id: 0,
       total_episodes: 0,

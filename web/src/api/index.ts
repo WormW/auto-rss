@@ -55,6 +55,14 @@ export interface Subscription {
   // 开播信息
   air_date?: string
   air_year?: number
+  // 语言偏好设置
+  language_preference?: string
+  // 追番日历相关
+  air_day?: string
+  air_time?: string
+  air_timezone?: string
+  notify_enabled?: boolean
+  notify_before_min?: number
 }
 
 export interface Download {
@@ -63,6 +71,7 @@ export interface Download {
   title: string
   episode: number
   fansub: string
+  language?: string
   torrent_url: string
   torrent_hash: string
   file_path: string
@@ -73,6 +82,12 @@ export interface Download {
   downloaded_at?: string
   created_at: string
   updated_at: string
+  // 重试相关字段
+  retry_count?: number
+  max_retries?: number
+  next_retry_at?: string
+  last_error?: string
+  retry_reason?: string
 }
 
 export const subscriptionApi = {
@@ -161,6 +176,93 @@ export const taskApi = {
     api.get('/tasks/history'),
   cancel: () =>
     api.post('/tasks/cancel')
+}
+
+// 通知相关接口
+export interface NotificationSetting {
+  id: number
+  channel: string
+  enabled: boolean
+  config: string
+  created_at: string
+  updated_at: string
+}
+
+export interface WebhookTemplate {
+  name: string
+  label: string
+  description: string
+  template: string
+}
+
+export const notificationApi = {
+  getSettings: () =>
+    api.get('/notifications/settings'),
+  getSetting: (channel: string) =>
+    api.get(`/notifications/settings/${channel}`),
+  updateSetting: (data: { channel: string; enabled: boolean; config: object }) =>
+    api.put('/notifications/settings', data),
+  deleteSetting: (channel: string) =>
+    api.delete(`/notifications/settings/${channel}`),
+  testChannel: (data: { channel: string; config: object }) =>
+    api.post('/notifications/test', data),
+  listNotifications: (page = 1, pageSize = 20, status?: string, channel?: string) =>
+    api.get('/notifications', { params: { page, page_size: pageSize, status, channel } }),
+  getWebhookTemplates: () =>
+    api.get('/notifications/webhook/templates'),
+  getWebSocketStatus: () =>
+    api.get('/notifications/websocket/status')
+}
+
+// 日历相关接口
+export interface CalendarItem {
+  subscription_id: number
+  name: string
+  episode: number
+  air_time: string
+  air_day: string
+  current_episode: number
+  total_episodes: number
+  is_downloaded: boolean
+  cover?: string
+}
+
+export interface DaySchedule {
+  day: string
+  day_cn: string
+  items: CalendarItem[]
+  is_today: boolean
+}
+
+export interface WeekSchedule {
+  week: string
+  days: DaySchedule[]
+}
+
+export const calendarApi = {
+  getWeekSchedule: (weekOffset = 0) =>
+    api.get('/calendar', { params: { week: weekOffset } }),
+  getTodaySchedule: () =>
+    api.get('/calendar/today')
+}
+
+// 磁盘相关接口
+export interface DiskInfo {
+  path: string
+  total_gb: number
+  used_gb: number
+  free_gb: number
+  usage_percent: number
+  status: 'healthy' | 'warning' | 'critical'
+}
+
+export const diskApi = {
+  getStatus: () =>
+    api.get('/disk/status'),
+  getInfo: () =>
+    api.get('/disk/info'),
+  triggerCleanup: (strategy: string, keepDays?: number) =>
+    api.post('/disk/cleanup', { strategy, keep_days: keepDays })
 }
 
 export * from './rss-source'
