@@ -262,48 +262,73 @@ func (s *scheduler) checkRSSFeeds() {
 				continue
 			}
 
-			// 检查同一订阅的同一集数是否已存在
-			if item.Episode > 0 {
-				existingEpisode, _ := s.downloadRepo.GetBySubscriptionAndEpisode(sub.ID, item.Episode)
-				if existingEpisode != nil {
-					// 删除旧的下载任务（通常是非V2版本）
-					logger.Info("Found duplicate episode, removing old version",
-						"task_action", "replace_old_task",
-						"subscription", sub.Name,
-						"subscription_id", sub.ID,
-						"download_id", existingEpisode.ID,
-						"episode", item.Episode,
-						"old_title", existingEpisode.Title,
-						"old_hash", existingEpisode.TorrentHash,
-						"new_title", item.Title,
-						"new_hash", item.TorrentHash,
-						"trigger_context", "scheduler_rss_check")
+			// 检查同一订阅的同一集数是否已存在（考虑语言）
+			shouldDownload := true
+			skipReason := ""
+			var replaceDownloadID uint = 0
 
-					// 如果旧任务有 qBittorrent hash，尝试删除种子
-					if existingEpisode.TorrentHash != "" {
-						if err := s.qbClient.DeleteTorrent(existingEpisode.TorrentHash, true); err != nil {
-							logger.Error("Failed to delete old torrent from qBittorrent",
-								"task_action", "replace_old_task_delete_torrent",
+			if item.Episode > 0 {
+				// 初始化语言过滤器
+				langFilter := NewLanguageFilter(s.downloadRepo)
+
+				// 检查语言策略
+				allowed, reason, replaceID := langFilter.CheckLanguageAllow(&sub, item.Episode, item.Language, item.Title)
+				shouldDownload = allowed
+				skipReason = reason
+				replaceDownloadID = replaceID
+
+				// 如果需要替换现有下载（更高版本）
+				if replaceDownloadID > 0 {
+					existingEpisode, _ := s.downloadRepo.GetByID(replaceDownloadID)
+					if existingEpisode != nil {
+						logger.Info("Found newer version, replacing old download",
+							"task_action", "replace_old_task",
+							"subscription", sub.Name,
+							"subscription_id", sub.ID,
+							"download_id", existingEpisode.ID,
+							"episode", item.Episode,
+							"language", item.Language,
+							"old_title", existingEpisode.Title,
+							"new_title", item.Title,
+							"trigger_context", "scheduler_rss_check")
+
+						// 如果旧任务有 qBittorrent hash，尝试删除种子
+						if existingEpisode.TorrentHash != "" {
+							if err := s.qbClient.DeleteTorrent(existingEpisode.TorrentHash, true); err != nil {
+								logger.Error("Failed to delete old torrent from qBittorrent",
+									"task_action", "replace_old_task_delete_torrent",
+									"subscription_id", sub.ID,
+									"download_id", existingEpisode.ID,
+									"episode", item.Episode,
+									"torrent_hash_prefix", utils.HashPrefix(existingEpisode.TorrentHash),
+									"trigger_context", "scheduler_rss_check",
+									"error", err)
+							}
+						}
+
+						// 删除数据库记录
+						if err := s.downloadRepo.Delete(existingEpisode.ID); err != nil {
+							logger.Error("Failed to delete old download record",
+								"task_action", "replace_old_task_delete_record",
 								"subscription_id", sub.ID,
 								"download_id", existingEpisode.ID,
 								"episode", item.Episode,
-								"torrent_hash_prefix", utils.HashPrefix(existingEpisode.TorrentHash),
 								"trigger_context", "scheduler_rss_check",
 								"error", err)
 						}
 					}
-
-					// 删除数据库记录
-					if err := s.downloadRepo.Delete(existingEpisode.ID); err != nil {
-						logger.Error("Failed to delete old download record",
-							"task_action", "replace_old_task_delete_record",
-							"subscription_id", sub.ID,
-							"download_id", existingEpisode.ID,
-							"episode", item.Episode,
-							"trigger_context", "scheduler_rss_check",
-							"error", err)
-					}
 				}
+			}
+
+			// 根据语言策略决定是否跳过
+			if !shouldDownload {
+				logger.Debug("Skipping download based on language policy",
+					"subscription", sub.Name,
+					"episode", item.Episode,
+					"title", item.Title,
+					"language", item.Language,
+					"reason", skipReason)
+				continue
 			}
 
 			// 创建下载任务
@@ -312,6 +337,7 @@ func (s *scheduler) checkRSSFeeds() {
 				Title:          item.Title,
 				Episode:        item.Episode,
 				Fansub:         item.Fansub,
+				Language:       string(item.Language),
 				TorrentURL:     item.TorrentURL,
 				TorrentHash:    item.TorrentHash,
 				Status:         "pending",
@@ -336,6 +362,8 @@ func (s *scheduler) checkRSSFeeds() {
 				"title", item.Title,
 				"episode", item.Episode,
 				"fansub", item.Fansub,
+				"language", item.Language,
+				"lang_keyword", item.LangKeyword,
 				"trigger_context", "scheduler_rss_check")
 
 			// 生成带番剧名的下载路径

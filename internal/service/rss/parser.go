@@ -34,9 +34,11 @@ type RSSItem struct {
 	TorrentURL  string
 	TorrentHash string
 	PubDate     string
-	PubTime     time.Time // 解析后的发布时间
+	PubTime     time.Time     // 解析后的发布时间
 	Fansub      string
 	Episode     int
+	Language    LanguageType  // 语言类型
+	LangKeyword string        // 匹配到的语言关键词（用于日志）
 }
 
 type parser struct {
@@ -135,6 +137,9 @@ func (p *parser) FetchAndParse(rssURL string) ([]RSSItem, error) {
 
 		// 提取集数
 		rssItem.Episode = p.ExtractEpisode(item.Title)
+
+		// 提取语言
+		rssItem.Language, rssItem.LangKeyword = DetectLanguage(item.Title)
 
 		items = append(items, rssItem)
 	}

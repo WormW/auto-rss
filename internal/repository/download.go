@@ -13,6 +13,10 @@ type DownloadRepository interface {
 	GetByID(id uint) (*model.Download, error)
 	GetByHash(hash string) (*model.Download, error)
 	GetBySubscriptionAndEpisode(subscriptionID uint, episode int) (*model.Download, error)
+	// GetBySubscriptionAndEpisodeWithLang 根据订阅 ID 和集数获取所有下载任务（支持多语言）
+	GetBySubscriptionAndEpisodeWithLang(subscriptionID uint, episode int) ([]model.Download, error)
+	// GetRecentBySubscription 获取订阅的最近 N 条下载记录
+	GetRecentBySubscription(subscriptionID uint, limit int) ([]model.Download, error)
 	List(offset, limit int, status string) ([]model.Download, int64, error)
 	ListBySubscriptionID(subscriptionID uint) ([]model.Download, error)
 	UpdateStatus(id uint, status string) error
@@ -92,6 +96,23 @@ func (r *downloadRepository) GetBySubscriptionAndEpisode(subscriptionID uint, ep
 		return nil, err
 	}
 	return &download, nil
+}
+
+// GetBySubscriptionAndEpisodeWithLang 根据订阅 ID 和集数获取所有下载任务（支持多语言）
+// 返回该订阅该集数的所有语言版本
+func (r *downloadRepository) GetBySubscriptionAndEpisodeWithLang(subscriptionID uint, episode int) ([]model.Download, error) {
+	var downloads []model.Download
+	err := r.db.Where("subscription_id = ? AND episode = ?", subscriptionID, episode).
+		Order("created_at DESC").Find(&downloads).Error
+	return downloads, err
+}
+
+// GetRecentBySubscription 获取订阅的最近 N 条下载记录
+func (r *downloadRepository) GetRecentBySubscription(subscriptionID uint, limit int) ([]model.Download, error) {
+	var downloads []model.Download
+	err := r.db.Where("subscription_id = ?", subscriptionID).
+		Order("created_at DESC").Limit(limit).Find(&downloads).Error
+	return downloads, err
 }
 
 // ListBySubscriptionID 根据订阅 ID 获取下载任务列表

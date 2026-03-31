@@ -46,6 +46,9 @@ type Subscription struct {
 	// 合集种子
 	CollectionTorrent string `json:"collection_torrent" gorm:"type:text"` // 合集种子地址(磁力链接或.torrent URL)
 
+	// 语言偏好设置
+	LanguagePreference string `json:"language_preference" gorm:"type:varchar(10);default:'auto'"` // auto/chs/cht/both
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 

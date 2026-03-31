@@ -9,6 +9,7 @@ type Download struct {
 	Title          string     `json:"title" gorm:"not null"`
 	Episode        int        `json:"episode"`
 	Fansub         string     `json:"fansub" gorm:"index"` // 字幕组名称
+	Language       string     `json:"language" gorm:"type:varchar(10);default:'unknown';index"` // 语言: chs/cht/jp/en/unknown
 	TorrentURL     string     `json:"torrent_url" gorm:"not null"`
 	TorrentHash    string     `json:"torrent_hash" gorm:"unique;index"`
 	FilePath       string     `json:"file_path"`
