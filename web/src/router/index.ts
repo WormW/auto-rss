@@ -4,6 +4,9 @@ import Subscriptions from '@/views/Subscriptions.vue'
 import Downloads from '@/views/Downloads.vue'
 import Config from '@/views/Config.vue'
 import Logs from '@/views/Logs.vue'
+import Notifications from '@/views/Notifications.vue'
+import Calendar from '@/views/Calendar.vue'
+import DiskMonitor from '@/views/DiskMonitor.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -26,6 +29,21 @@ const router = createRouter({
       path: '/downloads',
       name: 'downloads',
       component: Downloads
+    },
+    {
+      path: '/calendar',
+      name: 'calendar',
+      component: Calendar
+    },
+    {
+      path: '/notifications',
+      name: 'notifications',
+      component: Notifications
+    },
+    {
+      path: '/disk-monitor',
+      name: 'disk-monitor',
+      component: DiskMonitor
     },
     {
       path: '/config',

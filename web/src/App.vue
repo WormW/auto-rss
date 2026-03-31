@@ -173,6 +173,9 @@ import {
   CloudDownloadOutline,
   SettingsOutline,
   DocumentTextOutline,
+  CalendarOutline,
+  NotificationsOutline,
+  DiscOutline,
   Moon,
   Sunny,
   Leaf,
@@ -235,6 +238,21 @@ const menuOptions: MenuOption[] = [
     label: '下载任务',
     key: 'downloads',
     icon: renderIcon(CloudDownloadOutline)
+  },
+  {
+    label: '追番日历',
+    key: 'calendar',
+    icon: renderIcon(CalendarOutline)
+  },
+  {
+    label: '通知管理',
+    key: 'notifications',
+    icon: renderIcon(NotificationsOutline)
+  },
+  {
+    label: '磁盘监控',
+    key: 'disk-monitor',
+    icon: renderIcon(DiscOutline)
   },
   {
     label: '系统配置',

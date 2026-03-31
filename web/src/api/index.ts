@@ -247,13 +247,34 @@ export const calendarApi = {
 }
 
 // 磁盘相关接口
-export interface DiskInfo {
+export interface DiskStatus {
   path: string
-  total_gb: number
-  used_gb: number
-  free_gb: number
+  download_path: string
+  total: number
+  free: number
+  used: number
   usage_percent: number
   status: 'healthy' | 'warning' | 'critical'
+}
+
+export interface CleanupSettings {
+  enabled: boolean
+  strategy: 'age' | 'space' | 'hybrid'
+  retention_days: number
+  min_free_gb: number
+  warning_threshold_gb: number
+  critical_threshold_gb: number
+}
+
+export interface CleanupHistoryItem {
+  id: number
+  trigger_type: 'auto' | 'manual'
+  before_free: number
+  after_free: number
+  deleted_count: number
+  freed_bytes: number
+  status: 'success' | 'failed'
+  created_at: string
 }
 
 export const diskApi = {
@@ -261,8 +282,14 @@ export const diskApi = {
     api.get('/disk/status'),
   getInfo: () =>
     api.get('/disk/info'),
-  triggerCleanup: (strategy: string, keepDays?: number) =>
-    api.post('/disk/cleanup', { strategy, keep_days: keepDays })
+  getSettings: () =>
+    api.get('/disk/settings'),
+  updateSettings: (settings: CleanupSettings) =>
+    api.put('/disk/settings', settings),
+  triggerCleanup: (strategy?: string, keepDays?: number) =>
+    api.post('/disk/cleanup', { strategy, keep_days: keepDays }),
+  getHistory: (page = 1, pageSize = 20) =>
+    api.get('/disk/history', { params: { page, page_size: pageSize } })
 }
 
 export * from './rss-source'
