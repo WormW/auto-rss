@@ -117,7 +117,14 @@ func (s *service) loadChannels() {
 			s.RegisterChannel(channel)
 			logger.Info("Telegram channel registered")
 		case "webhook":
-			logger.Info("Webhook channel not yet implemented")
+			config := &WebhookConfig{}
+			if err := json.Unmarshal([]byte(setting.Config), config); err != nil {
+				logger.Error("Failed to unmarshal webhook config", "error", err)
+				continue
+			}
+			channel := NewWebhookChannel(config)
+			s.RegisterChannel(channel)
+			logger.Info("Webhook channel registered", "name", channel.Name())
 		case "email":
 			logger.Info("Email channel not yet implemented")
 		}

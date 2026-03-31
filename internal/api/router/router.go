@@ -171,6 +171,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			notifications.DELETE("/settings/:channel", notificationHandler.DeleteSetting)
 			notifications.POST("/test", notificationHandler.TestChannel)
 			notifications.GET("/websocket/status", notificationHandler.GetWebSocketStatus)
+			notifications.GET("/webhook/templates", notificationHandler.GetWebhookTemplates)
 		}
 	}
 

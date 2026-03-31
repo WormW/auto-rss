@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
@@ -96,7 +97,9 @@ func (h *NotificationHandler) UpdateSetting(c *gin.Context) {
 		})
 		return
 	}
-	if req.Channel != "telegram" && req.Channel != "email" && req.Channel != "webhook" {
+	// 支持多渠道类型，包括带前缀的 webhook.{name}
+	isValidChannel := req.Channel == "telegram" || req.Channel == "email" || req.Channel == "webhook" || strings.HasPrefix(req.Channel, "webhook.")
+	if !isValidChannel {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    400,
 			"message": "不支持的渠道类型",
@@ -174,8 +177,8 @@ func (h *NotificationHandler) TestChannel(c *gin.Context) {
 		return
 	}
 	var err error
-	switch req.Channel {
-	case "telegram":
+	switch {
+	case req.Channel == "telegram":
 		config := &notification.TelegramConfig{}
 		if err = json.Unmarshal(req.Config, config); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{
@@ -185,13 +188,17 @@ func (h *NotificationHandler) TestChannel(c *gin.Context) {
 			return
 		}
 		err = notification.TestTelegramConfig(config)
-	case "webhook":
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "Webhook 渠道尚未实现",
-		})
-		return
-	case "email":
+	case req.Channel == "webhook" || strings.HasPrefix(req.Channel, "webhook."):
+		config := &notification.WebhookConfig{}
+		if err = json.Unmarshal(req.Config, config); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"code":    400,
+				"message": "Webhook 配置格式错误: " + err.Error(),
+			})
+			return
+		}
+		err = notification.TestWebhookConfig(config)
+	case req.Channel == "email":
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    400,
 			"message": "Email 渠道尚未实现",
@@ -302,5 +309,55 @@ func (h *NotificationHandler) GetWebSocketStatus(c *gin.Context) {
 			"connected_clients": h.wsHub.GetClientCount(),
 			"enabled":           true,
 		},
+	})
+}
+
+// GetWebhookTemplates 获取 Webhook 预定义模板
+func (h *NotificationHandler) GetWebhookTemplates(c *gin.Context) {
+	templates := map[string]string{
+		"default":  notification.GetPredefinedTemplate("default"),
+		"nanobot":  notification.GetPredefinedTemplate("nanobot"),
+		"openclaw": notification.GetPredefinedTemplate("openclaw"),
+		"discord":  notification.GetPredefinedTemplate("discord"),
+		"slack":    notification.GetPredefinedTemplate("slack"),
+	}
+
+	templateInfos := []gin.H{
+		{
+			"name":        "default",
+			"label":       "默认",
+			"description": "标准 JSON 格式，包含所有字段",
+			"template":    templates["default"],
+		},
+		{
+			"name":        "nanobot",
+			"label":       "Nanobot",
+			"description": "适配 Nanobot Gateway",
+			"template":    templates["nanobot"],
+		},
+		{
+			"name":        "openclaw",
+			"label":       "OpenClaw",
+			"description": "适配 OpenClaw Webhook",
+			"template":    templates["openclaw"],
+		},
+		{
+			"name":        "discord",
+			"label":       "Discord",
+			"description": "Discord Webhook 格式",
+			"template":    templates["discord"],
+		},
+		{
+			"name":        "slack",
+			"label":       "Slack",
+			"description": "Slack Incoming Webhook 格式",
+			"template":    templates["slack"],
+		},
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Success",
+		"data":    templateInfos,
 	})
 }
