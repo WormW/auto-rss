@@ -43,6 +43,10 @@ const (
 	EventDownloadFailed   NotificationEvent = "download.failed"
 	EventRSSUpdate        NotificationEvent = "rss.update"
 	EventSystemError      NotificationEvent = "system.error"
+	EventDiskWarning      NotificationEvent = "disk.warning"
+	EventDiskCritical     NotificationEvent = "disk.critical"
+	EventDiskRecovered    NotificationEvent = "disk.recovered"
+	EventAutoCleanup      NotificationEvent = "disk.cleanup"
 )
 
 // NotificationPayload 通知内容载荷
