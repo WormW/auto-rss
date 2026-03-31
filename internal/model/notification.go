@@ -47,6 +47,8 @@ const (
 	EventDiskCritical     NotificationEvent = "disk.critical"
 	EventDiskRecovered    NotificationEvent = "disk.recovered"
 	EventAutoCleanup      NotificationEvent = "disk.cleanup"
+	EventAiringSoon       NotificationEvent = "calendar.airing_soon"
+	EventNewEpisode       NotificationEvent = "calendar.new_episode"
 )
 
 // NotificationPayload 通知内容载荷

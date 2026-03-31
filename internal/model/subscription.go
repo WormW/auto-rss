@@ -49,6 +49,13 @@ type Subscription struct {
 	// 语言偏好设置
 	LanguagePreference string `json:"language_preference" gorm:"type:varchar(10);default:'auto'"` // auto/chs/cht/both
 
+	// 追番日历相关
+	AirDay          string     `json:"air_day" gorm:"type:varchar(10)"`        // 更新星期: 0-6 (0=周日)
+	AirTime         string     `json:"air_time" gorm:"type:varchar(10)"`       // 更新时间: "23:00"
+	AirTimezone     string     `json:"air_timezone" gorm:"type:varchar(10);default:'JST'"` // 时区
+	NotifyEnabled   bool       `json:"notify_enabled" gorm:"default:true"`     // 是否开启更新提醒
+	NotifyBeforeMin int        `json:"notify_before_min" gorm:"default:10"`    // 提前提醒分钟数
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 
