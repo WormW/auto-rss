@@ -37,6 +37,7 @@ type scheduler struct {
 	rssParser        rss.Parser
 	qbClient         downloader.QBittorrentClient
 	rssCheckRunning  atomic.Bool
+	smartFetchFilter *SmartFetchFilter // 智能拉取过滤器
 }
 
 // NewScheduler 创建调度器实例
@@ -56,6 +57,7 @@ func NewScheduler(
 		rssCheckInterval: rssCheckInterval,
 		rssParser:        rssParser,
 		qbClient:         qbClient,
+		smartFetchFilter: NewSmartFetchFilter(downloadRepo),
 	}
 }
 
@@ -128,9 +130,45 @@ func (s *scheduler) checkRSSFeeds() {
 		return
 	}
 
-	logger.Info("Checking RSS feeds", "count", len(subscriptions))
+	// 使用智能过滤器评估每个订阅
+	fetchStatuses := s.smartFetchFilter.FilterSubscriptions(subscriptions)
+	summary := s.smartFetchFilter.GetFetchSummary(fetchStatuses)
+	logger.Info("Smart fetch evaluation completed", 
+		"total", summary["total"],
+		"should_fetch", summary["should_fetch"],
+		"should_skip", summary["should_skip"],
+		"in_window", summary["in_window"],
+		"completed", summary["completed"])
 
-	for _, sub := range subscriptions {
+	if len(summary["with_missing"].([]string)) > 0 {
+		logger.Info("Subscriptions with missing episodes", 
+			"list", summary["with_missing"].([]string))
+	}
+
+	// 过滤出需要拉取的订阅
+	var subscriptionsToFetch []model.Subscription
+	for _, status := range fetchStatuses {
+		if status.ShouldFetch {
+			subscriptionsToFetch = append(subscriptionsToFetch, *status.Subscription)
+		} else {
+			logger.Debug("Skipping subscription based on smart fetch strategy",
+				"subscription", status.Subscription.Name,
+				"reason", status.FetchReason,
+				"next_fetch_in", status.NextFetchInterval)
+		}
+	}
+
+	logger.Info("Checking RSS feeds", "total", len(subscriptions), "will_fetch", len(subscriptionsToFetch))
+
+	// 构建订阅ID到拉取状态的映射，用于日志
+	fetchStatusMap := make(map[uint]*SubscriptionFetchStatus)
+	for i := range fetchStatuses {
+		if fetchStatuses[i].ShouldFetch {
+			fetchStatusMap[fetchStatuses[i].Subscription.ID] = &fetchStatuses[i]
+		}
+	}
+
+	for _, sub := range subscriptionsToFetch {
 		// 解析 RSS Feed
 		items, err := s.rssParser.FetchAndParse(sub.RssURL)
 		if err != nil {
@@ -141,9 +179,16 @@ func (s *scheduler) checkRSSFeeds() {
 			continue
 		}
 
+		// 获取该订阅的拉取原因
+		fetchReason := ""
+		if status, ok := fetchStatusMap[sub.ID]; ok {
+			fetchReason = status.FetchReason
+		}
+
 		logger.Info("Parsed RSS feed",
 			"subscription", sub.Name,
-			"items", len(items))
+			"items", len(items),
+			"fetch_reason", fetchReason)
 
 		// 首次启用时间水位线时，优先按“已存在下载记录”回推到对应的最新 pubDate，避免误跳过后续新集。
 		if sub.LastRSSPubTime == nil {
