@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"time"
+
 	"github.com/WormW/auto-rss/internal/model"
 	"gorm.io/gorm"
 )
@@ -23,6 +25,10 @@ type DownloadRepository interface {
 	BatchDelete(ids []uint) error
 	DeleteByStatus(status string) error
 	DeleteAll() error
+	// GetFailedDownloadsReadyForRetry 获取准备好重试的失败下载任务
+	GetFailedDownloadsReadyForRetry(limit int) ([]model.Download, error)
+	// GetDownloadsByRetryCount 获取指定重试次数的下载任务
+	GetDownloadsByRetryCount(minRetries, maxRetries int) ([]model.Download, error)
 }
 
 type downloadRepository struct {
@@ -145,4 +151,27 @@ func (r *downloadRepository) DeleteByStatus(status string) error {
 // DeleteAll 删除所有下载任务
 func (r *downloadRepository) DeleteAll() error {
 	return r.db.Where("1 = 1").Delete(&model.Download{}).Error
+}
+
+// GetFailedDownloadsReadyForRetry 获取准备好重试的失败下载任务
+// 条件：状态为 failed，且下次重试时间已到达或为空，且未达到最大重试次数
+func (r *downloadRepository) GetFailedDownloadsReadyForRetry(limit int) ([]model.Download, error) {
+	var downloads []model.Download
+	now := time.Now()
+
+	err := r.db.Where("status = ? AND retry_count < max_retries AND (next_retry_at IS NULL OR next_retry_at <= ?)",
+		"failed", now).
+		Order("next_retry_at ASC").
+		Limit(limit).
+		Find(&downloads).Error
+
+	return downloads, err
+}
+
+// GetDownloadsByRetryCount 获取指定重试次数范围的下载任务
+func (r *downloadRepository) GetDownloadsByRetryCount(minRetries, maxRetries int) ([]model.Download, error) {
+	var downloads []model.Download
+	err := r.db.Where("retry_count >= ? AND retry_count <= ?", minRetries, maxRetries).
+		Order("retry_count DESC").Find(&downloads).Error
+	return downloads, err
 }

@@ -37,6 +37,7 @@ type DownloadMonitor struct {
 	subscriptionRepo repository.SubscriptionRepository
 	configRepo       repository.ConfigRepository
 	renameService    *RenameService
+	retryService     *RetryService
 	notificationSvc  NotificationService
 	ticker           *time.Ticker
 	stopChan         chan struct{}
@@ -56,6 +57,7 @@ func NewDownloadMonitor(
 		subscriptionRepo: subscriptionRepo,
 		configRepo:       configRepo,
 		renameService:    NewRenameService(renameTemplate),
+		retryService:     NewRetryService(downloadRepo),
 		stopChan:         make(chan struct{}),
 	}
 }
@@ -219,12 +221,14 @@ func (m *DownloadMonitor) processPendingDownloads() {
 				"download_id", download.ID,
 				"title", download.Title,
 				"error", err.Error())
-			// 更新状态为失败
-			download.Status = "failed"
-			download.ErrorMessage = fmt.Sprintf("Failed to add to qBittorrent: %v", err)
-			m.downloadRepo.Update(&download)
-			// 发送下载失败通知
-			if m.notificationSvc != nil {
+			// 使用重试服务标记失败
+			if markErr := m.retryService.MarkFailed(&download, err, "qbittorrent_add_failed"); markErr != nil {
+				logger.Error("Failed to mark download as failed",
+					"download_id", download.ID,
+					"error", markErr.Error())
+			}
+			// 发送下载失败通知（只在最终失败或重试间隔较长时发送）
+			if m.notificationSvc != nil && download.RetryCount >= download.MaxRetries {
 				m.sendFailedNotification(&download, download.ErrorMessage)
 			}
 			continue
@@ -272,7 +276,10 @@ func (m *DownloadMonitor) processPendingDownloads() {
 func (m *DownloadMonitor) checkDownloads() {
 	logger.Debug("Checking downloads...")
 
-	// 首先处理等待中的下载任务
+	// 首先处理需要重试的失败任务
+	m.processFailedRetries()
+
+	// 处理等待中的下载任务
 	m.processPendingDownloads()
 
 	// 获取AutoRss分类的所有torrents
@@ -858,6 +865,50 @@ func (m *DownloadMonitor) reconcileMissingDownloadingTasks(torrents []*TorrentIn
 			"skipped_in_grace_period", skippedGrace,
 			"grace_period", ReconcileGracePeriod.String(),
 			"scanned_statuses", "downloading,stalled")
+	}
+}
+
+// processFailedRetries 处理失败任务的重试
+func (m *DownloadMonitor) processFailedRetries() {
+	// 获取准备好重试的失败任务
+	retryTasks, err := m.downloadRepo.GetFailedDownloadsReadyForRetry(10)
+	if err != nil {
+		logger.Error("Failed to get failed downloads for retry", "error", err.Error())
+		return
+	}
+
+	if len(retryTasks) == 0 {
+		return
+	}
+
+	logger.Info("Processing failed downloads for retry", "count", len(retryTasks))
+
+	for i := range retryTasks {
+		download := &retryTasks[i]
+
+		// 再次检查是否应该重试
+		shouldRetry, reason := m.retryService.ShouldRetry(download)
+		if !shouldRetry {
+			logger.Debug("Skipping retry for download",
+				"download_id", download.ID,
+				"reason", reason,
+				"retry_count", download.RetryCount)
+			continue
+		}
+
+		// 准备重试
+		if err := m.retryService.PrepareRetry(download, "auto_retry"); err != nil {
+			logger.Error("Failed to prepare download for retry",
+				"download_id", download.ID,
+				"error", err.Error())
+			continue
+		}
+
+		logger.Info("Download queued for retry",
+			"download_id", download.ID,
+			"title", download.Title,
+			"retry_count", download.RetryCount,
+			"next_retry_at", download.NextRetryAt.Format("2006-01-02 15:04:05"))
 	}
 }
 

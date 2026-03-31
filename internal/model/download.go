@@ -21,6 +21,13 @@ type Download struct {
 	CreatedAt      time.Time  `json:"created_at" gorm:"index"`
 	UpdatedAt      time.Time  `json:"updated_at"`
 
+	// 重试相关字段
+	RetryCount    int        `json:"retry_count" gorm:"default:0"`      // 已重试次数
+	MaxRetries    int        `json:"max_retries" gorm:"default:5"`      // 最大重试次数
+	NextRetryAt   *time.Time `json:"next_retry_at"`                      // 下次重试时间
+	LastError     string     `json:"last_error" gorm:"type:text"`       // 最后错误信息
+	RetryReason   string     `json:"retry_reason" gorm:"type:varchar(50)"` // 重试原因
+
 	Subscription Subscription `json:"subscription,omitempty" gorm:"foreignKey:SubscriptionID"`
 }
 
