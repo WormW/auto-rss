@@ -14,6 +14,7 @@ import (
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/robfig/cron/v3"
+	"gorm.io/gorm"
 )
 
 // Scheduler 调度器接口
@@ -29,6 +30,7 @@ type Scheduler interface {
 }
 
 type scheduler struct {
+	db               *gorm.DB
 	cron             *cron.Cron
 	subscriptionRepo repository.SubscriptionRepository
 	downloadRepo     repository.DownloadRepository
@@ -42,6 +44,7 @@ type scheduler struct {
 
 // NewScheduler 创建调度器实例
 func NewScheduler(
+	db *gorm.DB,
 	subscriptionRepo repository.SubscriptionRepository,
 	downloadRepo repository.DownloadRepository,
 	configRepo repository.ConfigRepository,
@@ -50,6 +53,7 @@ func NewScheduler(
 	qbClient downloader.QBittorrentClient,
 ) Scheduler {
 	return &scheduler{
+		db:               db,
 		cron:             cron.New(),
 		subscriptionRepo: subscriptionRepo,
 		downloadRepo:     downloadRepo,
@@ -131,7 +135,21 @@ func (s *scheduler) checkRSSFeeds() {
 	}
 
 	// 使用智能过滤器评估每个订阅
-	fetchStatuses := s.smartFetchFilter.FilterSubscriptions(subscriptions)
+	fetchStatuses, needsUpdateIndexes := s.smartFetchFilter.FilterSubscriptions(subscriptions)
+
+	// 保存需要更新的订阅（如刚完结的订阅需要更新 CompletedAt）
+	for _, idx := range needsUpdateIndexes {
+		if err := s.subscriptionRepo.Update(&subscriptions[idx]); err != nil {
+			logger.Error("Failed to update subscription completion status",
+				"subscription", subscriptions[idx].Name,
+				"error", err)
+		} else {
+			logger.Info("Subscription completion status saved to database",
+				"subscription", subscriptions[idx].Name,
+				"completed_at", subscriptions[idx].CompletedAt.Format("2006-01-02 15:04:05"))
+		}
+	}
+
 	summary := s.smartFetchFilter.GetFetchSummary(fetchStatuses)
 	logger.Info("Smart fetch evaluation completed", 
 		"total", summary["total"],
@@ -322,7 +340,8 @@ func (s *scheduler) checkRSSFeeds() {
 				skipReason = reason
 				replaceDownloadID = replaceID
 
-				// 如果需要替换现有下载（更高版本）
+				// 如果需要替换现有下载（更高版本），先在 qBittorrent 中删除旧种子
+				// 数据库记录将在 processDownloadItem 的事务中删除
 				if replaceDownloadID > 0 {
 					existingEpisode, _ := s.downloadRepo.GetByID(replaceDownloadID)
 					if existingEpisode != nil {
@@ -337,7 +356,7 @@ func (s *scheduler) checkRSSFeeds() {
 							"new_title", item.Title,
 							"trigger_context", "scheduler_rss_check")
 
-						// 如果旧任务有 qBittorrent hash，尝试删除种子
+						// 如果旧任务有 qBittorrent hash，尝试删除种子（数据库记录在 processDownloadItem 事务中处理）
 						if existingEpisode.TorrentHash != "" {
 							if err := s.qbClient.DeleteTorrent(existingEpisode.TorrentHash, true); err != nil {
 								logger.Error("Failed to delete old torrent from qBittorrent",
@@ -349,17 +368,6 @@ func (s *scheduler) checkRSSFeeds() {
 									"trigger_context", "scheduler_rss_check",
 									"error", err)
 							}
-						}
-
-						// 删除数据库记录
-						if err := s.downloadRepo.Delete(existingEpisode.ID); err != nil {
-							logger.Error("Failed to delete old download record",
-								"task_action", "replace_old_task_delete_record",
-								"subscription_id", sub.ID,
-								"download_id", existingEpisode.ID,
-								"episode", item.Episode,
-								"trigger_context", "scheduler_rss_check",
-								"error", err)
 						}
 					}
 				}
@@ -376,89 +384,21 @@ func (s *scheduler) checkRSSFeeds() {
 				continue
 			}
 
-			// 创建下载任务
-			download := &model.Download{
-				SubscriptionID: sub.ID,
-				Title:          item.Title,
-				Episode:        item.Episode,
-				Fansub:         item.Fansub,
-				Language:       string(item.Language),
-				TorrentURL:     item.TorrentURL,
-				TorrentHash:    item.TorrentHash,
-				Status:         "pending",
-			}
-
-			if err := s.downloadRepo.Create(download); err != nil {
-				logger.Error("Failed to create download",
-					"task_action", "create_download_task",
-					"subscription_id", sub.ID,
-					"episode", item.Episode,
-					"title", item.Title,
-					"trigger_context", "scheduler_rss_check",
-					"error", err)
-				continue
-			}
-
-			logger.Info("Download task created",
-				"task_action", "create_download_task",
-				"subscription", sub.Name,
-				"subscription_id", sub.ID,
-				"download_id", download.ID,
-				"title", item.Title,
-				"episode", item.Episode,
-				"fansub", item.Fansub,
-				"language", item.Language,
-				"lang_keyword", item.LangKeyword,
-				"trigger_context", "scheduler_rss_check")
-
-			// 生成带番剧名的下载路径
-			// 使用系统配置的下载路径，而不是订阅级别的路径
-			basePath := constants.DefaultDownloadPath // 默认值
-			if s.configRepo != nil {
-				if downloadPathConfig, err := s.configRepo.Get("download_path"); err == nil && downloadPathConfig != nil && downloadPathConfig.Value != "" {
-					basePath = downloadPathConfig.Value
-				}
-			}
-			downloadPath := utils.GenerateDownloadPath(basePath, sub.Name)
-
-			// 添加到 qBittorrent
-			_, err = s.qbClient.AddTorrent(item.TorrentURL, downloadPath, "")
+			// 使用事务方法处理下载创建
+			_, err := s.processDownloadItem(&sub, &item, replaceDownloadID)
 			if err != nil {
-				logger.Error("Failed to add torrent to qBittorrent",
-					"task_action", "add_torrent",
-					"subscription_id", sub.ID,
-					"download_id", download.ID,
-					"episode", item.Episode,
-					"title", item.Title,
-					"download_path", downloadPath,
-					"trigger_context", "scheduler_rss_check",
-					"error", err)
-				download.Status = "failed"
-				download.ErrorMessage = err.Error()
-				s.downloadRepo.Update(download)
+				// 错误已在 processDownloadItem 中记录
 				continue
 			}
+		}
 
-			logger.Debug("Torrent added with path",
-				"task_action", "add_torrent",
+		// 使用事务更新订阅检查时间
+		if err := s.updateSubscriptionCheckTime(&sub, maxPubTime); err != nil {
+			logger.Error("Failed to update subscription check time",
 				"subscription", sub.Name,
 				"subscription_id", sub.ID,
-				"download_id", download.ID,
-				"episode", item.Episode,
-				"download_path", downloadPath,
-				"trigger_context", "scheduler_rss_check")
-
-			download.Status = "downloading"
-			s.downloadRepo.Update(download)
+				"error", err)
 		}
-
-		now := time.Now()
-		sub.LastCheckTime = &now
-		if maxPubTime != nil {
-			pubCopy := *maxPubTime
-			sub.LastRSSPubTime = &pubCopy
-		}
-		s.subscriptionRepo.Update(&sub)
 	}
 
 	logger.Info("RSS feed check completed")
@@ -492,6 +432,115 @@ func (s *scheduler) matchesFilter(sub *model.Subscription, title string) bool {
 	}
 
 	return true
+}
+
+// processDownloadItem 处理单个下载条目（在事务中）
+// 返回是否成功创建下载任务
+func (s *scheduler) processDownloadItem(sub *model.Subscription, item *rss.RSSItem, replaceDownloadID uint) (bool, error) {
+	// 创建下载任务
+	download := &model.Download{
+		SubscriptionID: sub.ID,
+		Title:          item.Title,
+		Episode:        item.Episode,
+		Fansub:         item.Fansub,
+		Language:       string(item.Language),
+		TorrentURL:     item.TorrentURL,
+		TorrentHash:    item.TorrentHash,
+		Status:         "pending",
+	}
+
+	// 使用事务包装数据库操作
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		// 如果需要替换旧下载，先删除旧记录
+		if replaceDownloadID > 0 {
+			if err := tx.Delete(&model.Download{}, replaceDownloadID).Error; err != nil {
+				return fmt.Errorf("failed to delete old download: %w", err)
+			}
+		}
+
+		// 创建新下载记录
+		if err := tx.Create(download).Error; err != nil {
+			return fmt.Errorf("failed to create download: %w", err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return false, err
+	}
+
+	logger.Info("Download task created",
+		"task_action", "create_download_task",
+		"subscription", sub.Name,
+		"subscription_id", sub.ID,
+		"download_id", download.ID,
+		"title", item.Title,
+		"episode", item.Episode,
+		"fansub", item.Fansub,
+		"language", item.Language,
+		"trigger_context", "scheduler_rss_check")
+
+	// 生成带番剧名的下载路径
+	basePath := constants.DefaultDownloadPath
+	if s.configRepo != nil {
+		if downloadPathConfig, err := s.configRepo.Get("download_path"); err == nil && downloadPathConfig != nil && downloadPathConfig.Value != "" {
+			basePath = downloadPathConfig.Value
+		}
+	}
+	downloadPath := utils.GenerateDownloadPath(basePath, sub.Name)
+
+	// 添加到 qBittorrent（在事务外，因为可能涉及网络操作）
+	_, err = s.qbClient.AddTorrent(item.TorrentURL, downloadPath, "")
+	if err != nil {
+		logger.Error("Failed to add torrent to qBittorrent",
+			"task_action", "add_torrent",
+			"subscription_id", sub.ID,
+			"download_id", download.ID,
+			"episode", item.Episode,
+			"title", item.Title,
+			"download_path", downloadPath,
+			"trigger_context", "scheduler_rss_check",
+			"error", err)
+
+		// 更新下载状态为失败
+		download.Status = "failed"
+		download.ErrorMessage = err.Error()
+		s.downloadRepo.Update(download)
+		return false, err
+	}
+
+	logger.Debug("Torrent added with path",
+		"task_action", "add_torrent",
+		"subscription", sub.Name,
+		"subscription_id", sub.ID,
+		"download_id", download.ID,
+		"episode", item.Episode,
+		"download_path", downloadPath,
+		"trigger_context", "scheduler_rss_check")
+
+	// 更新状态为 downloading
+	download.Status = "downloading"
+	if err := s.downloadRepo.Update(download); err != nil {
+		logger.Error("Failed to update download status",
+			"download_id", download.ID,
+			"error", err)
+	}
+
+	return true, nil
+}
+
+// updateSubscriptionCheckTime 更新订阅的检查时间（带事务）
+func (s *scheduler) updateSubscriptionCheckTime(sub *model.Subscription, maxPubTime *time.Time) error {
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		now := time.Now()
+		sub.LastCheckTime = &now
+		if maxPubTime != nil {
+			pubCopy := *maxPubTime
+			sub.LastRSSPubTime = &pubCopy
+		}
+		return tx.Save(sub).Error
+	})
 }
 
 // Stop 停止调度器

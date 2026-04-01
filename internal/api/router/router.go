@@ -3,6 +3,7 @@ package router
 import (
 	"io/fs"
 	"net/http"
+	"time"
 
 	"github.com/WormW/auto-rss/internal/api/handler"
 	"github.com/WormW/auto-rss/internal/api/middleware"
@@ -43,7 +44,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	logRepo := repository.NewLogRepository(db)
 
 	// 初始化调度器
-	rssScheduler := scheduler.NewScheduler(subscriptionRepo, downloadRepo, configRepo, cfg.RSSInterval, rssParser, qbClient)
+	rssScheduler := scheduler.NewScheduler(db, subscriptionRepo, downloadRepo, configRepo, cfg.RSSInterval, rssParser, qbClient)
 
 	// 初始化通知服务
 	notificationSvc := notification.NewService(db)
@@ -58,6 +59,11 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	_ = diskMonitor.LoadConfig()
 	diskMonitor.SetNotificationService(notificationSvc)
 	diskMonitor.Start()
+
+	// 初始化下载监控服务（在 handler 之前，因为某些 handler 可能需要它）
+	downloadMonitor := downloader.NewDownloadMonitor(db, qbClient, downloadRepo, subscriptionRepo, configRepo, "")
+	downloadMonitor.SetNotificationService(notificationSvc)
+	downloadMonitor.Start(30 * time.Second)
 
 	// 初始化处理器
 	subscriptionHandler := handler.NewSubscriptionHandler(subscriptionRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath)

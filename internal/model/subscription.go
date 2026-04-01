@@ -56,6 +56,9 @@ type Subscription struct {
 	NotifyEnabled   bool       `json:"notify_enabled" gorm:"default:true"`     // 是否开启更新提醒
 	NotifyBeforeMin int        `json:"notify_before_min" gorm:"default:10"`    // 提前提醒分钟数
 
+	// 完结时间追踪 - 用于判断完结后多久停止检查
+	CompletedAt *time.Time `json:"completed_at"` // 完结时间（首次检测到 CurrentEpisode >= TotalEpisodes 时设置）
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 

@@ -29,6 +29,10 @@ type DownloadRepository interface {
 	GetFailedDownloadsReadyForRetry(limit int) ([]model.Download, error)
 	// GetDownloadsByRetryCount 获取指定重试次数的下载任务
 	GetDownloadsByRetryCount(minRetries, maxRetries int) ([]model.Download, error)
+	// CreateInTx 在事务中创建下载任务
+	CreateInTx(tx *gorm.DB, download *model.Download) error
+	// UpdateInTx 在事务中更新下载任务
+	UpdateInTx(tx *gorm.DB, download *model.Download) error
 }
 
 type downloadRepository struct {
@@ -174,4 +178,14 @@ func (r *downloadRepository) GetDownloadsByRetryCount(minRetries, maxRetries int
 	err := r.db.Where("retry_count >= ? AND retry_count <= ?", minRetries, maxRetries).
 		Order("retry_count DESC").Find(&downloads).Error
 	return downloads, err
+}
+
+// CreateInTx 在事务中创建下载任务
+func (r *downloadRepository) CreateInTx(tx *gorm.DB, download *model.Download) error {
+	return tx.Create(download).Error
+}
+
+// UpdateInTx 在事务中更新下载任务
+func (r *downloadRepository) UpdateInTx(tx *gorm.DB, download *model.Download) error {
+	return tx.Save(download).Error
 }

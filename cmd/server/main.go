@@ -102,6 +102,7 @@ func main() {
 
 	// 初始化下载监控服务
 	downloadMonitor := downloader.NewDownloadMonitor(
+		db,
 		qbClient,
 		downloadRepo,
 		subscriptionRepo,

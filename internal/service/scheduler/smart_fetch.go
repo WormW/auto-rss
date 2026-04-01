@@ -18,6 +18,7 @@ type SmartFetchStrategy struct {
 
 	// 完结状态检查
 	SkipCompleted bool // 是否跳过已完结的
+	CompletedStopDays int // 完结后 N 天彻底停止检查（0 表示不停止）
 
 	// 本地库存检查
 	CheckLocalComplete bool // 是否检查本地是否完整
@@ -34,6 +35,7 @@ func DefaultSmartFetchStrategy() *SmartFetchStrategy {
 		BeforeAirDay:        1,              // 更新日前1天
 		AfterAirDay:         2,              // 更新日后2天
 		SkipCompleted:       false,          // 不跳过已完结（可能还有v2版本）
+		CompletedStopDays:   30,             // 完结30天后彻底停止检查
 		CheckLocalComplete:  true,           // 检查本地完整性
 		NormalInterval:      30 * time.Minute,
 		ActiveInterval:      10 * time.Minute, // 活跃期更频繁
@@ -94,6 +96,13 @@ func (f *SmartFetchFilter) LoadConfigFromDB(configRepo repository.ConfigReposito
 		}
 	}
 
+	// 加载完结后停止检查的天数
+	if cfg, err := configRepo.Get("smart_fetch.completed_stop_days"); err == nil && cfg != nil {
+		if val, err := strconv.Atoi(cfg.Value); err == nil && val >= 0 {
+			f.strategy.CompletedStopDays = val
+		}
+	}
+
 	// 加载是否检查本地完整性
 	if cfg, err := configRepo.Get("smart_fetch.check_local_complete"); err == nil && cfg != nil {
 		if cfg.Value == "true" || cfg.Value == "1" {
@@ -107,6 +116,7 @@ func (f *SmartFetchFilter) LoadConfigFromDB(configRepo repository.ConfigReposito
 		"before_air_day", f.strategy.BeforeAirDay,
 		"after_air_day", f.strategy.AfterAirDay,
 		"skip_completed", f.strategy.SkipCompleted,
+		"completed_stop_days", f.strategy.CompletedStopDays,
 		"check_local_complete", f.strategy.CheckLocalComplete)
 }
 
@@ -116,30 +126,59 @@ func (f *SmartFetchFilter) SetStrategy(strategy *SmartFetchStrategy) {
 }
 
 // FilterSubscriptions 过滤应该拉取的订阅
-func (f *SmartFetchFilter) FilterSubscriptions(subscriptions []model.Subscription) []SubscriptionFetchStatus {
+// 返回：拉取状态列表，需要更新的订阅索引列表
+func (f *SmartFetchFilter) FilterSubscriptions(subscriptions []model.Subscription) ([]SubscriptionFetchStatus, []int) {
 	var results []SubscriptionFetchStatus
+	var needsUpdateIndexes []int
 
 	for i := range subscriptions {
-		status := f.EvaluateSubscription(&subscriptions[i])
+		status, needsUpdate := f.EvaluateSubscription(&subscriptions[i])
 		results = append(results, status)
+		if needsUpdate {
+			needsUpdateIndexes = append(needsUpdateIndexes, i)
+		}
 	}
 
-	return results
+	return results, needsUpdateIndexes
 }
 
 // EvaluateSubscription 评估单个订阅是否应该拉取
-func (f *SmartFetchFilter) EvaluateSubscription(sub *model.Subscription) SubscriptionFetchStatus {
+// 返回：拉取状态，是否需要更新数据库
+func (f *SmartFetchFilter) EvaluateSubscription(sub *model.Subscription) (SubscriptionFetchStatus, bool) {
 	status := SubscriptionFetchStatus{
 		Subscription: sub,
 		ShouldFetch:  false,
 	}
+	needsUpdate := false
 
 	// 1. 检查是否已完结且跳过已完结
 	isCompleted := f.isCompleted(sub)
+
+	// 1.1 如果刚完结（CompletedAt 未设置），设置完结时间
+	if isCompleted && sub.CompletedAt == nil {
+		now := time.Now()
+		sub.CompletedAt = &now
+		needsUpdate = true // 标记需要更新数据库
+		logger.Info("Subscription marked as completed",
+			"subscription", sub.Name,
+			"completed_at", now.Format("2006-01-02 15:04:05"))
+	}
+
+	// 1.2 检查完结后是否超过停止检查天数
+	if isCompleted && f.strategy.CompletedStopDays > 0 && sub.CompletedAt != nil {
+		daysSinceCompleted := int(time.Since(*sub.CompletedAt).Hours() / 24)
+		if daysSinceCompleted >= f.strategy.CompletedStopDays {
+			status.ShouldFetch = false
+			status.FetchReason = fmt.Sprintf("completed_%d_days_ago_stop_checking", daysSinceCompleted)
+			status.NextFetchInterval = 7 * 24 * time.Hour // 一周后再次检查（以防万一）
+			return status, needsUpdate
+		}
+	}
+
 	if isCompleted && f.strategy.SkipCompleted {
 		status.FetchReason = "completed_skipped"
 		status.NextFetchInterval = f.strategy.CompletedInterval
-		return status
+		return status, needsUpdate
 	}
 
 	// 2. 检查是否在活跃窗口期（更新日前后）
@@ -192,7 +231,7 @@ func (f *SmartFetchFilter) EvaluateSubscription(sub *model.Subscription) Subscri
 		status.NextFetchInterval = f.strategy.NormalInterval
 	}
 
-	return status
+	return status, needsUpdate
 }
 
 // isCompleted 检查订阅是否已完结

@@ -14,6 +14,7 @@ import (
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
+	"gorm.io/gorm"
 )
 
 const (
@@ -32,6 +33,7 @@ const (
 
 // DownloadMonitor 下载监控服务
 type DownloadMonitor struct {
+	db               *gorm.DB
 	qbClient         QBittorrentClient
 	downloadRepo     repository.DownloadRepository
 	subscriptionRepo repository.SubscriptionRepository
@@ -45,6 +47,7 @@ type DownloadMonitor struct {
 
 // NewDownloadMonitor 创建下载监控服务
 func NewDownloadMonitor(
+	db *gorm.DB,
 	qbClient QBittorrentClient,
 	downloadRepo repository.DownloadRepository,
 	subscriptionRepo repository.SubscriptionRepository,
@@ -52,6 +55,7 @@ func NewDownloadMonitor(
 	renameTemplate string,
 ) *DownloadMonitor {
 	return &DownloadMonitor{
+		db:               db,
 		qbClient:         qbClient,
 		downloadRepo:     downloadRepo,
 		subscriptionRepo: subscriptionRepo,
@@ -729,7 +733,7 @@ func extractEpisodeFromFilename(filename string) int {
 	return 0
 }
 
-// updateSubscriptionStats 更新订阅统计信息
+// updateSubscriptionStats 更新订阅统计信息（使用事务）
 func (m *DownloadMonitor) updateSubscriptionStats(subscription *model.Subscription, download *model.Download) {
 	// 更新当前集数
 	if download.Episode > subscription.CurrentEpisode {
@@ -740,8 +744,16 @@ func (m *DownloadMonitor) updateSubscriptionStats(subscription *model.Subscripti
 	now := time.Now()
 	subscription.LastDownloadAt = &now
 
-	// 保存到数据库
-	if err := m.subscriptionRepo.Update(subscription); err != nil {
+	// 使用事务保存到数据库
+	err := m.db.Transaction(func(tx *gorm.DB) error {
+		// 保存订阅统计
+		if err := tx.Save(subscription).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+
+	if err != nil {
 		logger.Error("Failed to update subscription stats",
 			"subscription_id", subscription.ID,
 			"error", err.Error())

@@ -14,6 +14,8 @@ type SubscriptionRepository interface {
 	GetByRSSURL(rssURL string) (*model.Subscription, error)
 	List(offset, limit int) ([]model.Subscription, int64, error)
 	GetActiveSubscriptions() ([]model.Subscription, error)
+	// UpdateInTx 在事务中更新订阅
+	UpdateInTx(tx *gorm.DB, subscription *model.Subscription) error
 }
 
 type subscriptionRepository struct {
@@ -86,4 +88,9 @@ func (r *subscriptionRepository) GetActiveSubscriptions() ([]model.Subscription,
 	var subscriptions []model.Subscription
 	err := r.db.Where("status = ?", "active").Find(&subscriptions).Error
 	return subscriptions, err
+}
+
+// UpdateInTx 在事务中更新订阅
+func (r *subscriptionRepository) UpdateInTx(tx *gorm.DB, subscription *model.Subscription) error {
+	return tx.Save(subscription).Error
 }

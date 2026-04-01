@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -30,6 +31,7 @@ type FileOrganizer struct {
 	minMatchScore    float64                             // 最小匹配分数
 	stabilizeTime    time.Duration                       // 文件稳定时间（避免处理未完成的文件）
 	processing       map[string]bool                     // 正在处理的文件
+	procMux          sync.RWMutex                        // 保护 processing map 的互斥锁
 }
 
 // NewFileOrganizer 创建文件整理服务
@@ -203,15 +205,20 @@ func (f *FileOrganizer) handleNewFile(filePath string) {
 		return
 	}
 
-	// 防止重复处理
+	// 防止重复处理 - 使用读锁检查
+	f.procMux.RLock()
 	if f.processing[filePath] {
+		f.procMux.RUnlock()
 		return
 	}
+	f.procMux.RUnlock()
 
 	logger.Debug("New file detected", "path", filePath)
 
-	// 标记为正在处理
+	// 标记为正在处理 - 使用写锁
+	f.procMux.Lock()
 	f.processing[filePath] = true
+	f.procMux.Unlock()
 
 	// 异步处理文件（等待文件稳定后再处理）
 	go func() {
@@ -221,7 +228,9 @@ func (f *FileOrganizer) handleNewFile(filePath string) {
 		// 验证文件是否仍然存在且可访问
 		if !f.isFileReady(filePath) {
 			logger.Debug("File not ready or no longer exists", "path", filePath)
+			f.procMux.Lock()
 			delete(f.processing, filePath)
+			f.procMux.Unlock()
 			return
 		}
 
@@ -231,7 +240,9 @@ func (f *FileOrganizer) handleNewFile(filePath string) {
 		}
 
 		// 移除处理标记
+		f.procMux.Lock()
 		delete(f.processing, filePath)
+		f.procMux.Unlock()
 	}()
 }
 
@@ -293,17 +304,23 @@ func (f *FileOrganizer) organizeFile(filePath string) error {
 		"to", newPath)
 
 	// 先将目标路径标记为正在处理，防止移动后触发新事件导致死循环
+	f.procMux.Lock()
 	f.processing[newPath] = true
+	f.procMux.Unlock()
 
 	if err := f.moveFile(filePath, newPath); err != nil {
+		f.procMux.Lock()
 		delete(f.processing, newPath) // 移动失败，清除标记
+		f.procMux.Unlock()
 		return fmt.Errorf("failed to move file: %w", err)
 	}
 
 	// 移动成功后，设置一个延迟清除标记的定时器
 	go func() {
 		time.Sleep(10 * time.Second) // 10秒后清除标记
+		f.procMux.Lock()
 		delete(f.processing, newPath)
+		f.procMux.Unlock()
 		logger.Debug("Cleared processing flag for moved file", "path", newPath)
 	}()
 
