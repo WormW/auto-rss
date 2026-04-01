@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -127,35 +128,33 @@ func (m *Monitor) LoadConfig() error {
 
 	// 加载警告阈值
 	if cfg, err := m.configRepo.Get("disk.warning_threshold_gb"); err == nil && cfg != nil {
-		if val, ok := cfg.Value.(int64); ok {
+		if val, err := strconv.ParseInt(cfg.Value, 10, 64); err == nil {
 			m.config.WarningThresholdGB = val
 		}
 	}
 
 	// 加载危险阈值
 	if cfg, err := m.configRepo.Get("disk.critical_threshold_gb"); err == nil && cfg != nil {
-		if val, ok := cfg.Value.(int64); ok {
+		if val, err := strconv.ParseInt(cfg.Value, 10, 64); err == nil {
 			m.config.CriticalThresholdGB = val
 		}
 	}
 
 	// 加载自动清理开关
 	if cfg, err := m.configRepo.Get("disk.auto_cleanup_enabled"); err == nil && cfg != nil {
-		if val, ok := cfg.Value.(bool); ok {
+		if val, err := strconv.ParseBool(cfg.Value); err == nil {
 			m.config.AutoCleanupEnabled = val
 		}
 	}
 
 	// 加载清理策略
 	if cfg, err := m.configRepo.Get("disk.cleanup_strategy"); err == nil && cfg != nil {
-		if val, ok := cfg.Value.(string); ok {
-			m.config.CleanupStrategy = CleanupStrategy(val)
-		}
+		m.config.CleanupStrategy = CleanupStrategy(cfg.Value)
 	}
 
 	// 加载保留天数
 	if cfg, err := m.configRepo.Get("disk.cleanup_keep_days"); err == nil && cfg != nil {
-		if val, ok := cfg.Value.(int); ok {
+		if val, err := strconv.Atoi(cfg.Value); err == nil {
 			m.config.CleanupKeepDays = val
 		}
 	}
@@ -506,8 +505,8 @@ func (m *Monitor) getDownloadPath() string {
 	// 从配置获取
 	if m.configRepo != nil {
 		if cfg, err := m.configRepo.Get("download_path"); err == nil && cfg != nil {
-			if val, ok := cfg.Value.(string); ok && val != "" {
-				return val
+			if cfg.Value != "" {
+				return cfg.Value
 			}
 		}
 	}

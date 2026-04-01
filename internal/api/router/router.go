@@ -9,6 +9,8 @@ import (
 	"github.com/WormW/auto-rss/internal/app"
 	"github.com/WormW/auto-rss/internal/config"
 	"github.com/WormW/auto-rss/internal/repository"
+	"github.com/WormW/auto-rss/internal/service/calendar"
+	"github.com/WormW/auto-rss/internal/service/disk"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/notification"
 	"github.com/WormW/auto-rss/internal/service/rss"
@@ -47,6 +49,16 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	notificationSvc := notification.NewService(db)
 	wsHub := notificationSvc.GetWebSocketHub()
 
+	// 初始化日历服务
+	calendarSvc := calendar.NewCalendar(subscriptionRepo)
+	calendarSvc.SetNotificationService(notificationSvc)
+
+	// 初始化磁盘监控服务
+	diskMonitor := disk.NewMonitor(downloadRepo, subscriptionRepo, configRepo)
+	_ = diskMonitor.LoadConfig()
+	diskMonitor.SetNotificationService(notificationSvc)
+	diskMonitor.Start()
+
 	// 初始化处理器
 	subscriptionHandler := handler.NewSubscriptionHandler(subscriptionRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath)
 	downloadHandler := handler.NewDownloadHandler(downloadRepo, qbClient)
@@ -58,6 +70,8 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	logHandler := handler.NewLogHandler(logRepo)
 	fileOrganizerHandler := handler.NewFileOrganizerHandler(appCtx)
 	notificationHandler := handler.NewNotificationHandler(db, notificationSvc, wsHub)
+	calendarHandler := handler.NewCalendarHandler(subscriptionRepo)
+	diskHandler := handler.NewDiskHandler(db, downloadRepo, subscriptionRepo, configRepo)
 
 	// API v1 路由组
 	v1 := r.Group("/api/v1")
@@ -172,6 +186,24 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			notifications.POST("/test", notificationHandler.TestChannel)
 			notifications.GET("/websocket/status", notificationHandler.GetWebSocketStatus)
 			notifications.GET("/webhook/templates", notificationHandler.GetWebhookTemplates)
+		}
+
+		// 日历管理
+		calendars := v1.Group("/calendar")
+		{
+			calendars.GET("", calendarHandler.GetWeekSchedule)
+			calendars.GET("/today", calendarHandler.GetTodaySchedule)
+		}
+
+		// 磁盘监控
+		disks := v1.Group("/disk")
+		{
+			disks.GET("/status", diskHandler.GetStatus)
+			disks.GET("/info", diskHandler.GetInfo)
+			disks.GET("/settings", diskHandler.GetSettings)
+			disks.PUT("/settings", diskHandler.UpdateSettings)
+			disks.POST("/cleanup", diskHandler.TriggerCleanup)
+			disks.GET("/history", diskHandler.GetHistory)
 		}
 	}
 
