@@ -1,40 +1,345 @@
 <template>
   <div class="subscriptions-page">
-    <div class="page-header">
-      <h2>订阅管理</h2>
-      <n-space :size="8" class="header-actions">
-        <n-button @click="showAnimeSearch" size="small" class="hide-text-mobile">
-          <template #icon>
-            <n-icon><SearchOutlined /></n-icon>
-          </template>
-          <span class="btn-text">搜索番剧</span>
+    <!-- 统计概览 -->
+    <div class="stats-overview">
+      <n-card class="stat-card" size="small">
+        <div class="stat-value">{{ subscriptions.length }}</div>
+        <div class="stat-label">总订阅</div>
+      </n-card>
+      <n-card class="stat-card" size="small">
+        <div class="stat-value" style="color: #18a058;">{{ activeCount }}</div>
+        <div class="stat-label">连载中</div>
+      </n-card>
+      <n-card class="stat-card" size="small">
+        <div class="stat-value" style="color: #2080f0;">{{ todayUpdateCount }}</div>
+        <div class="stat-label">今日更新</div>
+      </n-card>
+      <n-card class="stat-card" size="small">
+        <div class="stat-value" style="color: #f0a020;">{{ downloadingCount }}</div>
+        <div class="stat-label">下载中</div>
+      </n-card>
+      <n-card class="stat-card" size="small">
+        <div class="stat-value" style="color: #d03050;">{{ missingEpisodesCount }}</div>
+        <div class="stat-label">有缺失</div>
+      </n-card>
+    </div>
+
+    <!-- 今日更新专区 -->
+    <div v-if="todayUpdates.length > 0" class="today-updates-section">
+      <div class="section-header">
+        <h3>
+          <n-icon size="18" color="#18a058"><TodayOutlined /></n-icon>
+          今日更新 ({{ todayUpdates.length }})
+        </h3>
+        <n-tag type="success" size="small" v-if="todayPendingCount > 0">
+          {{ todayPendingCount }} 个待下载
+        </n-tag>
+      </div>
+      <div class="today-grid">
+        <n-card
+          v-for="sub in todayUpdates"
+          :key="sub.id"
+          hoverable
+          class="today-card"
+          :class="{ 'is-downloaded': isTodayDownloaded(sub) }"
+        >
+          <div class="today-content">
+            <img
+              v-if="sub.bangumi_cover_local"
+              :src="`/covers/${sub.bangumi_cover_local}`"
+              :alt="sub.name"
+              class="today-cover"
+            />
+            <div v-else class="today-cover-placeholder">{{ sub.name[0] }}</div>
+            <div class="today-info">
+              <n-ellipsis class="today-title">{{ sub.name }}</n-ellipsis>
+              <div class="today-meta">
+                <n-tag v-if="sub.air_time" size="tiny" type="info">
+                  {{ formatAirTime(sub) }}
+                </n-tag>
+                <n-tag size="tiny" :type="isTodayDownloaded(sub) ? 'default' : 'success'">
+                  {{ isTodayDownloaded(sub) ? '已下载' : `第${sub.latest_episode}集已更新` }}
+                </n-tag>
+              </div>
+              <div class="today-progress">
+                <span>已收集 {{ sub.current_episode || 0 }}/{{ sub.total_episodes || '?' }}</span>
+              </div>
+            </div>
+            <div class="today-actions">
+              <n-button
+                v-if="!isTodayDownloaded(sub)"
+                type="primary"
+                size="tiny"
+                @click="handleCollectEpisodes(sub.id)"
+              >
+                下载
+              </n-button>
+              <n-button v-else text size="tiny" @click="$router.push('/downloads')">
+                查看
+              </n-button>
+            </div>
+          </div>
+        </n-card>
+      </div>
+    </div>
+
+    <!-- 筛选栏 -->
+    <div class="filter-bar">
+      <n-input
+        v-model:value="searchQuery"
+        placeholder="搜索番剧名称..."
+        clearable
+        class="search-input"
+      >
+        <template #prefix>
+          <n-icon><SearchOutlined /></n-icon>
+        </template>
+      </n-input>
+      <n-select
+        v-model:value="filterStatus"
+        :options="statusOptions"
+        placeholder="状态"
+        clearable
+        class="filter-select"
+      />
+      <n-select
+        v-model:value="filterYear"
+        :options="yearOptions"
+        placeholder="年份"
+        clearable
+        class="filter-select"
+      />
+      <n-select
+        v-model:value="filterFansub"
+        :options="fansubOptions"
+        placeholder="字幕组"
+        clearable
+        class="filter-select"
+      />
+      <n-button-group>
+        <n-button
+          :type="viewMode === 'card' ? 'primary' : 'default'"
+          size="small"
+          @click="viewMode = 'card'"
+        >
+          <n-icon><AppstoreOutlined /></n-icon>
         </n-button>
-        <n-button type="primary" @click="showAddDialog" size="small">
-          <template #icon>
-            <n-icon><PlusOutlined /></n-icon>
-          </template>
-          <span class="btn-text">添加订阅</span>
+        <n-button
+          :type="viewMode === 'list' ? 'primary' : 'default'"
+          size="small"
+          @click="viewMode = 'list'"
+        >
+          <n-icon><UnorderedListOutlined /></n-icon>
         </n-button>
+      </n-button-group>
+      <n-button type="primary" size="small" @click="showAddDialog">
+        <template #icon>
+          <n-icon><PlusOutlined /></n-icon>
+        </template>
+        添加订阅
+      </n-button>
+    </div>
+
+    <!-- 批量操作栏 -->
+    <div v-if="selectedIds.length > 0" class="batch-bar">
+      <span>已选择 {{ selectedIds.length }} 项</span>
+      <n-space>
+        <n-button size="small" @click="batchToggle(true)">
+          <template #icon><n-icon><PlayCircleOutlined /></n-icon></template>
+          启用
+        </n-button>
+        <n-button size="small" @click="batchToggle(false)">
+          <template #icon><n-icon><PauseCircleOutlined /></n-icon></template>
+          禁用
+        </n-button>
+        <n-button size="small" @click="batchCollect">
+          <template #icon><n-icon><DownloadOutlined /></n-icon></template>
+          采集
+        </n-button>
+        <n-button size="small" type="error" @click="batchDelete">
+          <template #icon><n-icon><DeleteOutlined /></n-icon></template>
+          删除
+        </n-button>
+        <n-button text size="small" @click="selectedIds = []">取消</n-button>
       </n-space>
     </div>
 
-    <!-- 番剧搜索组件 -->
-    <AnimeSearch ref="animeSearchRef" @subscribe="handleSearchSubscribe" />
-
-    <!-- 订阅列表 - 按星期分组的卡片展示 -->
+    <!-- 订阅列表 - 卡片视图 -->
     <n-spin :show="loading">
-      <div v-for="week in sortedWeekList" :key="week.day" style="margin-bottom: 24px">
-        <div v-if="getActiveSubscriptionsByWeekday(week.day).length > 0">
-          <h3 style="margin: 16px 0 12px 4px;">{{ week.label }}</h3>
+      <!-- 卡片视图 -->
+      <template v-if="viewMode === 'card'">
+        <div v-for="week in filteredWeekList" :key="week.day" class="week-section">
+          <div v-if="getSubscriptionsByWeekday(week.day).length > 0">
+            <h3 class="week-title">{{ week.label }}</h3>
+            <div class="grid-container">
+              <n-card
+                v-for="sub in getSubscriptionsByWeekday(week.day)"
+                :key="sub.id"
+                hoverable
+                class="anime-card"
+                :class="{ 'is-disabled': !sub.enabled, 'has-missing': getMissingEpisodes(sub).length > 0 }"
+              >
+                <!-- 选择框 -->
+                <div class="card-checkbox">
+                  <n-checkbox
+                    :checked="selectedIds.includes(sub.id)"
+                    @update:checked="(val) => toggleSelection(sub.id, val)"
+                  />
+                </div>
+
+                <div class="card-content">
+                  <!-- 封面图 -->
+                  <div class="cover-wrapper" @click="showQuickPreview(sub)">
+                    <img
+                      v-if="sub.bangumi_cover_local"
+                      :src="`/covers/${sub.bangumi_cover_local}`"
+                      :alt="sub.name"
+                      class="cover-img"
+                    />
+                    <div v-else class="cover-placeholder">{{ sub.name[0] }}</div>
+                    <!-- 评分徽章 -->
+                    <div v-if="sub.bangumi_score && sub.bangumi_score > 0" class="score-badge">
+                      {{ sub.bangumi_score.toFixed(1) }}
+                    </div>
+                    <!-- 缺失提示 -->
+                    <div v-if="getMissingEpisodes(sub).length > 0" class="missing-badge">
+                      缺 {{ getMissingEpisodes(sub).length }} 集
+                    </div>
+                    <!-- 下载中标识 -->
+                    <div v-if="sub.downloading_count > 0" class="downloading-badge">
+                      <n-spin size="small" /> {{ sub.downloading_count }}
+                    </div>
+                    <!-- 今日更新标识 -->
+                    <div v-if="isTodayUpdate(sub)" class="today-badge">今日</div>
+                  </div>
+
+                  <!-- 信息区 -->
+                  <div class="info-section">
+                    <!-- 标题行 -->
+                    <div class="title-row">
+                      <n-ellipsis class="title" :tooltip="{ width: 300 }">{{ sub.name }}</n-ellipsis>
+                      <n-switch
+                        :value="sub.enabled"
+                        @update:value="(val) => handleToggle(sub.id, val)"
+                        size="small"
+                      />
+                    </div>
+
+                    <!-- 标签组 -->
+                    <div class="tags-row">
+                      <n-tag v-if="sub.air_year" size="small" type="primary">
+                        {{ getYearSeasonLabel(sub.air_year, sub.air_date) }}
+                      </n-tag>
+                      <n-tag size="small">S{{ sub.season }}</n-tag>
+                      <n-tag v-if="sub.fansub" size="small" type="info">{{ sub.fansub }}</n-tag>
+                      <n-tag
+                        v-if="sub.bangumi_id"
+                        size="small"
+                        style="cursor: pointer;"
+                        @click="openBangumiPage(sub.bangumi_id)"
+                      >BGM</n-tag>
+                    </div>
+
+                    <!-- 进度条 -->
+                    <div class="progress-row" v-if="sub.current_episode || sub.total_episodes">
+                      <n-progress
+                        :percentage="getProgressPercent(sub)"
+                        :height="6"
+                        :border-radius="3"
+                        :fill-border-radius="3"
+                        :status="isSeasonComplete(sub) ? 'success' : 'default'"
+                        :show-indicator="false"
+                      />
+                      <div class="progress-info">
+                        <span>{{ sub.current_episode || 0 }} / {{ sub.total_episodes || '?' }}</span>
+                        <span v-if="sub.latest_episode && sub.latest_episode > (sub.current_episode || 0)" class="latest-ep">
+                          最新 {{ sub.latest_episode }}
+                        </span>
+                        <span v-if="getMissingEpisodes(sub).length > 0" class="missing-ep" @click="showMissingEpisodes(sub)">
+                          缺失 {{ getMissingEpisodes(sub).join(',') }} 集
+                        </span>
+                      </div>
+                    </div>
+
+                    <!-- RSS检查警告 -->
+                    <div v-if="isRssCheckWarning(sub)" class="warning-row">
+                      <n-icon size="12" color="#f0a020"><WarningOutlined /></n-icon>
+                      <span>{{ getRssCheckWarningText(sub) }}</span>
+                    </div>
+
+                    <!-- 底部操作栏 -->
+                    <div class="action-row">
+                      <span v-if="sub.last_download_at" class="last-time">{{ formatTime(sub.last_download_at) }}</span>
+                      <span v-else-if="sub.last_check_time" class="last-time">检查: {{ formatTime(sub.last_check_time) }}</span>
+                      <div class="action-buttons">
+                        <n-tooltip trigger="hover">
+                          <template #trigger>
+                            <n-button text size="small" @click="handleOffsetEdit(sub)">
+                              <template #icon><n-icon size="16"><CalculatorOutlined /></n-icon></template>
+                            </n-button>
+                          </template>
+                          调整偏移
+                        </n-tooltip>
+                        <n-tooltip trigger="hover">
+                          <template #trigger>
+                            <n-button text size="small" @click="handleCollectEpisodes(sub.id)">
+                              <template #icon><n-icon size="16"><DownloadOutlined /></n-icon></template>
+                            </n-button>
+                          </template>
+                          采集剧集
+                        </n-tooltip>
+                        <n-tooltip trigger="hover">
+                          <template #trigger>
+                            <n-button text size="small" @click="$router.push({ path: '/downloads', query: { sub_id: sub.id } })">
+                              <template #icon><n-icon size="16"><FileSearchOutlined /></n-icon></template>
+                            </n-button>
+                          </template>
+                          查看下载
+                        </n-tooltip>
+                        <n-tooltip trigger="hover">
+                          <template #trigger>
+                            <n-button text size="small" @click="handleEdit(sub)">
+                              <template #icon><n-icon size="16"><EditOutlined /></n-icon></template>
+                            </n-button>
+                          </template>
+                          编辑
+                        </n-tooltip>
+                        <n-tooltip trigger="hover">
+                          <template #trigger>
+                            <n-button text size="small" type="error" @click="handleDelete(sub.id)">
+                              <template #icon><n-icon size="16"><DeleteOutlined /></n-icon></template>
+                            </n-button>
+                          </template>
+                          删除
+                        </n-tooltip>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </n-card>
+            </div>
+          </div>
+        </div>
+
+        <!-- 已完结番剧 -->
+        <div v-if="filteredCompletedSubscriptions.length > 0" class="completed-section">
+          <h3 class="week-title">已完结</h3>
           <div class="grid-container">
             <n-card
-              v-for="sub in getActiveSubscriptionsByWeekday(week.day)"
+              v-for="sub in filteredCompletedSubscriptions"
               :key="sub.id"
               hoverable
               class="anime-card"
+              :class="{ 'is-disabled': !sub.enabled }"
             >
+              <div class="card-checkbox">
+                <n-checkbox
+                  :checked="selectedIds.includes(sub.id)"
+                  @update:checked="(val) => toggleSelection(sub.id, val)"
+                />
+              </div>
+
               <div class="card-content">
-                <!-- 封面图 -->
                 <div class="cover-wrapper">
                   <img
                     v-if="sub.bangumi_cover_local"
@@ -42,71 +347,46 @@
                     :alt="sub.name"
                     class="cover-img"
                   />
-                  <div v-else class="cover-placeholder">
-                    {{ sub.name[0] }}
-                  </div>
-                  <!-- 评分徽章 -->
+                  <div v-else class="cover-placeholder">{{ sub.name[0] }}</div>
                   <div v-if="sub.bangumi_score && sub.bangumi_score > 0" class="score-badge">
                     {{ sub.bangumi_score.toFixed(1) }}
                   </div>
                 </div>
 
-                <!-- 信息区 -->
                 <div class="info-section">
-                  <!-- 标题行 -->
                   <div class="title-row">
                     <n-ellipsis class="title">{{ sub.name }}</n-ellipsis>
-                    <n-switch
-                      :value="sub.enabled"
-                      @update:value="(val) => handleToggle(sub.id, val)"
-                      size="small"
-                    />
+                    <n-tag size="small" type="default">完结</n-tag>
                   </div>
 
-                  <!-- 标签组 -->
                   <div class="tags-row">
                     <n-tag v-if="sub.air_year" size="small" type="primary">
                       {{ getYearSeasonLabel(sub.air_year, sub.air_date) }}
                     </n-tag>
                     <n-tag size="small">S{{ sub.season }}</n-tag>
-                    <n-tag size="small" type="info" v-if="sub.fansub">{{ sub.fansub }}</n-tag>
-                    <n-tag
-                      v-if="sub.bangumi_id"
-                      size="small"
-                      style="cursor: pointer;"
-                      @click="openBangumiPage(sub.bangumi_id)"
-                    >BGM</n-tag>
+                    <n-tag v-if="sub.fansub" size="small" type="info">{{ sub.fansub }}</n-tag>
                   </div>
 
-                  <!-- 进度条 -->
-                  <div class="progress-row" v-if="sub.current_episode || sub.total_episodes">
-                    <n-tooltip trigger="hover">
-                      <template #trigger>
-                        <div class="progress-info">
-                          <span>{{ sub.current_episode || 0 }} / {{ sub.total_episodes || '?' }}</span>
-                          <span v-if="sub.latest_episode" class="latest-ep">更新至 {{ sub.latest_episode }}</span>
-                        </div>
-                      </template>
-                      <div style="font-size: 12px;">
-                        <div>已收集: {{ sub.current_episode || 0 }} 集</div>
-                        <div>总集数: {{ sub.total_episodes || '未知' }}</div>
-                        <div v-if="sub.latest_episode">最新: 第 {{ sub.latest_episode }} 集</div>
-                      </div>
-                    </n-tooltip>
+                  <div class="progress-row">
+                    <n-progress
+                      :percentage="getProgressPercent(sub)"
+                      :height="6"
+                      :border-radius="3"
+                      status="success"
+                      :show-indicator="false"
+                    />
+                    <div class="progress-info">
+                      <span :style="{ color: isSeasonComplete(sub) ? '#18a058' : '' }">
+                        {{ sub.current_episode || 0 }} / {{ sub.total_episodes || '?' }}
+                      </span>
+                    </div>
                   </div>
 
-                  <!-- 底部操作栏 -->
                   <div class="action-row">
                     <span v-if="sub.last_download_at" class="last-time">{{ formatTime(sub.last_download_at) }}</span>
                     <div class="action-buttons">
-                      <n-button text size="small" @click="handleEnrichBangumi(sub.id)">
-                        <template #icon><n-icon size="16"><ReloadOutlined /></n-icon></template>
-                      </n-button>
-                      <n-button text size="small" @click="handleCollectEpisodes(sub.id)">
-                        <template #icon><n-icon size="16"><DownloadOutlined /></n-icon></template>
-                      </n-button>
-                      <n-button text size="small" @click="handleReorganizeFiles(sub.id)">
-                        <template #icon><n-icon size="16"><FolderOpenOutlined /></n-icon></template>
+                      <n-button text size="small" @click="$router.push({ path: '/downloads', query: { sub_id: sub.id } })">
+                        <template #icon><n-icon size="16"><FileSearchOutlined /></n-icon></template>
                       </n-button>
                       <n-button text size="small" @click="handleEdit(sub)">
                         <template #icon><n-icon size="16"><EditOutlined /></n-icon></template>
@@ -121,87 +401,80 @@
             </n-card>
           </div>
         </div>
-      </div>
+      </template>
 
-      <!-- 已完结番剧 -->
-      <div v-if="completedSubscriptions.length > 0" style="margin-top: 32px;">
-        <h3 style="margin: 16px 0 12px 4px;">已完结</h3>
-        <div class="grid-container">
-          <n-card
-            v-for="sub in completedSubscriptions"
-            :key="sub.id"
-            hoverable
-            class="anime-card"
-          >
-            <div class="card-content">
-              <!-- 封面图 -->
-              <div class="cover-wrapper">
-                <img
-                  v-if="sub.bangumi_cover_local"
-                  :src="`/covers/${sub.bangumi_cover_local}`"
-                  :alt="sub.name"
-                  class="cover-img"
-                />
-                <div v-else class="cover-placeholder">
-                  {{ sub.name[0] }}
-                </div>
-                <div v-if="sub.bangumi_score && sub.bangumi_score > 0" class="score-badge">
-                  {{ sub.bangumi_score.toFixed(1) }}
-                </div>
-              </div>
-
-              <!-- 信息区 -->
-              <div class="info-section">
-                <div class="title-row">
-                  <n-ellipsis class="title">{{ sub.name }}</n-ellipsis>
-                  <n-tag size="small" type="default">完结</n-tag>
-                </div>
-
-                <div class="tags-row">
-                  <n-tag v-if="sub.air_year" size="small" type="primary">
-                    {{ getYearSeasonLabel(sub.air_year, sub.air_date) }}
-                  </n-tag>
-                  <n-tag size="small">S{{ sub.season }}</n-tag>
-                  <n-tag size="small" type="info" v-if="sub.fansub">{{ sub.fansub }}</n-tag>
-                </div>
-
-                <div class="progress-row" v-if="sub.current_episode || sub.total_episodes">
-                  <div class="progress-info">
-                    <span :style="{ color: isSeasonComplete(sub) ? '#18a058' : '' }">
-                      {{ sub.current_episode || 0 }} / {{ sub.total_episodes || '?' }}
-                    </span>
-                  </div>
-                </div>
-
-                <div class="action-row">
-                  <span v-if="sub.last_download_at" class="last-time">{{ formatTime(sub.last_download_at) }}</span>
-                  <div class="action-buttons">
-                    <n-button text size="small" @click="handleCollectEpisodes(sub.id)">
-                      <template #icon><n-icon size="16"><DownloadOutlined /></n-icon></template>
-                    </n-button>
-                    <n-button text size="small" @click="handleEdit(sub)">
-                      <template #icon><n-icon size="16"><EditOutlined /></n-icon></template>
-                    </n-button>
-                    <n-button text size="small" type="error" @click="handleDelete(sub.id)">
-                      <template #icon><n-icon size="16"><DeleteOutlined /></n-icon></template>
-                    </n-button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </n-card>
-        </div>
-      </div>
+      <!-- 列表视图 -->
+      <template v-else>
+        <n-data-table
+          :columns="listColumns"
+          :data="filteredAllSubscriptions"
+          :row-key="row => row.id"
+          :pagination="{ pageSize: 20 }"
+          @update:checked-row-keys="handleCheck"
+        />
+      </template>
 
       <!-- 空状态 -->
-      <n-empty v-if="subscriptions.length === 0 && !loading" description="暂无订阅">
+      <n-empty v-if="filteredAllSubscriptions.length === 0 && !loading" description="暂无订阅">
         <template #extra>
           <n-button size="small" @click="showAddDialog">添加第一个订阅</n-button>
         </template>
       </n-empty>
     </n-spin>
 
-    <!-- 添加/编辑订阅对话框 - 两步式流程 -->
+    <!-- 番剧搜索组件 -->
+    <AnimeSearch ref="animeSearchRef" @subscribe="handleSearchSubscribe" />
+
+    <!-- 偏移量快速编辑弹窗 -->
+    <n-modal v-model:show="showOffsetModal" preset="dialog" title="调整集数偏移">
+      <div style="padding: 16px 0;">
+        <p>当前偏移: {{ offsetEditingSub?.episode_offset || 0 }}</p>
+        <p style="color: #666; font-size: 12px;">正数表示跳过前几集，负数表示从负数开始计数</p>
+        <n-input-number v-model:value="tempOffset" style="width: 100%; margin-top: 12px;" />
+      </div>
+      <template #action>
+        <n-button @click="showOffsetModal = false">取消</n-button>
+        <n-button type="primary" @click="saveOffset">保存</n-button>
+      </template>
+    </n-modal>
+
+    <!-- 缺失剧集弹窗 -->
+    <n-modal v-model:show="showMissingModal" preset="card" title="缺失剧集" style="width: 400px;">
+      <div v-if="missingEpisodesSub">
+        <p>{{ missingEpisodesSub.name }}</p>
+        <p style="color: #666; font-size: 14px;">以下剧集在RSS中已发布但尚未下载:</p>
+        <n-space style="margin-top: 12px;">
+          <n-tag v-for="ep in getMissingEpisodes(missingEpisodesSub)" :key="ep" type="warning">
+            第 {{ ep }} 集
+          </n-tag>
+        </n-space>
+        <div style="margin-top: 16px; text-align: right;">
+          <n-button type="primary" size="small" @click="handleCollectEpisodes(missingEpisodesSub.id); showMissingModal = false;">
+            一键补下载
+          </n-button>
+        </div>
+      </div>
+    </n-modal>
+
+    <!-- 番剧简介预览弹窗 -->
+    <n-modal v-model:show="showPreviewModal" preset="card" :title="previewSub?.name" style="width: 500px; max-width: 90vw;">
+      <div v-if="previewSub" class="preview-content">
+        <div class="preview-cover">
+          <img v-if="previewSub.bangumi_cover_local" :src="`/covers/${previewSub.bangumi_cover_local}`" />
+          <div v-else class="preview-cover-placeholder">{{ previewSub.name[0] }}</div>
+        </div>
+        <div class="preview-info">
+          <p v-if="previewSub.bangumi_summary" class="preview-summary">{{ previewSub.bangumi_summary }}</p>
+          <p v-else class="preview-summary" style="color: #999;">暂无简介</p>
+          <div class="preview-meta">
+            <n-tag v-if="previewSub.bangumi_score">评分: {{ previewSub.bangumi_score }}</n-tag>
+            <n-tag v-if="previewSub.bangumi_rank">排名: {{ previewSub.bangumi_rank }}</n-tag>
+          </div>
+        </div>
+      </div>
+    </n-modal>
+
+    <!-- 添加/编辑订阅对话框 -->
     <n-modal v-model:show="showModal" :mask-closable="!step2Loading">
       <n-card
         class="modal-card"
@@ -214,7 +487,6 @@
         <!-- 第一步: 选择RSS源或手动输入 -->
         <div v-if="showRssStep">
           <n-tabs v-model:value="activeTab" type="line">
-            <!-- RSS源选择 -->
             <n-tab-pane name="rss_source" tab="从RSS源">
               <n-form label-width="80px">
                 <n-form-item label="RSS 地址">
@@ -241,7 +513,6 @@
               </n-form>
             </n-tab-pane>
 
-            <!-- 手动输入 -->
             <n-tab-pane name="manual" tab="手动输入">
               <n-form label-width="80px">
                 <n-form-item label="番剧名称">
@@ -435,18 +706,38 @@ import {
   NIcon,
   NTooltip,
   NTimePicker,
+  NProgress,
+  NCheckbox,
+  NButtonGroup,
+  NDataTable,
   useMessage,
   useDialog
 } from 'naive-ui'
 import { subscriptionApi, type Subscription } from '@/api'
 import { api } from '@/api'
 import { useRoute } from 'vue-router'
-import { EditOutlined, DeleteOutlined, SearchOutlined, ReloadOutlined, DownloadOutlined, FolderOpenOutlined, PlusOutlined } from '@vicons/antd'
+import {
+  EditOutlined,
+  DeleteOutlined,
+  SearchOutlined,
+  DownloadOutlined,
+  PlusOutlined,
+  AppstoreOutlined,
+  UnorderedListOutlined,
+  TodayOutlined,
+  WarningOutlined,
+  CalculatorOutlined,
+  FileSearchOutlined,
+  PlayCircleOutlined,
+  PauseCircleOutlined
+} from '@vicons/antd'
 import AnimeSearch from '@/components/AnimeSearch.vue'
 
 const route = useRoute()
 const message = useMessage()
 const dialog = useDialog()
+
+// 基础状态
 const loading = ref(false)
 const subscriptions = ref<Subscription[]>([])
 const showModal = ref(false)
@@ -456,6 +747,23 @@ const submitLoading = ref(false)
 const activeTab = ref('rss_source')
 const editingId = ref<number | undefined>()
 const animeSearchRef = ref<InstanceType<typeof AnimeSearch> | null>(null)
+
+// 视图和筛选状态
+const viewMode = ref<'card' | 'list'>('card')
+const searchQuery = ref('')
+const filterStatus = ref<string | null>(null)
+const filterYear = ref<number | null>(null)
+const filterFansub = ref<string | null>(null)
+const selectedIds = ref<number[]>([])
+
+// 弹窗状态
+const showOffsetModal = ref(false)
+const offsetEditingSub = ref<Subscription | null>(null)
+const tempOffset = ref(0)
+const showMissingModal = ref(false)
+const missingEpisodesSub = ref<Subscription | null>(null)
+const showPreviewModal = ref(false)
+const previewSub = ref<Subscription | null>(null)
 
 // 星期列表
 const weekList = [
@@ -468,62 +776,232 @@ const weekList = [
   { day: 6, label: '星期六' }
 ]
 
-// 星期选项
-const weekdayOptions = weekList.map(w => ({
-  label: w.label,
-  value: w.day.toString()
-}))
-
-// 语言偏好选项
+// 选项
+const weekdayOptions = weekList.map(w => ({ label: w.label, value: w.day.toString() }))
 const languagePreferenceOptions = [
   { label: '自动学习', value: 'auto' },
   { label: '简体中文优先', value: 'chs' },
   { label: '繁体中文优先', value: 'cht' },
   { label: '同时保留', value: 'both' }
 ]
-
-// 时区选项
 const timezoneOptions = [
   { label: 'JST (日本)', value: 'JST' },
   { label: 'CST (中国)', value: 'CST' },
   { label: 'UTC', value: 'UTC' }
 ]
+const statusOptions = [
+  { label: '连载中', value: 'ongoing' },
+  { label: '已完结', value: 'completed' },
+  { label: '已禁用', value: 'disabled' }
+]
 
-// 更新时间（用于时间选择器）
-const airTimeValue = computed({
-  get: () => {
-    if (!formData.value.air_time) return null
-    const [hours, minutes] = formData.value.air_time.split(':').map(Number)
-    const date = new Date()
-    date.setHours(hours, minutes, 0, 0)
-    return date.getTime()
-  },
-  set: (val: number | null) => {
-    if (!val) {
-      formData.value.air_time = ''
-      return
-    }
-    const date = new Date(val)
-    formData.value.air_time = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
-  }
+// 统计计算
+const activeCount = computed(() => subscriptions.value.filter(s => !isCompleted(s)).length)
+const todayUpdateCount = computed(() => todayUpdates.value.length)
+const downloadingCount = computed(() => subscriptions.value.reduce((sum, s) => sum + (s.downloading_count || 0), 0))
+const missingEpisodesCount = computed(() => subscriptions.value.filter(s => getMissingEpisodes(s).length > 0).length)
+const todayPendingCount = computed(() => todayUpdates.value.filter(s => !isTodayDownloaded(s)).length)
+
+// 年份选项
+const yearOptions = computed(() => {
+  const years = new Set<number>()
+  subscriptions.value.forEach(s => {
+    if (s.air_year) years.add(s.air_year)
+  })
+  return Array.from(years).sort((a, b) => b - a).map(y => ({ label: String(y), value: y }))
 })
 
-// 按照当前星期排序的星期列表（从今天开始往后排列）
-const sortedWeekList = computed(() => {
-  const today = new Date().getDay() // 0-6, 0是星期日
-  const sorted = []
+// 字幕组选项
+const fansubOptions = computed(() => {
+  const fansubs = new Set<string>()
+  subscriptions.value.forEach(s => {
+    if (s.fansub) fansubs.add(s.fansub)
+  })
+  return Array.from(fansubs).sort().map(f => ({ label: f, value: f }))
+})
 
-  // 从今天开始往后排列
+// 今日更新列表
+const todayUpdates = computed(() => {
+  const today = new Date().getDay()
+  return subscriptions.value.filter(sub => {
+    if (!sub.enabled || isCompleted(sub)) return false
+    const dayValue = sub.air_day || sub.update_day
+    if (dayValue === undefined || dayValue === null) return false
+    return parseInt(String(dayValue)) === today
+  }).sort((a, b) => {
+    // 按更新时间排序
+    const timeA = a.air_time || '00:00'
+    const timeB = b.air_time || '00:00'
+    return timeA.localeCompare(timeB)
+  })
+})
+
+// 筛选后的所有订阅
+const filteredAllSubscriptions = computed(() => {
+  let result = subscriptions.value
+
+  // 搜索过滤
+  if (searchQuery.value) {
+    const query = searchQuery.value.toLowerCase()
+    result = result.filter(s => s.name.toLowerCase().includes(query))
+  }
+
+  // 状态过滤
+  if (filterStatus.value) {
+    switch (filterStatus.value) {
+      case 'ongoing':
+        result = result.filter(s => !isCompleted(s) && s.enabled)
+        break
+      case 'completed':
+        result = result.filter(s => isCompleted(s))
+        break
+      case 'disabled':
+        result = result.filter(s => !s.enabled)
+        break
+    }
+  }
+
+  // 年份过滤
+  if (filterYear.value) {
+    result = result.filter(s => s.air_year === filterYear.value)
+  }
+
+  // 字幕组过滤
+  if (filterFansub.value) {
+    result = result.filter(s => s.fansub === filterFansub.value)
+  }
+
+  return result
+})
+
+// 按星期分组获取订阅
+const getSubscriptionsByWeekday = (day: number) => {
+  return filteredAllSubscriptions.value.filter(sub => {
+    if (isCompleted(sub)) return false
+    if (!sub.enabled && filterStatus.value !== 'disabled') return false
+    const dayValue = sub.air_day || sub.update_day
+    if (dayValue === undefined || dayValue === null) return day === 0
+    return parseInt(String(dayValue)) === day
+  })
+}
+
+// 筛选后的星期列表
+const filteredWeekList = computed(() => {
+  const today = new Date().getDay()
+  const sorted = []
   for (let i = 0; i < 7; i++) {
     const targetDay = (today + i) % 7
     const weekItem = weekList.find(w => w.day === targetDay)
-    if (weekItem) {
+    if (weekItem && getSubscriptionsByWeekday(targetDay).length > 0) {
       sorted.push(weekItem)
     }
   }
-
   return sorted
 })
+
+// 已完结的订阅
+const filteredCompletedSubscriptions = computed(() => {
+  return filteredAllSubscriptions.value.filter(sub => isCompleted(sub))
+})
+
+// 列表视图列定义
+const listColumns = computed(() => [
+  { type: 'selection', fixed: 'left' },
+  {
+    title: '番剧',
+    key: 'name',
+    fixed: 'left',
+    width: 250,
+    render: (row: Subscription) => (
+      <NSpace align="center" size={8}>
+        {row.bangumi_cover_local ? (
+          <img src={`/covers/${row.bangumi_cover_local}`} style="width: 40px; height: 56px; object-fit: cover; border-radius: 4px;" />
+        ) : (
+          <div style="width: 40px; height: 56px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); display: flex; align-items: center; justify-content: center; color: white; border-radius: 4px; font-weight: bold;">
+            {row.name[0]}
+          </div>
+        )}
+        <div>
+          <div style="font-weight: 500;">{row.name}</div>
+          <NSpace size={4} style="margin-top: 4px;">
+            {row.fansub && <NTag size="tiny" type="info">{row.fansub}</NTag>}
+            <NTag size="tiny">S{row.season}</NTag>
+          </NSpace>
+        </div>
+      </NSpace>
+    )
+  },
+  {
+    title: '进度',
+    key: 'progress',
+    width: 150,
+    render: (row: Subscription) => (
+      <div>
+        <NProgress
+          percentage={getProgressPercent(row)}
+          height={6}
+          status={isSeasonComplete(row) ? 'success' : 'default'}
+          showIndicator={false}
+        />
+        <div style="font-size: 12px; color: #666; margin-top: 4px;">
+          {row.current_episode || 0} / {row.total_episodes || '?'}
+          {row.latest_episode > (row.current_episode || 0) && (
+            <span style="color: #18a058; margin-left: 8px;">最新 {row.latest_episode}</span>
+          )}
+        </div>
+      </div>
+    )
+  },
+  {
+    title: '状态',
+    key: 'status',
+    width: 100,
+    render: (row: Subscription) => (
+      <NSpace>
+        {!row.enabled && <NTag size="small" type="default">已禁用</NTag>}
+        {isCompleted(row) && <NTag size="small" type="success">完结</NTag>}
+        {row.downloading_count > 0 && <NTag size="small" type="info">下载中</NTag>}
+        {getMissingEpisodes(row).length > 0 && <NTag size="small" type="warning">有缺失</NTag>}
+      </NSpace>
+    )
+  },
+  {
+    title: '更新时间',
+    key: 'update_time',
+    width: 120,
+    render: (row: Subscription) => (
+      <div>
+        {row.air_time && <div>{row.air_time}</div>}
+        {(() => {
+          const day = row.air_day !== undefined ? row.air_day : row.update_day
+          if (day !== undefined && day !== null) {
+            return <div style="font-size: 12px; color: #666;">{weekList.find(w => w.day === parseInt(String(day)))?.label}</div>
+          }
+          return null
+        })()}
+      </div>
+    )
+  },
+  {
+    title: '操作',
+    key: 'actions',
+    fixed: 'right',
+    width: 180,
+    render: (row: Subscription) => (
+      <NSpace>
+        <NButton text size="small" onClick={() => handleCollectEpisodes(row.id)}>
+          <NIcon size={16}><DownloadOutlined /></NIcon>
+        </NButton>
+        <NButton text size="small" onClick={() => handleEdit(row)}>
+          <NIcon size={16}><EditOutlined /></NIcon>
+        </NButton>
+        <NButton text size="small" type="error" onClick={() => handleDelete(row.id)}>
+          <NIcon size={16}><DeleteOutlined /></NIcon>
+        </NButton>
+      </NSpace>
+    )
+  }
+])
 
 // 表单数据
 const formData = ref({
@@ -549,21 +1027,95 @@ const formData = ref({
   source_type: 'manual'
 })
 
-// 按星期分组获取连载中的订阅
-const getActiveSubscriptionsByWeekday = (day: number) => {
-  return subscriptions.value.filter(sub => {
-    if (isCompleted(sub)) return false  // 已完结的不显示在这里
-    // 优先使用 air_day，兼容旧数据使用 update_day
-    const dayValue = sub.air_day || sub.update_day
-    if (!dayValue) return day === 0 // 未设置更新日的放在星期日
-    return parseInt(dayValue) === day
-  })
+// 时间选择器
+const airTimeValue = computed({
+  get: () => {
+    if (!formData.value.air_time) return null
+    const [hours, minutes] = formData.value.air_time.split(':').map(Number)
+    const date = new Date()
+    date.setHours(hours, minutes, 0, 0)
+    return date.getTime()
+  },
+  set: (val: number | null) => {
+    if (!val) {
+      formData.value.air_time = ''
+      return
+    }
+    const date = new Date(val)
+    formData.value.air_time = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  }
+})
+
+// 判断番剧是否已完结
+const isCompleted = (sub: Subscription) => {
+  if (!sub.total_episodes || sub.total_episodes <= 0) return false
+  if (sub.current_episode && sub.current_episode >= sub.total_episodes) return true
+  if (sub.latest_episode && sub.latest_episode >= sub.total_episodes && sub.air_date) {
+    const airDate = new Date(sub.air_date)
+    const estimatedEndDate = new Date(airDate)
+    estimatedEndDate.setDate(estimatedEndDate.getDate() + (sub.total_episodes * 7) + 30)
+    if (new Date() > estimatedEndDate) return true
+  }
+  if (sub.latest_episode && sub.latest_episode >= sub.total_episodes && sub.air_year) {
+    const currentYear = new Date().getFullYear()
+    if (sub.air_year < currentYear) return true
+  }
+  return false
 }
 
-// 已完结的订阅
-const completedSubscriptions = computed(() => {
-  return subscriptions.value.filter(sub => isCompleted(sub))
-})
+// 判断是否今日更新
+const isTodayUpdate = (sub: Subscription) => {
+  const today = new Date().getDay()
+  const dayValue = sub.air_day || sub.update_day
+  if (dayValue === undefined || dayValue === null) return false
+  return parseInt(String(dayValue)) === today
+}
+
+// 判断是否今日已下载
+const isTodayDownloaded = (sub: Subscription) => {
+  if (!sub.last_download_at) return false
+  const lastDownload = new Date(sub.last_download_at)
+  const today = new Date()
+  return lastDownload.toDateString() === today.toDateString()
+}
+
+// 计算缺失剧集
+const getMissingEpisodes = (sub: Subscription): number[] => {
+  if (!sub.latest_episode || sub.latest_episode <= 0) return []
+  const current = sub.current_episode || 0
+  if (current >= sub.latest_episode) return []
+
+  const missing: number[] = []
+  for (let i = current + 1; i <= sub.latest_episode; i++) {
+    missing.push(i)
+  }
+  return missing
+}
+
+// 计算进度百分比
+const getProgressPercent = (sub: Subscription) => {
+  if (!sub.total_episodes || sub.total_episodes <= 0) return 0
+  const current = sub.current_episode || 0
+  return Math.min(100, Math.round((current / sub.total_episodes) * 100))
+}
+
+// 检查RSS检查警告
+const isRssCheckWarning = (sub: Subscription) => {
+  if (!sub.last_check_time) return false
+  const lastCheck = new Date(sub.last_check_time)
+  const now = new Date()
+  const diffHours = (now.getTime() - lastCheck.getTime()) / (1000 * 60 * 60)
+  return diffHours > 24
+}
+
+// RSS检查警告文本
+const getRssCheckWarningText = (sub: Subscription) => {
+  if (!sub.last_check_time) return ''
+  const lastCheck = new Date(sub.last_check_time)
+  const now = new Date()
+  const diffDays = Math.floor((now.getTime() - lastCheck.getTime()) / (1000 * 60 * 60 * 24))
+  return `${diffDays}天未检查`
+}
 
 // 格式化时间
 const formatTime = (time: string) => {
@@ -571,7 +1123,6 @@ const formatTime = (time: string) => {
   const now = new Date()
   const diff = now.getTime() - date.getTime()
   const days = Math.floor(diff / (1000 * 60 * 60 * 24))
-
   if (days === 0) {
     const hours = Math.floor(diff / (1000 * 60 * 60))
     if (hours === 0) {
@@ -585,11 +1136,28 @@ const formatTime = (time: string) => {
   return date.toLocaleDateString()
 }
 
-// 生成年份+季度标签
+// 格式化播出时间显示
+const formatAirTime = (sub: Subscription) => {
+  if (!sub.air_time) return ''
+  const now = new Date()
+  const [hours, minutes] = sub.air_time.split(':').map(Number)
+  const airTime = new Date()
+  airTime.setHours(hours, minutes, 0, 0)
+
+  if (now > airTime) {
+    return `已更新 ${sub.air_time}`
+  }
+  const diffMinutes = Math.floor((airTime.getTime() - now.getTime()) / (1000 * 60))
+  if (diffMinutes < 60) {
+    return `${diffMinutes} 分钟后`
+  }
+  const diffHours = Math.floor(diffMinutes / 60)
+  return `${diffHours} 小时后`
+}
+
+// 生成年份季度标签
 const getYearSeasonLabel = (year: number, airDate?: string) => {
   let season = '未知'
-
-  // 从 air_date 提取月份判断季度
   if (airDate && airDate.length >= 7) {
     const month = parseInt(airDate.substring(5, 7))
     if (month >= 1 && month <= 3) season = '冬'
@@ -597,54 +1165,117 @@ const getYearSeasonLabel = (year: number, airDate?: string) => {
     else if (month >= 7 && month <= 9) season = '夏'
     else if (month >= 10 && month <= 12) season = '秋'
   }
-
   return `${year}${season}`
 }
 
-// 判断番剧是否已完结
-const isCompleted = (sub: Subscription) => {
-  // 没有总集数信息，无法判断
-  if (!sub.total_episodes || sub.total_episodes <= 0) {
-    return false
-  }
-
-  // 方案1：当前集数 >= 总集数（已采集过的订阅）
-  if (sub.current_episode && sub.current_episode >= sub.total_episodes) {
-    return true
-  }
-
-  // 方案2：RSS 最新集数 >= 总集数，且是老番（播出超过3个月）
-  if (sub.latest_episode && sub.latest_episode >= sub.total_episodes && sub.air_date) {
-    const airDate = new Date(sub.air_date)
-    // 计算预计完结日期：播出日期 + 总集数周数 + 1个月缓冲
-    const estimatedEndDate = new Date(airDate)
-    estimatedEndDate.setDate(estimatedEndDate.getDate() + (sub.total_episodes * 7) + 30)
-
-    if (new Date() > estimatedEndDate) {
-      return true
-    }
-  }
-
-  // 方案3：没有播出日期但 RSS 已有完整集数，且年份是过去的
-  if (sub.latest_episode && sub.latest_episode >= sub.total_episodes && sub.air_year) {
-    const currentYear = new Date().getFullYear()
-    // 如果播出年份是去年或更早，认为已完结
-    if (sub.air_year < currentYear) {
-      return true
-    }
-  }
-
-  return false
+// 判断是否已完成本季
+const isSeasonComplete = (sub: Subscription) => {
+  const current = sub.current_episode ?? 0
+  const total = sub.total_episodes ?? 0
+  if (total <= 0) return false
+  return current >= total
 }
 
-// 打开 Bangumi 页面
+// 选择相关
+const toggleSelection = (id: number, checked: boolean) => {
+  if (checked) {
+    selectedIds.value.push(id)
+  } else {
+    selectedIds.value = selectedIds.value.filter(i => i !== id)
+  }
+}
+
+const handleCheck = (keys: number[]) => {
+  selectedIds.value = keys
+}
+
+// 批量操作
+const batchToggle = async (enabled: boolean) => {
+  try {
+    for (const id of selectedIds.value) {
+      await api.post(`/subscriptions/${id}/toggle`)
+    }
+    message.success(`已${enabled ? '启用' : '禁用'} ${selectedIds.value.length} 个订阅`)
+    selectedIds.value = []
+    loadSubscriptions()
+  } catch (error: any) {
+    message.error(error.message || '操作失败')
+  }
+}
+
+const batchDelete = () => {
+  dialog.warning({
+    title: '确认批量删除',
+    content: `确定要删除选中的 ${selectedIds.value.length} 个订阅吗？`,
+    positiveText: '确定',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      try {
+        for (const id of selectedIds.value) {
+          await subscriptionApi.delete(id)
+        }
+        message.success(`已删除 ${selectedIds.value.length} 个订阅`)
+        selectedIds.value = []
+        loadSubscriptions()
+      } catch (error: any) {
+        message.error(error.message || '删除失败')
+      }
+    }
+  })
+}
+
+const batchCollect = async () => {
+  let successCount = 0
+  for (const id of selectedIds.value) {
+    try {
+      await api.post(`/subscriptions/${id}/collect-episodes`)
+      successCount++
+    } catch (e) {
+      // 忽略错误
+    }
+  }
+  message.success(`已为 ${successCount} 个订阅启动采集任务`)
+}
+
+// 快捷操作
+const handleOffsetEdit = (sub: Subscription) => {
+  offsetEditingSub.value = sub
+  tempOffset.value = sub.episode_offset || 0
+  showOffsetModal.value = true
+}
+
+const saveOffset = async () => {
+  if (!offsetEditingSub.value) return
+  try {
+    await subscriptionApi.update(offsetEditingSub.value.id, {
+      episode_offset: tempOffset.value
+    })
+    message.success('偏移量已更新')
+    showOffsetModal.value = false
+    loadSubscriptions()
+  } catch (error: any) {
+    message.error(error.message || '更新失败')
+  }
+}
+
+const showMissingEpisodes = (sub: Subscription) => {
+  missingEpisodesSub.value = sub
+  showMissingModal.value = true
+}
+
+const showQuickPreview = (sub: Subscription) => {
+  previewSub.value = sub
+  showPreviewModal.value = true
+}
+
+// 打开Bangumi页面
 const openBangumiPage = (bangumiId: number) => {
   if (bangumiId) {
     window.open(`https://bgm.tv/subject/${bangumiId}`, '_blank')
   }
 }
 
-// 显示添加对话框
+// 对话框操作
 const showAddDialog = () => {
   editingId.value = undefined
   formData.value = {
@@ -674,12 +1305,10 @@ const showAddDialog = () => {
   showModal.value = true
 }
 
-// 显示番剧搜索
 const showAnimeSearch = () => {
   animeSearchRef.value?.show()
 }
 
-// 处理搜索订阅
 const handleSearchSubscribe = (data: {
   title: string
   rss_url: string
@@ -701,7 +1330,6 @@ const handleSearchSubscribe = (data: {
   showModal.value = true
 }
 
-// 处理编辑
 const handleEdit = (sub: Subscription) => {
   editingId.value = sub.id
   formData.value = {
@@ -711,7 +1339,7 @@ const handleEdit = (sub: Subscription) => {
     language: sub.language || '',
     language_preference: sub.language_preference || 'auto',
     update_day: sub.update_day || '',
-    air_day: sub.air_day || '',
+    air_day: sub.air_day !== undefined ? String(sub.air_day) : '',
     air_time: sub.air_time || '',
     air_timezone: sub.air_timezone || 'JST',
     notify_enabled: sub.notify_enabled !== false,
@@ -726,45 +1354,35 @@ const handleEdit = (sub: Subscription) => {
     rss_source_id: sub.rss_source_id,
     source_type: sub.source_type || 'manual'
   }
-  showRssStep.value = false // 编辑时直接显示详细配置
+  showRssStep.value = false
   showModal.value = true
 }
 
-// 获取RSS数据 (第一步到第二步的过渡)
 const handleGetRssData = async () => {
-  // 如果是手动输入模式，只需要番剧名称
   if (activeTab.value === 'manual') {
     if (!formData.value.name) {
       message.error('请输入番剧名称')
       return
     }
   } else {
-    // RSS源模式需要 RSS 地址
     if (!formData.value.rss_url) {
       message.error('请输入 RSS 地址')
       return
     }
   }
-
   step2Loading.value = true
   try {
-    // 这里可以调用API解析RSS获取番剧信息
-    // 暂时直接进入下一步
     showRssStep.value = false
   } finally {
     step2Loading.value = false
   }
 }
 
-// 提交表单
 const handleSubmit = async () => {
-  // 名称必填
   if (!formData.value.name) {
     message.error('请填写番剧名称')
     return
   }
-
-  // RSS 地址和合集种子至少需要一个
   if (!formData.value.rss_url && !formData.value.collection_torrent) {
     message.error('请填写 RSS 地址或合集种子地址')
     return
@@ -804,11 +1422,10 @@ const handleSubmit = async () => {
   }
 }
 
-// 加载订阅列表
 const loadSubscriptions = async () => {
   loading.value = true
   try {
-    const res: any = await subscriptionApi.list(1, 999) // 获取所有订阅
+    const res: any = await subscriptionApi.list(1, 999)
     subscriptions.value = res.data?.list || []
   } catch (error: any) {
     message.error(error.message || '加载订阅列表失败')
@@ -817,7 +1434,6 @@ const loadSubscriptions = async () => {
   }
 }
 
-// 删除订阅
 const handleDelete = (id: number) => {
   dialog.warning({
     title: '确认删除',
@@ -836,7 +1452,6 @@ const handleDelete = (id: number) => {
   })
 }
 
-// 切换订阅启用状态
 const handleToggle = async (id: number, enabled: boolean) => {
   try {
     const response: any = await api.post(`/subscriptions/${id}/toggle`)
@@ -851,39 +1466,9 @@ const handleToggle = async (id: number, enabled: boolean) => {
   }
 }
 
-// 手动补全Bangumi数据
-const handleEnrichBangumi = async (id: number) => {
-  try {
-    message.loading('正在补全番剧信息...', { duration: 0 })
-    const response: any = await api.post(`/subscriptions/${id}/enrich-bangumi`)
-    message.destroyAll()
-
-    if (response.code === 0) {
-      message.success('补全成功')
-      loadSubscriptions()
-    } else {
-      message.error(response.message || '补全失败')
-    }
-  } catch (error: any) {
-    message.destroyAll()
-    message.error(error.message || '补全失败')
-  }
-}
-
-const isSeasonComplete = (sub: Subscription): boolean => {
-  const currentEpisode = sub.current_episode ?? 0
-  const totalEpisodes = sub.total_episodes ?? 0
-  if (totalEpisodes <= 0) {
-    return false
-  }
-  return currentEpisode >= totalEpisodes
-}
-
-// 手动收集剧集
 const handleCollectEpisodes = async (id: number) => {
   try {
     const response: any = await api.post(`/subscriptions/${id}/collect-episodes`)
-
     if (response.code === 0) {
       message.success('采集任务已启动，请在右上角任务管理中查看进度')
     } else if (response.code === 409) {
@@ -900,32 +1485,10 @@ const handleCollectEpisodes = async (id: number) => {
   }
 }
 
-// 手动整理文件
-const handleReorganizeFiles = async (id: number) => {
-  try {
-    const response: any = await api.post(`/subscriptions/${id}/reorganize-files`)
-
-    if (response.code === 0) {
-      message.success('文件整理任务已启动，请在右上角任务管理中查看进度')
-    } else if (response.code === 409) {
-      message.warning(response.message || '已有任务在执行中')
-    } else {
-      message.error(response.message || '启动文件整理任务失败')
-    }
-  } catch (error: any) {
-    if (error.response?.status === 409) {
-      message.warning(error.response?.data?.message || '已有任务在执行中')
-    } else {
-      message.error(error.response?.data?.message || error.message || '启动文件整理任务失败')
-    }
-  }
-}
-
-// 处理从RSS源页面跳转过来的情况
 onMounted(() => {
   if (route.query.from_rss === 'true') {
     showModal.value = true
-    showRssStep.value = false // 直接进入第二步
+    showRssStep.value = false
     formData.value = {
       name: (route.query.name as string) || '',
       rss_url: (route.query.rss_url as string) || '',
@@ -954,28 +1517,200 @@ onMounted(() => {
 </script>
 
 <style scoped>
-/* 页面容器 */
 .subscriptions-page {
   max-width: 100%;
 }
 
-/* 页面头部 */
-.page-header {
+/* 统计概览 */
+.stats-overview {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.stat-card {
+  text-align: center;
+  padding: 12px;
+}
+
+.stat-value {
+  font-size: 24px;
+  font-weight: 600;
+  color: #2080f0;
+}
+
+.stat-label {
+  font-size: 12px;
+  color: #666;
+  margin-top: 4px;
+}
+
+@media (max-width: 768px) {
+  .stats-overview {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .stat-card:nth-child(4),
+  .stat-card:nth-child(5) {
+    display: none;
+  }
+}
+
+/* 今日更新专区 */
+.today-updates-section {
+  margin-bottom: 24px;
+  padding: 16px;
+  background: linear-gradient(135deg, #f0fff0 0%, #e6f7e6 100%);
+  border-radius: 12px;
+  border: 1px solid #c6f0c6;
+}
+
+.section-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  margin-bottom: 16px;
-  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.section-header h3 {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  color: #18a058;
+}
+
+.today-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 12px;
 }
 
-.page-header h2 {
-  margin: 0;
-  font-size: 20px;
+.today-card {
+  cursor: pointer;
 }
 
-.header-actions {
+.today-card :deep(.n-card__content) {
+  padding: 12px;
+}
+
+.today-card.is-downloaded {
+  opacity: 0.7;
+}
+
+.today-content {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.today-cover {
+  width: 60px;
+  height: 84px;
+  object-fit: cover;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.today-cover-placeholder {
+  width: 60px;
+  height: 84px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-size: 20px;
+  font-weight: bold;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  flex-shrink: 0;
+}
+
+.today-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.today-title {
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+
+.today-meta {
+  display: flex;
+  gap: 6px;
   flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.today-progress {
+  font-size: 12px;
+  color: #666;
+}
+
+.today-actions {
+  flex-shrink: 0;
+}
+
+/* 筛选栏 */
+.filter-bar {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.search-input {
+  flex: 1;
+  min-width: 200px;
+  max-width: 300px;
+}
+
+.filter-select {
+  width: 120px;
+}
+
+@media (max-width: 768px) {
+  .filter-bar {
+    gap: 8px;
+  }
+  .search-input {
+    max-width: none;
+    width: 100%;
+  }
+  .filter-select {
+    width: calc(50% - 4px);
+  }
+}
+
+/* 批量操作栏 */
+.batch-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  background: #f0faff;
+  border: 1px solid #d0e8ff;
+  border-radius: 8px;
+  margin-bottom: 16px;
+}
+
+/* 周分组 */
+.week-section {
+  margin-bottom: 20px;
+}
+
+.week-title {
+  margin: 16px 0 12px 4px;
+  background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  font-weight: 600;
+  font-size: 16px;
 }
 
 /* 网格容器 */
@@ -985,32 +1720,288 @@ onMounted(() => {
   gap: 16px;
 }
 
-/* 移动端响应式 */
 @media (max-width: 768px) {
-  .page-header {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .page-header h2 {
-    font-size: 18px;
-    margin-bottom: 8px;
-  }
-
-  .header-actions {
-    justify-content: flex-end;
-  }
-
-  .btn-text {
-    display: none;
-  }
-
   .grid-container {
     grid-template-columns: 1fr;
     gap: 12px;
   }
+}
 
-  /* 移动端卡片内容布局 */
+/* 卡片样式 */
+.anime-card {
+  cursor: default;
+  position: relative;
+}
+
+.anime-card.is-disabled {
+  opacity: 0.6;
+}
+
+.anime-card.has-missing :deep(.n-card) {
+  border: 1px solid #f0a020;
+}
+
+.card-checkbox {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 10;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.anime-card:hover .card-checkbox {
+  opacity: 1;
+}
+
+.card-checkbox :deep(.n-checkbox) {
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: 4px;
+  padding: 2px;
+}
+
+:deep(.n-card) {
+  border-radius: 12px;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+:deep(.n-card:hover) {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.1);
+}
+
+.card-content {
+  display: flex;
+  gap: 12px;
+}
+
+/* 封面区域 */
+.cover-wrapper {
+  position: relative;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.cover-img {
+  width: 80px;
+  height: 112px;
+  object-fit: cover;
+  border-radius: 6px;
+}
+
+.cover-placeholder {
+  width: 80px;
+  height: 112px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-size: 24px;
+  font-weight: bold;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+}
+
+.score-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  background: linear-gradient(135deg, #f6d365 0%, #fda085 100%);
+  color: white;
+  padding: 2px 6px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.missing-badge {
+  position: absolute;
+  bottom: 6px;
+  left: 6px;
+  background: #f0a020;
+  color: white;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.downloading-badge {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+  background: #2080f0;
+  color: white;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.today-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  background: #18a058;
+  color: white;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+/* 信息区域 */
+.info-section {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.title {
+  font-weight: 600;
+  font-size: 15px;
+  flex: 1;
+  min-width: 0;
+}
+
+.tags-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.progress-row {
+  font-size: 12px;
+  color: var(--n-text-color-3);
+}
+
+.progress-info {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.latest-ep {
+  color: #18a058;
+}
+
+.missing-ep {
+  color: #f0a020;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.warning-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #f0a020;
+}
+
+/* 操作行 */
+.action-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: auto;
+  padding-top: 4px;
+}
+
+.last-time {
+  font-size: 11px;
+  color: var(--n-text-color-3);
+}
+
+.action-buttons {
+  display: flex;
+  gap: 2px;
+  opacity: 0.6;
+  transition: opacity 0.2s;
+}
+
+.anime-card:hover .action-buttons {
+  opacity: 1;
+}
+
+/* 预览弹窗 */
+.preview-content {
+  display: flex;
+  gap: 16px;
+}
+
+.preview-cover {
+  flex-shrink: 0;
+}
+
+.preview-cover img {
+  width: 120px;
+  height: 168px;
+  object-fit: cover;
+  border-radius: 8px;
+}
+
+.preview-cover-placeholder {
+  width: 120px;
+  height: 168px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-size: 32px;
+  font-weight: bold;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+}
+
+.preview-info {
+  flex: 1;
+}
+
+.preview-summary {
+  font-size: 14px;
+  line-height: 1.6;
+  color: #333;
+  margin-bottom: 12px;
+}
+
+.preview-meta {
+  display: flex;
+  gap: 8px;
+}
+
+/* Modal 响应式 */
+.modal-card {
+  width: 600px;
+  max-width: 95vw;
+}
+
+@media (max-width: 768px) {
+  .modal-card :deep(.n-card__content) {
+    padding: 12px !important;
+  }
+
+  .modal-card :deep(.n-form-item) {
+    margin-bottom: 12px;
+  }
+
+  .modal-card :deep(.n-form-item-label) {
+    padding-bottom: 4px;
+  }
+
   .card-content {
     flex-direction: column;
   }
@@ -1036,14 +2027,6 @@ onMounted(() => {
     gap: 4px;
   }
 
-  .title {
-    font-size: 14px !important;
-  }
-
-  .tags-row {
-    margin-top: 4px;
-  }
-
   .action-row {
     flex-direction: column;
     align-items: stretch;
@@ -1059,163 +2042,13 @@ onMounted(() => {
     text-align: center;
   }
 
-  /* 移动端弹窗 */
-  .modal-card {
-    width: 95vw !important;
-    max-width: 600px;
-    margin: 12px;
+  .card-checkbox {
+    opacity: 1;
   }
 
-  /* 移动端分组标题 */
-  h3 {
-    font-size: 14px !important;
-    margin: 12px 0 8px 4px !important;
-  }
-}
-
-/* 卡片 */
-.anime-card { cursor: default; }
-:deep(.n-card) {
-  border-radius: 12px;
-  transition: transform 0.2s, box-shadow 0.2s;
-}
-:deep(.n-card:hover) {
-  transform: translateY(-2px);
-  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.1);
-}
-
-/* 卡片内容布局 */
-.card-content {
-  display: flex;
-  gap: 12px;
-}
-
-/* 封面区域 */
-.cover-wrapper {
-  position: relative;
-  flex-shrink: 0;
-}
-.cover-img {
-  width: 80px;
-  height: 112px;
-  object-fit: cover;
-  border-radius: 6px;
-}
-.cover-placeholder {
-  width: 80px;
-  height: 112px;
-  border-radius: 6px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: white;
-  font-size: 24px;
-  font-weight: bold;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-}
-.score-badge {
-  position: absolute;
-  top: -6px;
-  right: -6px;
-  background: linear-gradient(135deg, #f6d365 0%, #fda085 100%);
-  color: white;
-  padding: 2px 6px;
-  border-radius: 8px;
-  font-size: 11px;
-  font-weight: 600;
-}
-
-/* 信息区域 */
-.info-section {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-/* 标题行 */
-.title-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-.title {
-  font-weight: 600;
-  font-size: 15px;
-  flex: 1;
-  min-width: 0;
-}
-
-/* 标签行 */
-.tags-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-/* 进度行 */
-.progress-row {
-  font-size: 12px;
-  color: var(--n-text-color-3);
-}
-.progress-info {
-  display: flex;
-  gap: 8px;
-}
-.latest-ep {
-  color: var(--n-color-target);
-}
-
-/* 操作行 */
-.action-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: auto;
-  padding-top: 4px;
-}
-.last-time {
-  font-size: 11px;
-  color: var(--n-text-color-3);
-}
-.action-buttons {
-  display: flex;
-  gap: 2px;
-  opacity: 0.6;
-  transition: opacity 0.2s;
-}
-.anime-card:hover .action-buttons {
-  opacity: 1;
-}
-
-/* 标题渐变 */
-h3 {
-  background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  font-weight: 600;
-}
-
-/* Modal 响应式 */
-.modal-card {
-  width: 600px;
-  max-width: 95vw;
-}
-
-@media (max-width: 768px) {
-  .modal-card :deep(.n-card__content) {
-    padding: 12px !important;
-  }
-
-  .modal-card :deep(.n-form-item) {
-    margin-bottom: 12px;
-  }
-
-  .modal-card :deep(.n-form-item-label) {
-    padding-bottom: 4px;
+  .preview-content {
+    flex-direction: column;
+    align-items: center;
   }
 }
 </style>
