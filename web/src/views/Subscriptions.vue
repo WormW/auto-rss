@@ -1224,17 +1224,52 @@ const batchDelete = () => {
   })
 }
 
+// 批量采集限制配置
+const BATCH_COLLECT_CONFIG = {
+  maxCount: 10,           // 最大批量数
+  intervalMs: 500         // 间隔时间（毫秒）
+}
+
 const batchCollect = async () => {
-  let successCount = 0
-  for (const id of selectedIds.value) {
-    try {
-      await api.post(`/subscriptions/${id}/collect-episodes`)
-      successCount++
-    } catch (e) {
-      // 忽略错误
-    }
+  // 检查数量限制
+  if (selectedIds.value.length > BATCH_COLLECT_CONFIG.maxCount) {
+    message.warning(`批量采集一次最多 ${BATCH_COLLECT_CONFIG.maxCount} 个订阅，请减少选择数量`)
+    return
   }
-  message.success(`已为 ${successCount} 个订阅启动采集任务`)
+
+  // 确认对话框
+  dialog.warning({
+    title: '确认批量采集',
+    content: `将为 ${selectedIds.value.length} 个订阅启动采集任务，是否继续？`,
+    positiveText: '确定',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      let successCount = 0
+      let skipCount = 0
+
+      for (let i = 0; i < selectedIds.value.length; i++) {
+        const id = selectedIds.value[i]
+        try {
+          await api.post(`/subscriptions/${id}/collect-episodes`)
+          successCount++
+        } catch (e: any) {
+          if (e.response?.status === 409) {
+            skipCount++
+          }
+        }
+        // 添加间隔，避免短时间创建大量任务
+        if (i < selectedIds.value.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, BATCH_COLLECT_CONFIG.intervalMs))
+        }
+      }
+
+      let msg = `已为 ${successCount} 个订阅启动采集任务`
+      if (skipCount > 0) {
+        msg += `，${skipCount} 个因已有任务在执行中而跳过`
+      }
+      message.success(msg)
+    }
+  })
 }
 
 // 快捷操作
