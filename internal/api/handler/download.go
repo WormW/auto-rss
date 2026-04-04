@@ -4,7 +4,9 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/WormW/auto-rss/internal/pkg/constants"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
+	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/gin-gonic/gin"
@@ -12,13 +14,14 @@ import (
 
 // DownloadHandler 下载处理器
 type DownloadHandler struct {
-	repo     repository.DownloadRepository
-	qbClient downloader.QBittorrentClient
+	repo       repository.DownloadRepository
+	qbClient   downloader.QBittorrentClient
+	configRepo repository.ConfigRepository
 }
 
 // NewDownloadHandler 创建下载处理器实例
-func NewDownloadHandler(repo repository.DownloadRepository, qbClient downloader.QBittorrentClient) *DownloadHandler {
-	return &DownloadHandler{repo: repo, qbClient: qbClient}
+func NewDownloadHandler(repo repository.DownloadRepository, qbClient downloader.QBittorrentClient, configRepo repository.ConfigRepository) *DownloadHandler {
+	return &DownloadHandler{repo: repo, qbClient: qbClient, configRepo: configRepo}
 }
 
 // GetByID 获取下载任务详情
@@ -143,13 +146,95 @@ func (h *DownloadHandler) Retry(c *gin.Context) {
 		return
 	}
 
-	// TODO: 实现重试逻辑
-	if err := h.repo.UpdateStatus(uint(id), "pending"); err != nil {
+	// 1. 获取下载记录
+	download, err := h.repo.GetByID(uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"code":    404,
+			"message": "Download not found",
+		})
+		return
+	}
+
+	// 2. 如果存在旧种子，从 qBittorrent 删除
+	if download.TorrentHash != "" && h.qbClient != nil {
+		logger.Info("Deleting old torrent for retry",
+			"download_id", id,
+			"hash", download.TorrentHash)
+		if err := h.qbClient.DeleteTorrent(download.TorrentHash, true); err != nil {
+			logger.Warn("Failed to delete old torrent from qBittorrent (ignoring)",
+				"download_id", id,
+				"hash", download.TorrentHash,
+				"error", err.Error())
+			// 忽略删除错误，旧种子可能不存在
+		}
+	}
+
+	// 3. 重置重试相关字段
+	download.RetryCount = 0
+	download.RetryReason = "user_retry"
+	download.NextRetryAt = nil
+	download.LastError = ""
+	download.Status = "pending"
+	download.TorrentHash = "" // 清除旧hash
+
+	// 4. 保存重置后的状态
+	if err := h.repo.Update(download); err != nil {
+		logger.Error("Failed to reset download for retry",
+			"download_id", id,
+			"error", err.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
 			"message": "Failed to retry download",
 		})
 		return
+	}
+
+	// 5. 如果 qbClient 可用，立即添加新种子
+	if h.qbClient != nil {
+		// 获取下载路径配置
+		basePath := constants.DefaultDownloadPath
+		if h.configRepo != nil {
+			if config, err := h.configRepo.Get("download_path"); err == nil && config.Value != "" {
+				basePath = config.Value
+			}
+		}
+
+		// 生成下载路径（包含番剧名子目录）
+		downloadPath := basePath
+		if download.Subscription.Name != "" {
+			downloadPath = utils.GenerateDownloadPath(basePath, download.Subscription.Name)
+		}
+
+		// 添加种子到 qBittorrent
+		torrentHash, err := h.qbClient.AddTorrent(download.TorrentURL, downloadPath, "")
+		if err != nil {
+			logger.Error("Failed to add torrent for retry",
+				"download_id", id,
+				"torrent_url", download.TorrentURL,
+				"error", err.Error())
+			download.Status = "failed"
+			download.LastError = err.Error()
+			h.repo.Update(download)
+			c.JSON(http.StatusOK, gin.H{
+				"code":    500,
+				"message": "Failed to add torrent: " + err.Error(),
+			})
+			return
+		}
+
+		// 更新为下载中状态
+		download.Status = "downloading"
+		download.TorrentHash = torrentHash
+		if err := h.repo.Update(download); err != nil {
+			logger.Error("Failed to update download status after retry",
+				"download_id", id,
+				"error", err.Error())
+		}
+
+		logger.Info("Retry successful - torrent added",
+			"download_id", id,
+			"new_hash", torrentHash)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
