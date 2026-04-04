@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -286,4 +287,33 @@ func SanitizeDirectoryName(name string) string {
 	}
 
 	return result
+}
+
+// ValidatePath checks that the given path is within the allowed root directory.
+// It uses filepath.Clean for normalization and strings.HasPrefix for the containment check.
+// Returns the cleaned path or an error if the path escapes the root.
+func ValidatePath(path, allowedRoot string) (string, error) {
+	// Clean both paths
+	cleanedPath := filepath.Clean(path)
+	cleanedRoot := filepath.Clean(allowedRoot)
+
+	// Ensure the root ends with a separator for proper prefix checking
+	if !strings.HasSuffix(cleanedRoot, string(filepath.Separator)) {
+		cleanedRoot += string(filepath.Separator)
+	}
+
+	if !strings.HasPrefix(cleanedPath+string(filepath.Separator), cleanedRoot) {
+		return "", fmt.Errorf("path %q escapes allowed root %q", path, allowedRoot)
+	}
+
+	return cleanedPath, nil
+}
+
+// ValidatePathOrDefault validates a path, returning the default if validation fails
+func ValidatePathOrDefault(path, allowedRoot, defaultPath string) string {
+	validated, err := ValidatePath(path, allowedRoot)
+	if err != nil {
+		return defaultPath
+	}
+	return validated
 }
