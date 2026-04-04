@@ -16,9 +16,9 @@ type CalendarHandler struct {
 }
 
 // NewCalendarHandler 创建日历处理器实例
-func NewCalendarHandler(subscriptionRepo repository.SubscriptionRepository) *CalendarHandler {
+func NewCalendarHandler(subscriptionRepo repository.SubscriptionRepository, downloadRepo repository.DownloadRepository) *CalendarHandler {
 	return &CalendarHandler{
-		calendarSvc: calendar.NewCalendar(subscriptionRepo),
+		calendarSvc: calendar.NewCalendar(subscriptionRepo, downloadRepo),
 	}
 }
 

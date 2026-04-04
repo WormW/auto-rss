@@ -14,6 +14,7 @@ import (
 // Calendar 追番日历服务
 type Calendar struct {
 	subscriptionRepo repository.SubscriptionRepository
+	downloadRepo     repository.DownloadRepository
 	notificationSvc  NotificationService
 }
 
@@ -71,9 +72,10 @@ var dayNamesCN = map[string]string{
 }
 
 // NewCalendar 创建日历服务
-func NewCalendar(subscriptionRepo repository.SubscriptionRepository) *Calendar {
+func NewCalendar(subscriptionRepo repository.SubscriptionRepository, downloadRepo repository.DownloadRepository) *Calendar {
 	return &Calendar{
 		subscriptionRepo: subscriptionRepo,
+		downloadRepo:     downloadRepo,
 	}
 }
 
@@ -112,15 +114,24 @@ func (c *Calendar) GetWeekSchedule(weekOffset int) (*WeekSchedule, error) {
 			continue // 没有设置播出时间
 		}
 
+		// 检查是否已下载 - 查询下一集的下载状态
+		isDownloaded := false
+		nextEpisode := sub.CurrentEpisode + 1
+		if c.downloadRepo != nil {
+			if download, err := c.downloadRepo.GetBySubscriptionAndEpisode(sub.ID, nextEpisode); err == nil && download != nil {
+				isDownloaded = download.Status == "completed"
+			}
+		}
+
 		item := CalendarItem{
 			SubscriptionID: sub.ID,
 			Name:           sub.Name,
-			Episode:        sub.CurrentEpisode + 1, // 下一集
+			Episode:        nextEpisode, // 下一集
 			AirTime:        sub.AirTime,
 			AirDay:         sub.AirDay,
 			CurrentEpisode: sub.CurrentEpisode,
 			TotalEpisodes:  sub.TotalEpisodes,
-			IsDownloaded:   false, // TODO: 检查是否已下载
+			IsDownloaded:   isDownloaded,
 			Cover:          sub.BangumiCoverLocal,
 		}
 
