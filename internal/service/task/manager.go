@@ -167,16 +167,29 @@ func (m *Manager) CancelTask() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.currentTask == nil || m.currentTask.Status != TaskStatusRunning {
+	// D-08: 在持有锁期间检查 currentTask 状态
+	if m.currentTask == nil {
 		return fmt.Errorf("没有正在运行的任务")
 	}
-
-	if m.cancelFunc != nil {
-		m.cancelFunc()
-		logger.Info("Task cancel requested", "task_id", m.currentTask.ID)
+	if m.currentTask.Status != TaskStatusRunning {
+		return fmt.Errorf("任务不在运行中")
 	}
 
+	// D-09: 确保任务已完成时不调用 cancelFunc
+	if m.cancelFunc == nil {
+		return fmt.Errorf("取消函数不可用")
+	}
+
+	m.cancelFunc()
+	logger.Info("Task cancel requested", "task_id", m.currentTask.ID)
 	return nil
+}
+
+// IsTaskRunning 检查指定 ID 的任务是否仍在运行
+func (m *Manager) IsTaskRunning(taskID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.currentTask != nil && m.currentTask.ID == taskID && m.currentTask.Status == TaskStatusRunning
 }
 
 // UpdateProgress 更新任务进度
