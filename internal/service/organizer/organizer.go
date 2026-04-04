@@ -16,6 +16,7 @@ import (
 	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/fsnotify/fsnotify"
+	"gorm.io/gorm"
 )
 
 // FileOrganizer 文件整理服务
@@ -25,6 +26,8 @@ type FileOrganizer struct {
 	parser           *FileNameParser                     // 文件名解析器
 	renameService    *downloader.RenameService           // 重命名服务
 	subscriptionRepo repository.SubscriptionRepository   // 订阅仓库
+	downloadRepo     repository.DownloadRepository       // 下载仓库
+	db               *gorm.DB                            // 数据库连接
 	bangumiService   *bangumi.BangumiService             // Bangumi API 服务
 	watcher          *fsnotify.Watcher                   // 文件监控器
 	stopChan         chan struct{}                       // 停止信号
@@ -39,6 +42,8 @@ func NewFileOrganizer(
 	watchDir string,
 	destDir string,
 	subscriptionRepo repository.SubscriptionRepository,
+	downloadRepo repository.DownloadRepository,
+	db *gorm.DB,
 	bangumiService *bangumi.BangumiService,
 	renameTemplate string,
 ) (*FileOrganizer, error) {
@@ -53,10 +58,12 @@ func NewFileOrganizer(
 		parser:           NewFileNameParser(),
 		renameService:    downloader.NewRenameService(renameTemplate),
 		subscriptionRepo: subscriptionRepo,
+		downloadRepo:     downloadRepo,
+		db:               db,
 		bangumiService:   bangumiService,
 		watcher:          watcher,
 		stopChan:         make(chan struct{}),
-		minMatchScore:    0.7,  // 70% 相似度
+		minMatchScore:    0.7,             // 70% 相似度
 		stabilizeTime:    5 * time.Second, // 等待5秒确保文件写入完成
 		processing:       make(map[string]bool),
 	}, nil
@@ -274,7 +281,27 @@ func (f *FileOrganizer) organizeFile(filePath string) error {
 		"match_score", matchScore,
 		"file", filename)
 
-	// 3. 生成新文件名和路径
+	// 3. 查找下载记录并设置 organizing 状态
+	var download *model.Download
+	if subscription != nil {
+		downloads, err := f.downloadRepo.GetBySubscriptionAndEpisodeWithLang(subscription.ID, info.Episode)
+		if err == nil && len(downloads) > 0 {
+			download = &downloads[0] // Use first match
+		}
+	}
+
+	// 设置 organizing 状态
+	if download != nil {
+		download.Status = model.DownloadStatusOrganizing
+		if err := f.downloadRepo.Update(download); err != nil {
+			logger.Error("Failed to set organizing status",
+				"download_id", download.ID,
+				"error", err)
+			// Continue anyway - we can still organize the file
+		}
+	}
+
+	// 4. 生成新文件名和路径
 	newPath := f.generateNewPath(subscription, info)
 	if newPath == "" {
 		return fmt.Errorf("failed to generate new file path")
@@ -312,7 +339,32 @@ func (f *FileOrganizer) organizeFile(filePath string) error {
 		f.procMux.Lock()
 		delete(f.processing, newPath) // 移动失败，清除标记
 		f.procMux.Unlock()
+
+		// 更新下载状态为 failed
+		if download != nil {
+			download.Status = model.DownloadStatusFailed
+			download.LastError = err.Error()
+			if updateErr := f.downloadRepo.Update(download); updateErr != nil {
+				logger.Error("Failed to update download status to failed",
+					"download_id", download.ID,
+					"error", updateErr)
+			}
+		}
+
 		return fmt.Errorf("failed to move file: %w", err)
+	}
+
+	// 移动成功，更新下载状态为 completed
+	if download != nil {
+		download.Status = model.DownloadStatusCompleted
+		download.FilePath = newPath
+		if err := f.downloadRepo.Update(download); err != nil {
+			logger.Error("File moved but failed to update database",
+				"download_id", download.ID,
+				"new_path", newPath,
+				"error", err)
+			// File moved but DB update failed — log for manual recovery
+		}
 	}
 
 	// 移动成功后，设置一个延迟清除标记的定时器

@@ -2,6 +2,16 @@ package model
 
 import "time"
 
+// Download status constants
+const (
+	DownloadStatusPending     = "pending"
+	DownloadStatusDownloading = "downloading"
+	DownloadStatusStalled     = "stalled"
+	DownloadStatusCompleted   = "completed"
+	DownloadStatusFailed      = "failed"
+	DownloadStatusOrganizing  = "organizing"
+)
+
 // Download 下载任务模型
 type Download struct {
 	ID             uint       `json:"id" gorm:"primaryKey"`
