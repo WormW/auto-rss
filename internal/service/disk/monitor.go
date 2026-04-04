@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -65,6 +66,9 @@ type Config struct {
 	CleanupProtectWatching  bool            `json:"cleanup_protect_watching"` // 保护正在观看的
 	PauseOnCritical         bool            `json:"pause_on_critical"`        // 危险时暂停下载
 }
+
+// downloadPaused 全局原子标志，用于暂停新下载
+var downloadPaused atomic.Bool
 
 // DefaultConfig 默认配置
 func DefaultConfig() *Config {
@@ -516,14 +520,21 @@ func (m *Monitor) getDownloadPath() string {
 
 // pauseDownloads 暂停新下载
 func (m *Monitor) pauseDownloads() {
-	logger.Info("Pausing new downloads due to critical disk space")
-	// TODO: 设置一个标志位或配置，让 scheduler 暂停添加新下载
+	if downloadPaused.CompareAndSwap(false, true) {
+		logger.Info("Pausing new downloads due to critical disk space")
+	}
 }
 
 // resumeDownloads 恢复下载
 func (m *Monitor) resumeDownloads() {
-	logger.Info("Resuming downloads after disk space recovered")
-	// TODO: 清除暂停标志
+	if downloadPaused.CompareAndSwap(true, false) {
+		logger.Info("Resuming downloads after disk space recovered")
+	}
+}
+
+// IsDownloadsPaused 检查下载是否被暂停
+func IsDownloadsPaused() bool {
+	return downloadPaused.Load()
 }
 
 // 通知方法

@@ -11,6 +11,7 @@ import (
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
+	"github.com/WormW/auto-rss/internal/service/disk"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/robfig/cron/v3"
@@ -437,6 +438,14 @@ func (s *scheduler) matchesFilter(sub *model.Subscription, title string) bool {
 // processDownloadItem 处理单个下载条目（在事务中）
 // 返回是否成功创建下载任务
 func (s *scheduler) processDownloadItem(sub *model.Subscription, item *rss.RSSItem, replaceDownloadID uint) (bool, error) {
+	// 检查是否因磁盘空间危险而暂停下载
+	if disk.IsDownloadsPaused() {
+		logger.Info("Skipping download creation because downloads are paused",
+			"subscription", sub.Name,
+			"title", item.Title)
+		return false, nil
+	}
+
 	// 创建下载任务
 	download := &model.Download{
 		SubscriptionID: sub.ID,
