@@ -419,6 +419,24 @@ func (h *SubscriptionHandler) downloadCollectionTorrent(subscription *model.Subs
 	// 生成带番剧名的下载路径
 	downloadPath := utils.GenerateDownloadPath(savePath, subscription.Name)
 
+		// 验证生成的下载路径不会逃逸出基础下载目录（防止路径遍历）
+		if _, err := utils.ValidatePath(downloadPath, savePath); err != nil {
+			logger.Error("Generated download path escapes base directory",
+				"subscription", subscription.Name,
+				"download_path", downloadPath,
+				"error", err)
+			continue
+		}
+
+	// 验证生成的下载路径不会逃逸出基础下载目录（防止路径遍历）
+	if _, err := utils.ValidatePath(downloadPath, savePath); err != nil {
+		logger.Error("Generated download path escapes base directory",
+			"subscription", subscription.Name,
+			"download_path", downloadPath,
+			"error", err)
+		return
+	}
+
 	var torrentHash string
 	var err error
 
