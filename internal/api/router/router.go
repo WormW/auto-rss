@@ -51,7 +51,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	wsHub := notificationSvc.GetWebSocketHub()
 
 	// 初始化日历服务
-	calendarSvc := calendar.NewCalendar(subscriptionRepo)
+	calendarSvc := calendar.NewCalendar(subscriptionRepo, downloadRepo)
 	calendarSvc.SetNotificationService(notificationSvc)
 
 	// 初始化磁盘监控服务
@@ -67,7 +67,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 
 	// 初始化处理器
 	subscriptionHandler := handler.NewSubscriptionHandler(subscriptionRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath)
-	downloadHandler := handler.NewDownloadHandler(downloadRepo, qbClient)
+	downloadHandler := handler.NewDownloadHandler(downloadRepo, qbClient, configRepo)
 	rssHandler := handler.NewRSSHandler(rssScheduler)
 	configHandler := handler.NewConfigHandler(configRepo)
 	rssSourceHandler := handler.NewRSSSourceHandler(rssSourceRepo, configRepo, rssParser)
@@ -76,7 +76,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	logHandler := handler.NewLogHandler(logRepo)
 	fileOrganizerHandler := handler.NewFileOrganizerHandler(appCtx)
 	notificationHandler := handler.NewNotificationHandler(db, notificationSvc, wsHub)
-	calendarHandler := handler.NewCalendarHandler(subscriptionRepo)
+	calendarHandler := handler.NewCalendarHandler(subscriptionRepo, downloadRepo)
 	diskHandler := handler.NewDiskHandler(db, downloadRepo, subscriptionRepo, configRepo)
 
 	// API v1 路由组

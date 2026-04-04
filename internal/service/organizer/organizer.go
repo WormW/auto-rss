@@ -12,6 +12,7 @@ import (
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
+	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/downloader"
@@ -257,6 +258,11 @@ func (f *FileOrganizer) handleNewFile(filePath string) {
 func (f *FileOrganizer) organizeFile(filePath string) error {
 	logger.Info("Organizing file", "path", filePath)
 
+	// 验证源文件路径在监控目录内（防止路径遍历）
+	if _, err := utils.ValidatePath(filePath, f.watchDir); err != nil {
+		return fmt.Errorf("source file path escapes watch directory: %w", err)
+	}
+
 	// 1. 解析文件名
 	filename := filepath.Base(filePath)
 	info := f.parser.Parse(filename)
@@ -281,23 +287,28 @@ func (f *FileOrganizer) organizeFile(filePath string) error {
 		"match_score", matchScore,
 		"file", filename)
 
-	// 3. 查找下载记录并设置 organizing 状态
+	// 3. 查找下载记录
 	var download *model.Download
-	if subscription != nil {
+	if subscription != nil && f.downloadRepo != nil {
 		downloads, err := f.downloadRepo.GetBySubscriptionAndEpisodeWithLang(subscription.ID, info.Episode)
 		if err == nil && len(downloads) > 0 {
 			download = &downloads[0] // Use first match
+			logger.Debug("Found existing download record",
+				"download_id", download.ID,
+				"current_status", download.Status)
 		}
 	}
 
-	// 设置 organizing 状态
-	if download != nil {
+	// 4. 状态机：更新数据库为 organizing 状态（先数据库，后文件）
+	if download != nil && f.downloadRepo != nil {
 		download.Status = model.DownloadStatusOrganizing
 		if err := f.downloadRepo.Update(download); err != nil {
 			logger.Error("Failed to set organizing status",
 				"download_id", download.ID,
 				"error", err)
 			// Continue anyway - we can still organize the file
+		} else {
+			logger.Debug("Set download status to organizing", "download_id", download.ID)
 		}
 	}
 
@@ -305,6 +316,11 @@ func (f *FileOrganizer) organizeFile(filePath string) error {
 	newPath := f.generateNewPath(subscription, info)
 	if newPath == "" {
 		return fmt.Errorf("failed to generate new file path")
+	}
+
+	// 验证目标路径在目的目录内（防止路径遍历）
+	if _, err := utils.ValidatePath(newPath, f.destDir); err != nil {
+		return fmt.Errorf("generated path escapes destination directory: %w", err)
 	}
 
 	// 3.5. 检查是否需要移动（避免重复处理已整理的文件）
@@ -340,8 +356,8 @@ func (f *FileOrganizer) organizeFile(filePath string) error {
 		delete(f.processing, newPath) // 移动失败，清除标记
 		f.procMux.Unlock()
 
-		// 更新下载状态为 failed
-		if download != nil {
+		// 状态机：更新下载状态为 failed
+		if download != nil && f.downloadRepo != nil {
 			download.Status = model.DownloadStatusFailed
 			download.LastError = err.Error()
 			if updateErr := f.downloadRepo.Update(download); updateErr != nil {
@@ -354,8 +370,8 @@ func (f *FileOrganizer) organizeFile(filePath string) error {
 		return fmt.Errorf("failed to move file: %w", err)
 	}
 
-	// 移动成功，更新下载状态为 completed
-	if download != nil {
+	// 状态机：移动成功，更新下载状态为 completed
+	if download != nil && f.downloadRepo != nil {
 		download.Status = model.DownloadStatusCompleted
 		download.FilePath = newPath
 		if err := f.downloadRepo.Update(download); err != nil {
@@ -364,6 +380,10 @@ func (f *FileOrganizer) organizeFile(filePath string) error {
 				"new_path", newPath,
 				"error", err)
 			// File moved but DB update failed — log for manual recovery
+		} else {
+			logger.Debug("Updated download status to completed",
+				"download_id", download.ID,
+				"file_path", newPath)
 		}
 	}
 

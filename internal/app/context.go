@@ -17,17 +17,19 @@ type Context struct {
 	db               *gorm.DB
 	cfg              *config.Config
 	subscriptionRepo repository.SubscriptionRepository
+	downloadRepo     repository.DownloadRepository
 	bangumiService   *bangumi.BangumiService
 	renameTemplate   string
 	fileOrganizer    *organizer.FileOrganizer
 }
 
 // NewContext 创建应用上下文
-func NewContext(db *gorm.DB, cfg *config.Config, subscriptionRepo repository.SubscriptionRepository, bangumiService *bangumi.BangumiService) *Context {
+func NewContext(db *gorm.DB, cfg *config.Config, subscriptionRepo repository.SubscriptionRepository, downloadRepo repository.DownloadRepository, bangumiService *bangumi.BangumiService) *Context {
 	return &Context{
 		db:               db,
 		cfg:              cfg,
 		subscriptionRepo: subscriptionRepo,
+		downloadRepo:     downloadRepo,
 		bangumiService:   bangumiService,
 	}
 }
@@ -80,6 +82,8 @@ func (ctx *Context) ReloadFileOrganizer() error {
 		ctx.cfg.FileOrganizerDir,
 		ctx.cfg.FileOrganizerDir,
 		ctx.subscriptionRepo,
+		ctx.downloadRepo,
+		ctx.db,
 		ctx.bangumiService,
 		ctx.renameTemplate,
 	)

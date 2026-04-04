@@ -126,7 +126,7 @@ func main() {
 	bangumiUpdater.Start()
 
 	// 创建应用上下文
-	appCtx := app.NewContext(db, cfg, subscriptionRepo, bangumiService)
+	appCtx := app.NewContext(db, cfg, subscriptionRepo, downloadRepo, bangumiService)
 	appCtx.SetRenameTemplate(renameTemplate)
 
 	// 初始化文件整理服务
