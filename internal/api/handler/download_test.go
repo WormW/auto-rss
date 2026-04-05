@@ -414,3 +414,93 @@ func TestDownloadHandler_Delete(t *testing.T) {
 		})
 	}
 }
+
+func TestDownloadHandler_Retry(t *testing.T) {
+	tests := []struct {
+		name         string
+		id           string
+		mockGet      func(id uint) (*model.Download, error)
+		mockUpdate   func(download *model.Download) error
+		wantStatus   int
+		wantUpdated  bool
+		verifyUpdate func(t *testing.T, download *model.Download)
+	}{
+		{
+			name: "success - resets download for retry",
+			id:   "1",
+			mockGet: func(id uint) (*model.Download, error) {
+				return &model.Download{
+					ID:          1,
+					Title:       "Test Download",
+					Status:      "failed",
+					RetryCount:  3,
+					TorrentHash: "old-hash",
+					TorrentURL:  "http://example.com/torrent",
+				}, nil
+			},
+			mockUpdate: func(download *model.Download) error {
+				return nil
+			},
+			wantStatus:  http.StatusOK,
+			wantUpdated: true,
+			verifyUpdate: func(t *testing.T, download *model.Download) {
+				assert.Equal(t, 0, download.RetryCount)
+				assert.Equal(t, "pending", download.Status)
+				assert.Equal(t, "", download.TorrentHash)
+				assert.Equal(t, "user_retry", download.RetryReason)
+			},
+		},
+		{
+			name:       "invalid id format",
+			id:         "abc",
+			mockGet:    nil,
+			mockUpdate: nil,
+			wantStatus: http.StatusBadRequest,
+			wantUpdated: false,
+		},
+		{
+			name: "not found",
+			id:   "999",
+			mockGet: func(id uint) (*model.Download, error) {
+				return nil, errors.New("not found")
+			},
+			mockUpdate:  nil,
+			wantStatus:  http.StatusNotFound,
+			wantUpdated: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var updatedDownload *model.Download
+			mockRepo := &mockDownloadRepo{
+				getByIDFunc: tt.mockGet,
+				updateFunc: func(download *model.Download) error {
+					updatedDownload = download
+					if tt.mockUpdate != nil {
+						return tt.mockUpdate(download)
+					}
+					return nil
+				},
+			}
+			handler := NewDownloadHandler(mockRepo, nil, nil)
+
+			gin.SetMode(gin.TestMode)
+			r := gin.New()
+			r.POST("/downloads/:id/retry", handler.Retry)
+
+			req := httptest.NewRequest("POST", "/downloads/"+tt.id+"/retry", nil)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, tt.wantStatus, w.Code)
+
+			if tt.wantUpdated {
+				assert.GreaterOrEqual(t, mockRepo.updateCalls, 1)
+				if tt.verifyUpdate != nil && updatedDownload != nil {
+					tt.verifyUpdate(t, updatedDownload)
+				}
+			}
+		})
+	}
+}
