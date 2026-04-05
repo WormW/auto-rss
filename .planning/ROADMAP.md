@@ -109,8 +109,8 @@ internal/
 **Plans:**
 - [x] 03-01-PLAN.md — Fix N+1 query and add pagination limits (PERF-01, PERF-02)
 - [x] 03-02-PLAN.md — Make RSS timeout configurable per source (PERF-03)
-- [ ] 03-03-PLAN.md — Add handler tests for download and subscription (TEST-01, TEST-02)
-- [ ] 03-04-PLAN.md — Add Bangumi and Mikan service tests (TEST-03, TEST-04)
+- [x] 03-03-PLAN.md — Add handler tests for download and subscription (TEST-01, TEST-02)
+- [x] 03-04-PLAN.md — Add Bangumi and Mikan service tests (TEST-03, TEST-04)
 - [ ] 03-05-PLAN.md — Add Organizer and Task Manager tests (TEST-05, TEST-06)
 
 **Wave Structure:**
