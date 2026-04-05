@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"github.com/WormW/auto-rss/internal/repository"
 	"gorm.io/gorm"
 )
 
@@ -52,6 +53,10 @@ func (m *MockSubscriptionRepository) GetActiveSubscriptions() ([]model.Subscript
 
 func (m *MockSubscriptionRepository) UpdateInTx(tx *gorm.DB, subscription *model.Subscription) error {
 	return nil
+}
+
+func (m *MockSubscriptionRepository) GetSubscriptionsWithDownloadCount() ([]repository.SubscriptionWithStats, error) {
+	return nil, nil
 }
 
 func TestSubscriptionMatcher_Match(t *testing.T) {
