@@ -6,9 +6,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/repository"
+	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/gin-gonic/gin"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -44,9 +46,28 @@ func (m *mockQBittorrentClient) AddTorrent(torrentURL, downloadPath, category st
 	return "new-hash-123", nil
 }
 
-func (m *mockQBittorrentClient) GetTorrentInfo(hash string) (map[string]interface{}, error) {
+func (m *mockQBittorrentClient) GetTorrentInfo(hash string) (*downloader.TorrentInfo, error) {
 	return nil, nil
 }
+
+// Additional methods to implement QBittorrentClient interface
+func (m *mockQBittorrentClient) Login(host, username, password string) error { return nil }
+func (m *mockQBittorrentClient) TestConnection(host, username, password string) error { return nil }
+func (m *mockQBittorrentClient) AddTorrentFile(filename string, fileContent []byte, savePath string, category string) (string, error) {
+	return "", nil
+}
+func (m *mockQBittorrentClient) GetTorrentsByCategory(category string) ([]*downloader.TorrentInfo, error) {
+	return nil, nil
+}
+func (m *mockQBittorrentClient) SetCategory(hash string, category string) error { return nil }
+func (m *mockQBittorrentClient) SetLocation(hash string, location string) error { return nil }
+func (m *mockQBittorrentClient) RenameTorrentFile(hash string, oldPath string, newPath string) error { return nil }
+func (m *mockQBittorrentClient) GetTorrentFiles(hash string) ([]downloader.TorrentFile, error) {
+	return nil, nil
+}
+func (m *mockQBittorrentClient) GetVersion() (string, error) { return "", nil }
+func (m *mockQBittorrentClient) SetProxy(proxyURL string) error { return nil }
+func (m *mockQBittorrentClient) DownloadTorrentFile(url string) ([]byte, error) { return nil, nil }
 
 func setupRetryTest(t *testing.T) (*gorm.DB, repository.DownloadRepository, repository.ConfigRepository) {
 	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
@@ -69,7 +90,7 @@ func setupRetryTest(t *testing.T) (*gorm.DB, repository.DownloadRepository, repo
 }
 
 func TestRetryHandler_FetchesDownloadByID(t *testing.T) {
-	_, downloadRepo, configRepo := setupRetryTest(t)
+	db, downloadRepo, configRepo := setupRetryTest(t)
 	mockQB := &mockQBittorrentClient{}
 	handler := NewDownloadHandler(downloadRepo, mockQB, configRepo)
 
@@ -77,7 +98,6 @@ func TestRetryHandler_FetchesDownloadByID(t *testing.T) {
 	sub := &model.Subscription{
 		Name: "Test Anime",
 	}
-	db := downloadRepo.(*repository.DownloadRepository).GetDB()
 	if err := db.Create(sub).Error; err != nil {
 		t.Fatalf("failed to create subscription: %v", err)
 	}
@@ -151,7 +171,7 @@ func TestRetryHandler_Returns404IfDownloadNotFound(t *testing.T) {
 }
 
 func TestRetryHandler_CallsDeleteTorrentWhenHashExists(t *testing.T) {
-	_, downloadRepo, configRepo := setupRetryTest(t)
+	db, downloadRepo, configRepo := setupRetryTest(t)
 	mockQB := &mockQBittorrentClient{}
 	handler := NewDownloadHandler(downloadRepo, mockQB, configRepo)
 
@@ -159,7 +179,6 @@ func TestRetryHandler_CallsDeleteTorrentWhenHashExists(t *testing.T) {
 	sub := &model.Subscription{
 		Name: "Test Anime",
 	}
-	db := downloadRepo.(*repository.DownloadRepository).GetDB()
 	if err := db.Create(sub).Error; err != nil {
 		t.Fatalf("failed to create subscription: %v", err)
 	}
@@ -201,7 +220,7 @@ func TestRetryHandler_CallsDeleteTorrentWhenHashExists(t *testing.T) {
 }
 
 func TestRetryHandler_ResetsRetryFields(t *testing.T) {
-	_, downloadRepo, configRepo := setupRetryTest(t)
+	db, downloadRepo, configRepo := setupRetryTest(t)
 	mockQB := &mockQBittorrentClient{}
 	handler := NewDownloadHandler(downloadRepo, mockQB, configRepo)
 
@@ -209,13 +228,12 @@ func TestRetryHandler_ResetsRetryFields(t *testing.T) {
 	sub := &model.Subscription{
 		Name: "Test Anime",
 	}
-	db := downloadRepo.(*repository.DownloadRepository).GetDB()
 	if err := db.Create(sub).Error; err != nil {
 		t.Fatalf("failed to create subscription: %v", err)
 	}
 
 	// Create test download with retry history
-	now := model.Now()
+	now := time.Now()
 	testDownload := model.Download{
 		Title:          "test download",
 		Status:         "failed",
@@ -277,7 +295,7 @@ func TestRetryHandler_ResetsRetryFields(t *testing.T) {
 }
 
 func TestRetryHandler_CallsAddTorrent(t *testing.T) {
-	_, downloadRepo, configRepo := setupRetryTest(t)
+	db, downloadRepo, configRepo := setupRetryTest(t)
 	mockQB := &mockQBittorrentClient{}
 	handler := NewDownloadHandler(downloadRepo, mockQB, configRepo)
 
@@ -285,7 +303,6 @@ func TestRetryHandler_CallsAddTorrent(t *testing.T) {
 	sub := &model.Subscription{
 		Name: "Test Anime",
 	}
-	db := downloadRepo.(*repository.DownloadRepository).GetDB()
 	if err := db.Create(sub).Error; err != nil {
 		t.Fatalf("failed to create subscription: %v", err)
 	}
@@ -331,7 +348,7 @@ func TestRetryHandler_CallsAddTorrent(t *testing.T) {
 }
 
 func TestRetryHandler_OnAddTorrentSuccess_UpdatesStatusToDownloading(t *testing.T) {
-	_, downloadRepo, configRepo := setupRetryTest(t)
+	db, downloadRepo, configRepo := setupRetryTest(t)
 	mockQB := &mockQBittorrentClient{
 		addTorrentFunc: func(torrentURL, downloadPath, category string) (string, error) {
 			return "success-hash-xyz", nil
@@ -343,7 +360,6 @@ func TestRetryHandler_OnAddTorrentSuccess_UpdatesStatusToDownloading(t *testing.
 	sub := &model.Subscription{
 		Name: "Test Anime",
 	}
-	db := downloadRepo.(*repository.DownloadRepository).GetDB()
 	if err := db.Create(sub).Error; err != nil {
 		t.Fatalf("failed to create subscription: %v", err)
 	}
@@ -389,7 +405,7 @@ func TestRetryHandler_OnAddTorrentSuccess_UpdatesStatusToDownloading(t *testing.
 }
 
 func TestRetryHandler_OnAddTorrentFailure_KeepsFailedStatus(t *testing.T) {
-	_, downloadRepo, configRepo := setupRetryTest(t)
+	db, downloadRepo, configRepo := setupRetryTest(t)
 	mockQB := &mockQBittorrentClient{
 		addTorrentFunc: func(torrentURL, downloadPath, category string) (string, error) {
 			return "", errors.New("qBittorrent rejected torrent")
@@ -401,7 +417,6 @@ func TestRetryHandler_OnAddTorrentFailure_KeepsFailedStatus(t *testing.T) {
 	sub := &model.Subscription{
 		Name: "Test Anime",
 	}
-	db := downloadRepo.(*repository.DownloadRepository).GetDB()
 	if err := db.Create(sub).Error; err != nil {
 		t.Fatalf("failed to create subscription: %v", err)
 	}
@@ -466,7 +481,7 @@ func TestRetryHandler_InvalidID_Returns400(t *testing.T) {
 }
 
 func TestRetryHandler_NoQBClient_SkipsTorrentOperations(t *testing.T) {
-	_, downloadRepo, configRepo := setupRetryTest(t)
+	db, downloadRepo, configRepo := setupRetryTest(t)
 	// Pass nil as qbClient
 	handler := NewDownloadHandler(downloadRepo, nil, configRepo)
 
@@ -474,7 +489,6 @@ func TestRetryHandler_NoQBClient_SkipsTorrentOperations(t *testing.T) {
 	sub := &model.Subscription{
 		Name: "Test Anime",
 	}
-	db := downloadRepo.(*repository.DownloadRepository).GetDB()
 	if err := db.Create(sub).Error; err != nil {
 		t.Fatalf("failed to create subscription: %v", err)
 	}
@@ -521,7 +535,7 @@ func TestRetryHandler_NoQBClient_SkipsTorrentOperations(t *testing.T) {
 }
 
 func TestRetryHandler_DeleteTorrentError_Ignored(t *testing.T) {
-	_, downloadRepo, configRepo := setupRetryTest(t)
+	db, downloadRepo, configRepo := setupRetryTest(t)
 	mockQB := &mockQBittorrentClient{
 		deleteTorrentFunc: func(hash string, deleteFiles bool) error {
 			return errors.New("torrent not found in qBittorrent")
@@ -533,7 +547,6 @@ func TestRetryHandler_DeleteTorrentError_Ignored(t *testing.T) {
 	sub := &model.Subscription{
 		Name: "Test Anime",
 	}
-	db := downloadRepo.(*repository.DownloadRepository).GetDB()
 	if err := db.Create(sub).Error; err != nil {
 		t.Fatalf("failed to create subscription: %v", err)
 	}

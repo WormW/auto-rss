@@ -24,7 +24,7 @@ func TestDownloadStatusAlignment(t *testing.T) {
 	}
 
 	downloadRepo := repository.NewDownloadRepository(db)
-	handler := NewDownloadHandler(downloadRepo, nil)
+	handler := NewDownloadHandler(downloadRepo, nil, nil)
 
 	// Create test download with known status
 	testDownload := model.Download{

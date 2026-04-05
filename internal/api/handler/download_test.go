@@ -171,3 +171,118 @@ func (m *mockDownloadRepo) UpdateInTx(tx *gorm.DB, download *model.Download) err
 	}
 	return nil
 }
+
+func TestDownloadHandler_List(t *testing.T) {
+	tests := []struct {
+		name           string
+		query          string
+		mockList       func(offset, limit int, status string) ([]model.Download, int64, error)
+		wantStatus     int
+		wantCount      int
+		wantTotal      int64
+		wantListCalled bool
+	}{
+		{
+			name:  "success with default pagination",
+			query: "",
+			mockList: func(offset, limit int, status string) ([]model.Download, int64, error) {
+				return []model.Download{
+					{ID: 1, Title: "Test 1", Status: "downloading"},
+					{ID: 2, Title: "Test 2", Status: "completed"},
+				}, 2, nil
+			},
+			wantStatus:     http.StatusOK,
+			wantCount:      2,
+			wantTotal:      2,
+			wantListCalled: true,
+		},
+		{
+			name:  "filter by status downloading",
+			query: "?status=downloading",
+			mockList: func(offset, limit int, status string) ([]model.Download, int64, error) {
+				assert.Equal(t, "downloading", status)
+				return []model.Download{
+					{ID: 1, Title: "Test 1", Status: "downloading"},
+				}, 1, nil
+			},
+			wantStatus:     http.StatusOK,
+			wantCount:      1,
+			wantTotal:      1,
+			wantListCalled: true,
+		},
+		{
+			name:  "filter by status completed",
+			query: "?status=completed",
+			mockList: func(offset, limit int, status string) ([]model.Download, int64, error) {
+				assert.Equal(t, "completed", status)
+				return []model.Download{
+					{ID: 2, Title: "Test 2", Status: "completed"},
+				}, 1, nil
+			},
+			wantStatus:     http.StatusOK,
+			wantCount:      1,
+			wantTotal:      1,
+			wantListCalled: true,
+		},
+		{
+			name:  "with custom pagination",
+			query: "?page=2&page_size=10",
+			mockList: func(offset, limit int, status string) ([]model.Download, int64, error) {
+				assert.Equal(t, 10, offset) // (2-1) * 10
+				assert.Equal(t, 10, limit)
+				return []model.Download{}, 0, nil
+			},
+			wantStatus:     http.StatusOK,
+			wantCount:      0,
+			wantTotal:      0,
+			wantListCalled: true,
+		},
+		{
+			name:  "repository error",
+			query: "",
+			mockList: func(offset, limit int, status string) ([]model.Download, int64, error) {
+				return nil, 0, errors.New("database error")
+			},
+			wantStatus:     http.StatusInternalServerError,
+			wantCount:      0,
+			wantTotal:      0,
+			wantListCalled: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockRepo := &mockDownloadRepo{listFunc: tt.mockList}
+			handler := NewDownloadHandler(mockRepo, nil, nil)
+
+			gin.SetMode(gin.TestMode)
+			r := gin.New()
+			r.GET("/downloads", handler.List)
+
+			req := httptest.NewRequest("GET", "/downloads"+tt.query, nil)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, tt.wantStatus, w.Code)
+
+			if tt.wantStatus == http.StatusOK {
+				var resp struct {
+					Code int `json:"code"`
+					Data struct {
+						List  []model.Download `json:"list"`
+						Total int64            `json:"total"`
+					} `json:"data"`
+				}
+				err := json.Unmarshal(w.Body.Bytes(), &resp)
+				require.NoError(t, err)
+				assert.Equal(t, 0, resp.Code)
+				assert.Len(t, resp.Data.List, tt.wantCount)
+				assert.Equal(t, tt.wantTotal, resp.Data.Total)
+			}
+
+			if tt.wantListCalled {
+				assert.GreaterOrEqual(t, mockRepo.listCalls, 1)
+			}
+		})
+	}
+}
