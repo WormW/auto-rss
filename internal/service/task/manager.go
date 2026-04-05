@@ -95,8 +95,9 @@ func (m *Manager) StartTask(taskType TaskType, subscriptionID uint, name string,
 
 	// 检查是否有任务在运行
 	if m.currentTask != nil && m.currentTask.Status == TaskStatusRunning {
+		runningTaskName := m.currentTask.Name
 		m.mu.Unlock()
-		return nil, fmt.Errorf("已有任务在运行中: %s", m.currentTask.Name)
+		return nil, fmt.Errorf("已有任务在运行中: %s", runningTaskName)
 	}
 
 	// 创建新任务
