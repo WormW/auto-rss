@@ -209,8 +209,12 @@ func (h *RSSSourceHandler) FetchAnimes(c *gin.Context) {
 		}
 	}
 
-	// 从RSS源获取番剧列表
-	items, err := h.rssParser.FetchAndParse(source.BaseURL)
+	// 从RSS源获取番剧列表（使用源特定的超时设置）
+	timeout := source.Timeout
+	if timeout <= 0 {
+		timeout = model.DefaultRSSTimeout()
+	}
+	items, err := h.rssParser.FetchAndParseWithTimeout(source.BaseURL, timeout)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取番剧列表失败: " + err.Error()})
 		return
