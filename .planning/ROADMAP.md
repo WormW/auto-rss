@@ -72,7 +72,7 @@ internal/
 - [ ] 02-02-PLAN.md — Create Batch Import and Collection Download services (REF-03, REF-04)
 - [x] 02-03-PLAN.md — Create Status Sync, Completion Handler, and extend Retry services (REF-05, REF-06, REF-07)
 - [x] 02-04-PLAN.md — Create Matcher and Mover services, verify Parser (REF-08, REF-09, REF-10)
-- [ ] 02-05-PLAN.md — Refactor main files to use new services (all REF requirements)
+- [x] 02-05-PLAN.md — Refactor main files to use new services (all REF requirements)
 
 **Wave Structure:**
 | Wave | Plans | Description | Dependencies |
@@ -88,7 +88,7 @@ internal/
 
 **Goal:** 修复性能瓶颈，补充测试覆盖
 
-**Requirements:** PERF-01 ~ PERF-03, TEST-01 ~ TEST-06 (5 requirements)
+**Requirements:** PERF-01 ~ PERF-03, TEST-01 ~ TEST-06 (9 requirements)
 
 **Success Criteria:**
 1. 订阅列表加载时间减少 50%（无 N+1 查询）
@@ -105,6 +105,20 @@ internal/
 - `internal/service/mikan/mikan_test.go`
 - `internal/service/organizer/*_test.go`
 - `internal/service/task/manager_test.go`
+
+**Plans:**
+- [x] 03-01-PLAN.md — Fix N+1 query and add pagination limits (PERF-01, PERF-02)
+- [x] 03-02-PLAN.md — Make RSS timeout configurable per source (PERF-03)
+- [ ] 03-03-PLAN.md — Add handler tests for download and subscription (TEST-01, TEST-02)
+- [ ] 03-04-PLAN.md — Add Bangumi and Mikan service tests (TEST-03, TEST-04)
+- [ ] 03-05-PLAN.md — Add Organizer and Task Manager tests (TEST-05, TEST-06)
+
+**Wave Structure:**
+| Wave | Plans | Description | Dependencies |
+|------|-------|-------------|--------------|
+| 1 | 03-01, 03-02 | Performance fixes (N+1, pagination, RSS timeout) | None |
+| 2 | 03-03, 03-04 | Handler and service tests | Wave 1 |
+| 3 | 03-05 | Organizer and Task Manager tests | Wave 1 |
 
 ---
 
@@ -129,8 +143,15 @@ internal/
 | REF-08 | Phase 2 | 02-04-PLAN.md |
 | REF-09 | Phase 2 | 02-04-PLAN.md |
 | REF-10 | Phase 2 | 02-04-PLAN.md |
-| PERF-01~PERF-03 | Phase 3 | 03-01-fix-performance-issues.md |
-| TEST-01~TEST-06 | Phase 3 | 03-02-add-test-coverage.md |
+| PERF-01 | Phase 3 | 03-01-PLAN.md |
+| PERF-02 | Phase 3 | 03-01-PLAN.md |
+| PERF-03 | Phase 3 | 03-02-PLAN.md |
+| TEST-01 | Phase 3 | 03-03-PLAN.md |
+| TEST-02 | Phase 3 | 03-03-PLAN.md |
+| TEST-03 | Phase 3 | 03-04-PLAN.md |
+| TEST-04 | Phase 3 | 03-04-PLAN.md |
+| TEST-05 | Phase 3 | 03-05-PLAN.md |
+| TEST-06 | Phase 3 | 03-05-PLAN.md |
 
 ---
 
@@ -144,10 +165,10 @@ internal/
 
 ## Next Action
 
-**Phase 2 Ready for Execution**
+**Phase 3 Ready for Execution**
 
-Run: `/gsd-execute-phase 2`
+Run: `/gsd-execute-phase 3`
 
 ---
 *Roadmap created: 2025-04-05*
-*Last updated: 2025-04-05 after Phase 2 planning*
+*Last updated: 2025-04-05 after Phase 3 planning*
