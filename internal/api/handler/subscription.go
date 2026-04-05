@@ -259,6 +259,9 @@ func (h *SubscriptionHandler) enrichWithBangumi(subscription *model.Subscription
 
 // enrichWithBangumiInternal 内部实现，支持强制刷新
 func (h *SubscriptionHandler) enrichWithBangumiInternal(subscription *model.Subscription, force bool) {
+	if h.bangumiEnricher == nil {
+		return
+	}
 	if err := h.bangumiEnricher.Enrich(subscription, force); err != nil {
 		logger.Warn("Failed to enrich subscription with Bangumi data",
 			"subscription_name", subscription.Name,
