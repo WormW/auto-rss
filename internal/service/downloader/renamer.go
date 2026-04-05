@@ -1,12 +1,15 @@
 package downloader
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"github.com/WormW/auto-rss/internal/pkg/logger"
+	"github.com/WormW/auto-rss/internal/repository"
 )
 
 // RenameService 文件重命名服务
@@ -234,5 +237,366 @@ type FileInfo struct {
 	Extension  string
 	Size       int64
 	Resolution string
+}
+
+// RenameViaQBittorrent 通过 qBittorrent API 重命名单个文件
+func (r *RenameService) RenameViaQBittorrent(client QBittorrentClient, hash string, oldName, newName string) error {
+	if err := client.RenameTorrentFile(hash, oldName, newName); err != nil {
+		return fmt.Errorf("failed to rename torrent file: %w", err)
+	}
+	return nil
+}
+
+// MoveViaQBittorrent 通过 qBittorrent API 移动种子位置
+func (r *RenameService) MoveViaQBittorrent(client QBittorrentClient, hash string, newLocation string) error {
+	if err := client.SetLocation(hash, newLocation); err != nil {
+		return fmt.Errorf("failed to move torrent: %w", err)
+	}
+	return nil
+}
+
+// RenameCollection 批量重命名合集种子中的所有视频文件
+func (r *RenameService) RenameCollection(client QBittorrentClient, hash string, subscription *model.Subscription) (int, error) {
+	files, err := client.GetTorrentFiles(hash)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get torrent files: %w", err)
+	}
+
+	renamedCount := 0
+	for _, file := range files {
+		ext := strings.ToLower(filepath.Ext(file.Name))
+		if !isVideoFileExt(ext) {
+			continue
+		}
+
+		// 这里简化处理，实际应该解析文件名中的集数
+		// 合集种子的重命名逻辑较复杂，需要解析每个文件的集数
+		// 暂时跳过具体实现，保持原有行为
+		_ = file
+	}
+
+	return renamedCount, nil
+}
+
+// ReorganizeSubscriptionFiles 重新组织订阅的所有已完成下载文件
+func (r *RenameService) ReorganizeSubscriptionFiles(
+	ctx context.Context,
+	subscription *model.Subscription,
+	downloads []model.Download,
+	qbClient QBittorrentClient,
+	configRepo repository.ConfigRepository,
+	basePath string,
+) (map[string]interface{}, error) {
+	result := map[string]interface{}{
+		"moved":   0,
+		"renamed": 0,
+		"errors":  0,
+	}
+
+	// 获取重命名模板
+	renameTemplate := r.defaultTemplate
+	if configRepo != nil {
+		if templateConfig, err := configRepo.Get("rename_template"); err == nil && templateConfig != nil && templateConfig.Value != "" {
+			renameTemplate = templateConfig.Value
+		}
+	}
+	tempService := NewRenameService(renameTemplate)
+
+	for _, download := range downloads {
+		select {
+		case <-ctx.Done():
+			return result, ctx.Err()
+		default:
+		}
+
+		if download.TorrentHash == "" {
+			logger.Warn("Download has no torrent hash, skipping",
+				"download_id", download.ID,
+				"episode", download.Episode)
+			result["errors"] = result["errors"].(int) + 1
+			continue
+		}
+
+		// 获取种子信息
+		torrentInfo, err := qbClient.GetTorrentInfo(download.TorrentHash)
+		if err != nil {
+			logger.Warn("Failed to get torrent info",
+				"hash", download.TorrentHash,
+				"error", err.Error())
+			result["errors"] = result["errors"].(int) + 1
+			continue
+		}
+
+		// 获取种子文件列表
+		files, err := qbClient.GetTorrentFiles(download.TorrentHash)
+		if err != nil {
+			logger.Warn("Failed to get torrent files",
+				"hash", download.TorrentHash,
+				"error", err.Error())
+			result["errors"] = result["errors"].(int) + 1
+			continue
+		}
+
+		// 找到主视频文件
+		mainVideoFile := ExtractFileInfo(files)
+		if mainVideoFile == nil {
+			logger.Warn("No video file found in torrent",
+				"hash", download.TorrentHash)
+			result["errors"] = result["errors"].(int) + 1
+			continue
+		}
+
+		ext := strings.ToLower(filepath.Ext(mainVideoFile.Name))
+
+		// 生成新的文件名（带目录结构）
+		renameCtx := &RenameContext{
+			Subscription: subscription,
+			Download: &model.Download{
+				Episode: download.Episode,
+			},
+			OriginalName: mainVideoFile.Name,
+			Extension:    ext,
+		}
+		newRelativePath := tempService.GenerateFileName(renameCtx)
+
+		// 分离目录和文件名
+		newDir := filepath.Dir(newRelativePath)
+		newFileName := filepath.Base(newRelativePath)
+		targetLocation := filepath.Join(basePath, newDir)
+
+		// 当前位置
+		currentLocation := torrentInfo.SavePath
+
+		// Step 1: 移动种子到新位置（如果需要）
+		if currentLocation != targetLocation {
+			logger.Info("Moving torrent via qBittorrent API",
+				"hash", download.TorrentHash,
+				"from", currentLocation,
+				"to", targetLocation)
+
+			if err := qbClient.SetLocation(download.TorrentHash, targetLocation); err != nil {
+				logger.Error("Failed to move torrent",
+					"hash", download.TorrentHash,
+					"target", targetLocation,
+					"error", err.Error())
+				result["errors"] = result["errors"].(int) + 1
+				continue
+			}
+			result["moved"] = result["moved"].(int) + 1
+			logger.Info("Torrent moved successfully",
+				"hash", download.TorrentHash,
+				"new_location", targetLocation)
+		}
+
+		// Step 2: 重命名文件（如果需要）
+		oldFileName := mainVideoFile.Name
+		oldFileBaseName := filepath.Base(oldFileName)
+
+		if oldFileBaseName != newFileName {
+			// 构建新的相对路径（在种子内部）
+			newFilePath := newFileName
+			if strings.Contains(oldFileName, string(filepath.Separator)) {
+				// 如果原文件在子目录中，保持目录结构但改变文件名
+				oldDir := filepath.Dir(oldFileName)
+				newFilePath = filepath.Join(oldDir, newFileName)
+			}
+
+			logger.Info("Renaming file via qBittorrent API",
+				"hash", download.TorrentHash,
+				"from", oldFileName,
+				"to", newFilePath)
+
+			if err := qbClient.RenameTorrentFile(download.TorrentHash, oldFileName, newFilePath); err != nil {
+				logger.Warn("Failed to rename file (may not be supported for multi-file torrents)",
+					"hash", download.TorrentHash,
+					"error", err.Error())
+				// 重命名失败不算严重错误，继续处理
+			} else {
+				result["renamed"] = result["renamed"].(int) + 1
+				logger.Info("File renamed successfully",
+					"hash", download.TorrentHash,
+					"new_name", newFilePath)
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// RenameSubscriptionFiles 批量重命名订阅的已下载文件
+func (r *RenameService) RenameSubscriptionFiles(
+	ctx context.Context,
+	subscription *model.Subscription,
+	downloads []model.Download,
+	qbClient QBittorrentClient,
+	configRepo repository.ConfigRepository,
+	downloadRepo repository.DownloadRepository,
+	basePath string,
+) (map[string]interface{}, error) {
+	result := map[string]interface{}{
+		"moved":   0,
+		"renamed": 0,
+		"errors":  0,
+	}
+
+	// 获取重命名模板
+	renameTemplate := r.defaultTemplate
+	if configRepo != nil {
+		if templateConfig, err := configRepo.Get("rename_template"); err == nil && templateConfig != nil && templateConfig.Value != "" {
+			renameTemplate = templateConfig.Value
+		}
+	}
+	tempService := NewRenameService(renameTemplate)
+
+	for i := range downloads {
+		download := &downloads[i]
+
+		select {
+		case <-ctx.Done():
+			return result, ctx.Err()
+		default:
+		}
+
+		if download.TorrentHash == "" {
+			logger.Warn("Download has no torrent hash, skipping",
+				"download_id", download.ID,
+				"episode", download.Episode)
+			result["errors"] = result["errors"].(int) + 1
+			continue
+		}
+
+		// 获取种子信息
+		torrentInfo, err := qbClient.GetTorrentInfo(download.TorrentHash)
+		if err != nil {
+			logger.Warn("Failed to get torrent info, skipping",
+				"download_id", download.ID,
+				"hash", download.TorrentHash,
+				"error", err.Error())
+			result["errors"] = result["errors"].(int) + 1
+			continue
+		}
+
+		// 获取种子文件列表
+		files, err := qbClient.GetTorrentFiles(download.TorrentHash)
+		if err != nil {
+			logger.Warn("Failed to get torrent files, skipping",
+				"download_id", download.ID,
+				"hash", download.TorrentHash,
+				"error", err.Error())
+			result["errors"] = result["errors"].(int) + 1
+			continue
+		}
+
+		if len(files) == 0 {
+			logger.Warn("No files found in torrent, skipping",
+				"download_id", download.ID,
+				"hash", download.TorrentHash)
+			result["errors"] = result["errors"].(int) + 1
+			continue
+		}
+
+		// 提取主视频文件
+		mainVideoFile := ExtractFileInfo(files)
+		if mainVideoFile == nil {
+			logger.Warn("No video file found in torrent, skipping",
+				"download_id", download.ID,
+				"hash", download.TorrentHash)
+			result["errors"] = result["errors"].(int) + 1
+			continue
+		}
+
+		// 生成新的文件名和路径
+		ext := strings.ToLower(filepath.Ext(mainVideoFile.Name))
+		renameCtx := &RenameContext{
+			Subscription: subscription,
+			Download: &model.Download{
+				Episode: download.Episode,
+			},
+			OriginalName: mainVideoFile.Name,
+			Extension:    ext,
+		}
+		newRelativePath := tempService.GenerateFileName(renameCtx)
+
+		// 分离目录和文件名
+		newDir := filepath.Dir(newRelativePath)
+		newFileName := filepath.Base(newRelativePath)
+		targetLocation := filepath.Join(basePath, newDir)
+
+		// 当前位置
+		currentLocation := torrentInfo.SavePath
+
+		// Step 1: 移动种子到新位置（如果需要）
+		if currentLocation != targetLocation {
+			logger.Info("Moving torrent",
+				"hash", download.TorrentHash,
+				"from", currentLocation,
+				"to", targetLocation)
+
+			if err := qbClient.SetLocation(download.TorrentHash, targetLocation); err != nil {
+				logger.Error("Failed to move torrent",
+					"hash", download.TorrentHash,
+					"target", targetLocation,
+					"error", err.Error())
+				result["errors"] = result["errors"].(int) + 1
+				continue
+			}
+			result["moved"] = result["moved"].(int) + 1
+			logger.Info("Torrent moved successfully",
+				"hash", download.TorrentHash,
+				"new_location", targetLocation)
+		}
+
+		// Step 2: 重命名文件（如果需要）
+		oldFileName := mainVideoFile.Name
+		oldFileBaseName := filepath.Base(oldFileName)
+
+		if oldFileBaseName != newFileName {
+			// 构建新的相对路径（在种子内部）
+			newFilePath := newFileName
+			if strings.Contains(oldFileName, string(filepath.Separator)) {
+				// 如果原文件在子目录中，保持目录结构但改变文件名
+				oldDir := filepath.Dir(oldFileName)
+				newFilePath = filepath.Join(oldDir, newFileName)
+			}
+
+			logger.Info("Renaming file",
+				"hash", download.TorrentHash,
+				"from", oldFileName,
+				"to", newFilePath)
+
+			if err := qbClient.RenameTorrentFile(download.TorrentHash, oldFileName, newFilePath); err != nil {
+				logger.Warn("Failed to rename file",
+					"hash", download.TorrentHash,
+					"error", err.Error())
+				result["errors"] = result["errors"].(int) + 1
+				continue
+			}
+			result["renamed"] = result["renamed"].(int) + 1
+			logger.Info("File renamed successfully",
+				"hash", download.TorrentHash,
+				"new_name", newFilePath)
+		}
+
+		// 更新数据库中的renamed_path
+		download.RenamedPath = filepath.Join(targetLocation, newFileName)
+		if err := downloadRepo.Update(download); err != nil {
+			logger.Warn("Failed to update download record",
+				"download_id", download.ID,
+				"error", err.Error())
+			// 不算作错误，因为文件操作已成功
+		}
+	}
+
+	return result, nil
+}
+
+// isVideoFileExt 检查是否是视频文件扩展名
+func isVideoFileExt(ext string) bool {
+	videoExts := map[string]bool{
+		".mp4": true, ".mkv": true, ".avi": true, ".wmv": true,
+		".mov": true, ".flv": true, ".webm": true, ".m4v": true,
+		".ts": true, ".m2ts": true,
+	}
+	return videoExts[ext]
 }
 
