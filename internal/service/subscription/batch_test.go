@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/mikan"
 	"gorm.io/gorm"
 )
@@ -71,6 +72,7 @@ func (m *mockSubscriptionRepo) GetActiveSubscriptions() ([]model.Subscription, e
 func (m *mockSubscriptionRepo) UpdateInTx(tx *gorm.DB, sub *model.Subscription) error {
 	return m.Update(sub)
 }
+func (m *mockSubscriptionRepo) GetSubscriptionsWithDownloadCount() ([]repository.SubscriptionWithStats, error) { return nil, nil }
 
 // MockMikanService mock实现
 type mockMikanService struct {
