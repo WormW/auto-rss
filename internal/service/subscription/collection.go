@@ -20,35 +20,35 @@ type CollectionDownloader interface {
 	DownloadAsync(subscription *model.Subscription)
 }
 
-// collectionDownloader 实现 CollectionDownloader 接口
 type collectionDownloader struct {
 	qbClient     downloader.QBittorrentClient
 	downloadRepo repository.DownloadRepository
 	configRepo   repository.ConfigRepository
-	downloadPath string
+	basePath     string
 }
 
-// NewCollectionDownloader 创建合集下载服务
+// NewCollectionDownloader 创建合集下载服务实例
 func NewCollectionDownloader(
 	qbClient downloader.QBittorrentClient,
 	downloadRepo repository.DownloadRepository,
 	configRepo repository.ConfigRepository,
-	downloadPath string,
+	basePath string,
 ) CollectionDownloader {
 	return &collectionDownloader{
 		qbClient:     qbClient,
 		downloadRepo: downloadRepo,
 		configRepo:   configRepo,
-		downloadPath: downloadPath,
+		basePath:     basePath,
 	}
 }
 
-// Download 下载合集种子并创建下载记录
 func (c *collectionDownloader) Download(subscription *model.Subscription) (*model.Download, error) {
+	// 检查是否有合集种子
 	if subscription.CollectionTorrent == "" {
 		return nil, nil
 	}
 
+	// 检查qBittorrent客户端
 	if c.qbClient == nil {
 		logger.Warn("qBittorrent client not configured, skipping collection torrent download",
 			"subscription_id", subscription.ID,
@@ -61,14 +61,11 @@ func (c *collectionDownloader) Download(subscription *model.Subscription) (*mode
 		"subscription_name", subscription.Name,
 		"collection_torrent", subscription.CollectionTorrent)
 
-	// 使用系统配置的下载路径
-	savePath := c.downloadPath
-
 	// 生成带番剧名的下载路径
-	downloadPath := utils.GenerateDownloadPath(savePath, subscription.Name)
+	downloadPath := utils.GenerateDownloadPath(c.basePath, subscription.Name)
 
 	// 验证生成的下载路径不会逃逸出基础下载目录（防止路径遍历）
-	if _, err := utils.ValidatePath(downloadPath, savePath); err != nil {
+	if _, err := utils.ValidatePath(downloadPath, c.basePath); err != nil {
 		logger.Error("Generated download path escapes base directory",
 			"subscription", subscription.Name,
 			"download_path", downloadPath,
@@ -91,33 +88,22 @@ func (c *collectionDownloader) Download(subscription *model.Subscription) (*mode
 		}
 
 		// 先下载种子文件
-		if qbDownloader, ok := c.qbClient.(interface {
-			DownloadTorrentFile(url string) ([]byte, error)
-		}); ok {
-			fileContent, downloadErr := qbDownloader.DownloadTorrentFile(torrentURL)
-			if downloadErr != nil {
-				logger.Error("Failed to download collection torrent file",
-					"subscription_id", subscription.ID,
-					"torrent_url", torrentURL,
-					"error", downloadErr.Error())
-				return nil, downloadErr
-			}
-
-			// 通过文件内容添加种子
-			torrentHash, err = c.qbClient.AddTorrentFile(
-				"collection.torrent",
-				fileContent,
-				downloadPath,
-				downloader.AutoRssCategory,
-			)
-		} else {
-			// 回退到 URL 方式
-			torrentHash, err = c.qbClient.AddTorrent(
-				torrentURL,
-				downloadPath,
-				downloader.AutoRssCategory,
-			)
+		fileContent, downloadErr := c.qbClient.DownloadTorrentFile(torrentURL)
+		if downloadErr != nil {
+			logger.Error("Failed to download collection torrent file",
+				"subscription_id", subscription.ID,
+				"torrent_url", torrentURL,
+				"error", downloadErr)
+			return nil, downloadErr
 		}
+
+		// 通过文件内容添加种子
+		torrentHash, err = c.qbClient.AddTorrentFile(
+			"collection.torrent",
+			fileContent,
+			downloadPath,
+			downloader.AutoRssCategory,
+		)
 	} else {
 		// magnet 链接或其他，直接添加
 		torrentHash, err = c.qbClient.AddTorrent(
@@ -133,7 +119,7 @@ func (c *collectionDownloader) Download(subscription *model.Subscription) (*mode
 			"subscription_name", subscription.Name,
 			"torrent_url", torrentURL,
 			"download_path", downloadPath,
-			"error", err.Error())
+			"error", err)
 		return nil, err
 	}
 
@@ -167,7 +153,6 @@ func (c *collectionDownloader) Download(subscription *model.Subscription) (*mode
 		"download_path", downloadPath)
 
 	// 创建 Download 记录以支持自动重命名
-	// Episode 设为 0 表示合集种子
 	if torrentHash != "" && c.downloadRepo != nil {
 		// 先检查是否已存在相同 hash 的记录
 		existing, _ := c.downloadRepo.GetByHash(torrentHash)
@@ -192,7 +177,7 @@ func (c *collectionDownloader) Download(subscription *model.Subscription) (*mode
 			logger.Error("Failed to create download record for collection torrent",
 				"subscription_id", subscription.ID,
 				"torrent_hash", torrentHash,
-				"error", err.Error())
+				"error", err)
 			return nil, err
 		}
 
@@ -207,7 +192,12 @@ func (c *collectionDownloader) Download(subscription *model.Subscription) (*mode
 	return nil, nil
 }
 
-// DownloadAsync 异步下载合集
 func (c *collectionDownloader) DownloadAsync(subscription *model.Subscription) {
-	go c.Download(subscription)
+	go func() {
+		if _, err := c.Download(subscription); err != nil {
+			logger.Error("Async collection download failed",
+				"subscription_id", subscription.ID,
+				"error", err.Error())
+		}
+	}()
 }

@@ -38,6 +38,8 @@ type QBittorrentClient interface {
 	GetVersion() (string, error)
 	// SetProxy 设置代理
 	SetProxy(proxyURL string) error
+	// DownloadTorrentFile 下载种子文件内容
+	DownloadTorrentFile(url string) ([]byte, error)
 }
 
 // TorrentInfo 种子信息

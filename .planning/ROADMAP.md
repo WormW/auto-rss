@@ -67,6 +67,21 @@ internal/
 │       └── mover.go            # REF-10
 ```
 
+**Plans:**
+- [ ] 02-01-PLAN.md — Create Bangumi Enricher and Renamer services (REF-01, REF-02)
+- [ ] 02-02-PLAN.md — Create Batch Import and Collection Download services (REF-03, REF-04)
+- [ ] 02-03-PLAN.md — Create Status Sync, Completion Handler, and extend Retry services (REF-05, REF-06, REF-07)
+- [ ] 02-04-PLAN.md — Create Matcher and Mover services, verify Parser (REF-08, REF-09, REF-10)
+- [ ] 02-05-PLAN.md — Refactor main files to use new services (all REF requirements)
+
+**Wave Structure:**
+| Wave | Plans | Description | Dependencies |
+|------|-------|-------------|--------------|
+| 1 | 02-01, 02-02 | Subscription-related services | None |
+| 2 | 02-03 | Downloader services | Wave 1 |
+| 3 | 02-04 | Organizer services | None |
+| 4 | 02-05 | Refactor main files | Waves 1-3 |
+
 ---
 
 ## Phase 3: 性能与测试
@@ -104,11 +119,18 @@ internal/
 | BUG-05 | Phase 1 | 01-05-add-file-transaction.md |
 | SEC-01 | Phase 1 | 01-06-prevent-path-traversal.md |
 | SEC-02 | Phase 1 | 01-07-audit-sql-injection.md |
-| REF-01~04 | Phase 2 | 02-01-refactor-subscription-handler.md |
-| REF-05~07 | Phase 2 | 02-02-refactor-download-monitor.md |
-| REF-08~10 | Phase 2 | 02-03-refactor-file-organizer.md |
-| PERF-01~03 | Phase 3 | 03-01-fix-performance-issues.md |
-| TEST-01~06 | Phase 3 | 03-02-add-test-coverage.md |
+| REF-01 | Phase 2 | 02-01-PLAN.md |
+| REF-02 | Phase 2 | 02-01-PLAN.md |
+| REF-03 | Phase 2 | 02-02-PLAN.md |
+| REF-04 | Phase 2 | 02-02-PLAN.md |
+| REF-05 | Phase 2 | 02-03-PLAN.md |
+| REF-06 | Phase 2 | 02-03-PLAN.md |
+| REF-07 | Phase 2 | 02-03-PLAN.md |
+| REF-08 | Phase 2 | 02-04-PLAN.md |
+| REF-09 | Phase 2 | 02-04-PLAN.md |
+| REF-10 | Phase 2 | 02-04-PLAN.md |
+| PERF-01~PERF-03 | Phase 3 | 03-01-fix-performance-issues.md |
+| TEST-01~TEST-06 | Phase 3 | 03-02-add-test-coverage.md |
 
 ---
 
@@ -122,10 +144,10 @@ internal/
 
 ## Next Action
 
-**Phase 1 Ready for Planning**
+**Phase 2 Ready for Execution**
 
-Run: `/gsd-plan-phase 1`
+Run: `/gsd-execute-phase 2`
 
 ---
 *Roadmap created: 2025-04-05*
-*Last updated: 2025-04-05 after creation*
+*Last updated: 2025-04-05 after Phase 2 planning*
