@@ -286,3 +286,131 @@ func TestDownloadHandler_List(t *testing.T) {
 		})
 	}
 }
+
+func TestDownloadHandler_GetByID(t *testing.T) {
+	tests := []struct {
+		name       string
+		id         string
+		mockGet    func(id uint) (*model.Download, error)
+		wantStatus int
+		wantCode   int // response code field
+	}{
+		{
+			name: "success",
+			id:   "1",
+			mockGet: func(id uint) (*model.Download, error) {
+				assert.Equal(t, uint(1), id)
+				return &model.Download{
+					ID:     1,
+					Title:  "Test Download",
+					Status: "downloading",
+				}, nil
+			},
+			wantStatus: http.StatusOK,
+			wantCode:   0,
+		},
+		{
+			name:       "invalid id format",
+			id:         "abc",
+			mockGet:    nil,
+			wantStatus: http.StatusBadRequest,
+			wantCode:   400,
+		},
+		{
+			name: "not found",
+			id:   "999",
+			mockGet: func(id uint) (*model.Download, error) {
+				return nil, errors.New("not found")
+			},
+			wantStatus: http.StatusNotFound,
+			wantCode:   404,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockRepo := &mockDownloadRepo{getByIDFunc: tt.mockGet}
+			handler := NewDownloadHandler(mockRepo, nil, nil)
+
+			gin.SetMode(gin.TestMode)
+			r := gin.New()
+			r.GET("/downloads/:id", handler.GetByID)
+
+			req := httptest.NewRequest("GET", "/downloads/"+tt.id, nil)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, tt.wantStatus, w.Code)
+
+			var resp struct {
+				Code int `json:"code"`
+			}
+			json.Unmarshal(w.Body.Bytes(), &resp)
+			assert.Equal(t, tt.wantCode, resp.Code)
+		})
+	}
+}
+
+func TestDownloadHandler_Delete(t *testing.T) {
+	tests := []struct {
+		name         string
+		id           string
+		mockGet      func(id uint) (*model.Download, error)
+		mockDelete   func(id uint) error
+		wantStatus   int
+		wantDeleted  bool
+	}{
+		{
+			name: "success",
+			id:   "1",
+			mockGet: func(id uint) (*model.Download, error) {
+				return &model.Download{ID: 1, Title: "Test"}, nil
+			},
+			mockDelete:  func(id uint) error { return nil },
+			wantStatus:  http.StatusOK,
+			wantDeleted: true,
+		},
+		{
+			name:         "invalid id format",
+			id:           "abc",
+			mockGet:      nil,
+			mockDelete:   nil,
+			wantStatus:   http.StatusBadRequest,
+			wantDeleted:  false,
+		},
+		{
+			name: "not found",
+			id:   "999",
+			mockGet: func(id uint) (*model.Download, error) {
+				return nil, errors.New("not found")
+			},
+			mockDelete:  nil,
+			wantStatus:  http.StatusNotFound,
+			wantDeleted: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockRepo := &mockDownloadRepo{
+				getByIDFunc: tt.mockGet,
+				deleteFunc:  tt.mockDelete,
+			}
+			handler := NewDownloadHandler(mockRepo, nil, nil)
+
+			gin.SetMode(gin.TestMode)
+			r := gin.New()
+			r.DELETE("/downloads/:id", handler.Delete)
+
+			req := httptest.NewRequest("DELETE", "/downloads/"+tt.id, nil)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, tt.wantStatus, w.Code)
+
+			if tt.wantDeleted {
+				assert.GreaterOrEqual(t, mockRepo.deleteCalls, 1)
+			}
+		})
+	}
+}
