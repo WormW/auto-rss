@@ -33,14 +33,14 @@ type BatchImporter interface {
 
 type batchImporter struct {
 	mikanService     mikan.Service
-	bangumiEnricher  bangumi.BangumiEnricher
+	bangumiEnricher  bangumi.Enricher
 	subscriptionRepo repository.SubscriptionRepository
 	configRepo       repository.ConfigRepository
 }
 
 func NewBatchImporter(
 	mikanService mikan.Service,
-	bangumiEnricher bangumi.BangumiEnricher,
+	bangumiEnricher bangumi.Enricher,
 	subscriptionRepo repository.SubscriptionRepository,
 	configRepo repository.ConfigRepository,
 ) BatchImporter {

@@ -68,10 +68,10 @@ internal/
 ```
 
 **Plans:**
-- [ ] 02-01-PLAN.md — Create Bangumi Enricher and Renamer services (REF-01, REF-02)
+- [x] 02-01-PLAN.md — Create Bangumi Enricher and Renamer services (REF-01, REF-02)
 - [ ] 02-02-PLAN.md — Create Batch Import and Collection Download services (REF-03, REF-04)
 - [ ] 02-03-PLAN.md — Create Status Sync, Completion Handler, and extend Retry services (REF-05, REF-06, REF-07)
-- [ ] 02-04-PLAN.md — Create Matcher and Mover services, verify Parser (REF-08, REF-09, REF-10)
+- [x] 02-04-PLAN.md — Create Matcher and Mover services, verify Parser (REF-08, REF-09, REF-10)
 - [ ] 02-05-PLAN.md — Refactor main files to use new services (all REF requirements)
 
 **Wave Structure:**
