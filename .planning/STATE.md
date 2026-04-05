@@ -58,6 +58,10 @@ See: `.planning/PROJECT.md` (updated 2025-04-05)
 | 2025-04-05 | 分三阶段清理 | 降低风险，每阶段可验证 |
 | 2025-04-05 | 先修复后重构 | 避免在不稳定基础上改动 |
 | 2025-04-05 | 保持向后兼容 | 不影响现有用户使用 |
+| 2026-04-05 | StatusSync interface with Sync, UpdateStatus, Reconcile methods | Per D-04 interface design pattern |
+| 2026-04-05 | CompletionHandler interface with HandleComplete method | Per D-04 interface design pattern |
+| 2026-04-05 | Nil DB handling in completion handler | Enable testing without real database |
+| 2026-04-05 | Helper functions kept at package level | mapQBStateToStatus reused across services |
 
 ## Blockers
 
