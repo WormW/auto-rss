@@ -5,6 +5,12 @@ import (
 	"gorm.io/gorm"
 )
 
+// SubscriptionWithStats extends Subscription with download statistics
+type SubscriptionWithStats struct {
+	model.Subscription
+	DownloadingCount int64 `json:"downloading_count" gorm:"column:downloading_count"`
+}
+
 // SubscriptionRepository 订阅仓储接口
 type SubscriptionRepository interface {
 	Create(subscription *model.Subscription) error
@@ -16,6 +22,8 @@ type SubscriptionRepository interface {
 	GetActiveSubscriptions() ([]model.Subscription, error)
 	// UpdateInTx 在事务中更新订阅
 	UpdateInTx(tx *gorm.DB, subscription *model.Subscription) error
+	// GetSubscriptionsWithDownloadCount returns all subscriptions with downloading counts in a single query
+	GetSubscriptionsWithDownloadCount() ([]SubscriptionWithStats, error)
 }
 
 type subscriptionRepository struct {
@@ -96,4 +104,20 @@ func (r *subscriptionRepository) GetActiveSubscriptions() ([]model.Subscription,
 // UpdateInTx 在事务中更新订阅
 func (r *subscriptionRepository) UpdateInTx(tx *gorm.DB, subscription *model.Subscription) error {
 	return tx.Save(subscription).Error
+}
+
+// GetSubscriptionsWithDownloadCount returns all subscriptions with downloading counts in a single query
+func (r *subscriptionRepository) GetSubscriptionsWithDownloadCount() ([]SubscriptionWithStats, error) {
+	var results []SubscriptionWithStats
+
+	err := r.db.Model(&model.Subscription{}).
+		Select(
+			"subscriptions.*",
+			"COUNT(CASE WHEN downloads.status = 'downloading' THEN 1 END) as downloading_count",
+		).
+		Joins("LEFT JOIN downloads ON downloads.subscription_id = subscriptions.id").
+		Group("subscriptions.id").
+		Find(&results).Error
+
+	return results, err
 }
