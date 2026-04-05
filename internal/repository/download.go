@@ -7,6 +7,11 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	MaxPageSize     = 1000
+	DefaultPageSize = 20
+)
+
 // DownloadRepository 下载仓储接口
 type DownloadRepository interface {
 	Create(download *model.Download) error
@@ -83,6 +88,17 @@ func (r *downloadRepository) GetByHash(hash string) (*model.Download, error) {
 func (r *downloadRepository) List(offset, limit int, status string) ([]model.Download, int64, error) {
 	var downloads []model.Download
 	var total int64
+
+	// Enforce pagination limits
+	if limit <= 0 {
+		limit = DefaultPageSize
+	}
+	if limit > MaxPageSize {
+		limit = MaxPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
 
 	query := r.db.Model(&model.Download{})
 	if status != "" {
