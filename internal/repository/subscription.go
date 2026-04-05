@@ -67,18 +67,21 @@ func (r *subscriptionRepository) List(offset, limit int) ([]model.Subscription, 
 	var subscriptions []model.Subscription
 	var total int64
 
+	// Enforce pagination limits
+	if limit <= 0 {
+		limit = DefaultPageSize
+	}
+	if limit > MaxPageSize {
+		limit = MaxPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
 	if err := r.db.Model(&model.Subscription{}).Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 
-	if limit <= 0 {
-		err := r.db.Find(&subscriptions).Error
-		return subscriptions, total, err
-	}
-
-	if offset < 0 {
-		offset = 0
-	}
 	err := r.db.Offset(offset).Limit(limit).Find(&subscriptions).Error
 	return subscriptions, total, err
 }
