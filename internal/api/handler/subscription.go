@@ -737,36 +737,13 @@ func (h *SubscriptionHandler) GetByID(c *gin.Context) {
 
 // List 获取订阅列表
 func (h *SubscriptionHandler) List(c *gin.Context) {
-	subscriptions, _, err := h.repo.List(0, 0)
+	subscriptionsWithStats, err := h.repo.GetSubscriptionsWithDownloadCount()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
 			"message": "Failed to get subscription list",
 		})
 		return
-	}
-
-	type SubscriptionWithStats struct {
-		model.Subscription
-		DownloadingCount int `json:"downloading_count"`
-	}
-
-	subscriptionsWithStats := make([]SubscriptionWithStats, 0, len(subscriptions))
-	for _, sub := range subscriptions {
-		downloads, _, err := h.downloadRepo.List(0, 9999, "downloading")
-		downloadingCount := 0
-		if err == nil {
-			for _, download := range downloads {
-				if download.SubscriptionID == sub.ID {
-					downloadingCount++
-				}
-			}
-		}
-
-		subscriptionsWithStats = append(subscriptionsWithStats, SubscriptionWithStats{
-			Subscription:     sub,
-			DownloadingCount: downloadingCount,
-		})
 	}
 
 	c.JSON(http.StatusOK, gin.H{
