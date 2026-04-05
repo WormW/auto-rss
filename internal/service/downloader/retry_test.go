@@ -1,11 +1,13 @@
 package downloader
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"gorm.io/gorm"
 )
 
 func TestCalculateNextRetryTime(t *testing.T) {
@@ -146,5 +148,191 @@ func TestIsRetryableError(t *testing.T) {
 				t.Errorf("isRetryableError(%q) = %v, want %v", tt.errMsg, got, tt.want)
 			}
 		})
+	}
+}
+
+// MockDownloadRepositoryForRetry for testing ProcessRetries
+type mockDownloadRepoForRetry struct {
+	getFailedDownloadsFunc func(limit int) ([]model.Download, error)
+	updateFunc             func(download *model.Download) error
+}
+
+func (m *mockDownloadRepoForRetry) Create(download *model.Download) error { return nil }
+func (m *mockDownloadRepoForRetry) Update(download *model.Download) error {
+	if m.updateFunc != nil {
+		return m.updateFunc(download)
+	}
+	return nil
+}
+func (m *mockDownloadRepoForRetry) Delete(id uint) error                 { return nil }
+func (m *mockDownloadRepoForRetry) GetByID(id uint) (*model.Download, error) { return nil, nil }
+func (m *mockDownloadRepoForRetry) GetByHash(hash string) (*model.Download, error) { return nil, nil }
+func (m *mockDownloadRepoForRetry) GetBySubscriptionAndEpisode(subscriptionID uint, episode int) (*model.Download, error) {
+	return nil, nil
+}
+func (m *mockDownloadRepoForRetry) GetBySubscriptionAndEpisodeWithLang(subscriptionID uint, episode int) ([]model.Download, error) {
+	return nil, nil
+}
+func (m *mockDownloadRepoForRetry) GetRecentBySubscription(subscriptionID uint, limit int) ([]model.Download, error) {
+	return nil, nil
+}
+func (m *mockDownloadRepoForRetry) List(offset, limit int, status string) ([]model.Download, int64, error) {
+	return nil, 0, nil
+}
+func (m *mockDownloadRepoForRetry) ListBySubscriptionID(subscriptionID uint) ([]model.Download, error) {
+	return nil, nil
+}
+func (m *mockDownloadRepoForRetry) UpdateStatus(id uint, status string) error { return nil }
+func (m *mockDownloadRepoForRetry) BatchDelete(ids []uint) error              { return nil }
+func (m *mockDownloadRepoForRetry) DeleteByStatus(status string) error        { return nil }
+func (m *mockDownloadRepoForRetry) DeleteAll() error                         { return nil }
+func (m *mockDownloadRepoForRetry) GetFailedDownloadsReadyForRetry(limit int) ([]model.Download, error) {
+	if m.getFailedDownloadsFunc != nil {
+		return m.getFailedDownloadsFunc(limit)
+	}
+	return nil, nil
+}
+func (m *mockDownloadRepoForRetry) GetDownloadsByRetryCount(minRetries, maxRetries int) ([]model.Download, error) {
+	return nil, nil
+}
+func (m *mockDownloadRepoForRetry) CreateInTx(tx *gorm.DB, download *model.Download) error { return nil }
+func (m *mockDownloadRepoForRetry) UpdateInTx(tx *gorm.DB, download *model.Download) error { return nil }
+
+func TestRetryService_ProcessRetries(t *testing.T) {
+	past := time.Now().Add(-10 * time.Minute)
+
+	tests := []struct {
+		name           string
+		retryTasks     []model.Download
+		expectedCount  int
+		expectedError  bool
+	}{
+		{
+			name: "process ready retries",
+			retryTasks: []model.Download{
+				{
+					ID:          1,
+					Status:      "failed",
+					RetryCount:  1,
+					MaxRetries:  5,
+					NextRetryAt: &past,
+					LastError:   "network timeout",
+				},
+				{
+					ID:          2,
+					Status:      "failed",
+					RetryCount:  2,
+					MaxRetries:  5,
+					NextRetryAt: &past,
+					LastError:   "connection refused",
+				},
+			},
+			expectedCount: 2,
+			expectedError: false,
+		},
+		{
+			name:           "no tasks to retry",
+			retryTasks:     []model.Download{},
+			expectedCount:  0,
+			expectedError:  false,
+		},
+		{
+			name: "skip max retries exceeded",
+			retryTasks: []model.Download{
+				{
+					ID:          1,
+					Status:      "failed",
+					RetryCount:  5,
+					MaxRetries:  5,
+					NextRetryAt: &past,
+					LastError:   "network timeout",
+				},
+			},
+			expectedCount: 0,
+			expectedError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockRepo := &mockDownloadRepoForRetry{
+				getFailedDownloadsFunc: func(limit int) ([]model.Download, error) {
+					return tt.retryTasks, nil
+				},
+				updateFunc: func(download *model.Download) error {
+					return nil
+				},
+			}
+
+			svc := NewRetryService(mockRepo)
+			processed, err := svc.ProcessRetries(10)
+
+			if tt.expectedError && err == nil {
+				t.Error("Expected error, got nil")
+			}
+			if !tt.expectedError && err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+			if processed != tt.expectedCount {
+				t.Errorf("Expected %d processed, got %d", tt.expectedCount, processed)
+			}
+		})
+	}
+}
+
+func TestRetryService_ProcessRetries_RepositoryError(t *testing.T) {
+	mockRepo := &mockDownloadRepoForRetry{
+		getFailedDownloadsFunc: func(limit int) ([]model.Download, error) {
+			return nil, errors.New("database error")
+		},
+	}
+
+	svc := NewRetryService(mockRepo)
+	processed, err := svc.ProcessRetries(10)
+
+	if err == nil {
+		t.Error("Expected error when repository fails, got nil")
+	}
+	if processed != 0 {
+		t.Errorf("Expected 0 processed when repository fails, got %d", processed)
+	}
+}
+
+func TestRetryService_ProcessRetries_Limit(t *testing.T) {
+	past := time.Now().Add(-10 * time.Minute)
+
+	mockRepo := &mockDownloadRepoForRetry{
+		getFailedDownloadsFunc: func(limit int) ([]model.Download, error) {
+			// Return more tasks than the limit
+			tasks := make([]model.Download, 20)
+			for i := 0; i < 20; i++ {
+				tasks[i] = model.Download{
+					ID:          uint(i + 1),
+					Status:      "failed",
+					RetryCount:  1,
+					MaxRetries:  5,
+					NextRetryAt: &past,
+					LastError:   "network timeout",
+				}
+			}
+			// Respect the limit parameter
+			if limit < len(tasks) {
+				return tasks[:limit], nil
+			}
+			return tasks, nil
+		},
+		updateFunc: func(download *model.Download) error {
+			return nil
+		},
+	}
+
+	svc := NewRetryService(mockRepo)
+	processed, err := svc.ProcessRetries(5)
+
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+	if processed != 5 {
+		t.Errorf("Expected 5 processed (respecting limit), got %d", processed)
 	}
 }

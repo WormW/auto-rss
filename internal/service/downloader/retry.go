@@ -159,15 +159,52 @@ func (s *RetryService) MarkFailed(download *model.Download, err error, reason st
 	return nil
 }
 
-// GetPendingRetries 获取待重试的下载任务
-func (s *RetryService) GetPendingRetries(limit int) ([]model.Download, error) {
-	// 这里需要添加一个方法来查询需要重试的任务
-	// 由于 repository 接口限制，我们先获取所有 failed 状态的任务，然后过滤
-	// 实际项目中应该在 repository 中添加专门的查询方法
+// ProcessRetries 处理所有待重试的失败任务
+func (s *RetryService) ProcessRetries(limit int) (processed int, err error) {
+	// 获取准备好重试的失败任务
+	retryTasks, err := s.downloadRepo.GetFailedDownloadsReadyForRetry(limit)
+	if err != nil {
+		logger.Error("Failed to get failed downloads for retry", "error", err.Error())
+		return 0, err
+	}
 
-	// 临时实现：从 repository 获取并按状态过滤
-	// 注意：这里依赖 repository 实现，实际使用时需要添加相应方法
-	return nil, fmt.Errorf("not implemented: requires repository method GetFailedDownloadsReadyForRetry")
+	if len(retryTasks) == 0 {
+		return 0, nil
+	}
+
+	logger.Info("Processing failed downloads for retry", "count", len(retryTasks))
+
+	processed = 0
+	for i := range retryTasks {
+		download := &retryTasks[i]
+
+		// 再次检查是否应该重试
+		shouldRetry, reason := s.ShouldRetry(download)
+		if !shouldRetry {
+			logger.Debug("Skipping retry for download",
+				"download_id", download.ID,
+				"reason", reason,
+				"retry_count", download.RetryCount)
+			continue
+		}
+
+		// 准备重试
+		if err := s.PrepareRetry(download, "auto_retry"); err != nil {
+			logger.Error("Failed to prepare download for retry",
+				"download_id", download.ID,
+				"error", err.Error())
+			continue
+		}
+
+		processed++
+		logger.Info("Download queued for retry",
+			"download_id", download.ID,
+			"title", download.Title,
+			"retry_count", download.RetryCount,
+			"next_retry_at", download.NextRetryAt.Format("2006-01-02 15:04:05"))
+	}
+
+	return processed, nil
 }
 
 // GetRetryStats 获取重试统计
