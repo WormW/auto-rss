@@ -18,8 +18,10 @@ import (
 
 // Parser RSS 解析器接口
 type Parser interface {
-	// FetchAndParse 获取并解析 RSS Feed
+	// FetchAndParse 获取并解析 RSS Feed（使用默认30秒超时）
 	FetchAndParse(rssURL string) ([]RSSItem, error)
+	// FetchAndParseWithTimeout 获取并解析 RSS Feed（带自定义超时）
+	FetchAndParseWithTimeout(rssURL string, timeout time.Duration) ([]RSSItem, error)
 	// ExtractFansub 从标题中提取字幕组名称
 	ExtractFansub(title string) string
 	// ExtractEpisode 从标题中提取集数
@@ -89,12 +91,27 @@ func (p *parser) SetProxy(proxyURL string) error {
 	return nil
 }
 
-// FetchAndParse 获取并解析 RSS Feed
+// FetchAndParse 获取并解析 RSS Feed（使用默认30秒超时）
 func (p *parser) FetchAndParse(rssURL string) ([]RSSItem, error) {
+	return p.FetchAndParseWithTimeout(rssURL, 30*time.Second)
+}
+
+// FetchAndParseWithTimeout 获取并解析 RSS Feed（带自定义超时）
+func (p *parser) FetchAndParseWithTimeout(rssURL string, timeout time.Duration) ([]RSSItem, error) {
+	// Use default timeout if invalid (zero or negative)
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+
+	// Enforce minimum timeout of 1 second to prevent DoS (T-03-04 mitigation)
+	if timeout < 1*time.Second {
+		timeout = 1 * time.Second
+	}
+
 	fp := gofeed.NewParser()
 	fp.Client = p.httpClient
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	feed, err := fp.ParseURLWithContext(rssURL, ctx)
