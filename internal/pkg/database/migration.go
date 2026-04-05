@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/WormW/auto-rss/internal/model"
 	"gorm.io/gorm"
 )
 
@@ -87,4 +88,19 @@ func createIndexes(db *gorm.DB) error {
 // timeNow 返回当前时间戳（秒）
 func timeNow() int64 {
 	return time.Now().Unix()
+}
+
+// MigrateRSSTimeout sets default timeout for existing RSS sources
+// This migration ensures that existing RSS sources have a valid timeout value
+func MigrateRSSTimeout(db *gorm.DB) error {
+	// Set default timeout (30 seconds = 30000000000 nanoseconds) for sources with timeout = 0 or NULL
+	result := db.Model(&model.RSSSource{}).
+		Where("timeout = ? OR timeout IS NULL", 0).
+		Update("timeout", 30*time.Second)
+
+	if result.Error != nil {
+		return fmt.Errorf("failed to migrate RSS timeout: %w", result.Error)
+	}
+
+	return nil
 }
