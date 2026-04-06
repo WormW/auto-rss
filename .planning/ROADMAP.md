@@ -45,6 +45,8 @@
 | 1. Bug 修复与安全 | v1.0      | 7/7            | Complete    | 2025-04-05 |
 | 2. 代码重构       | v1.0      | 5/5            | Complete    | 2025-04-05 |
 | 3. 性能与测试     | v1.0      | 5/5            | Complete    | 2025-04-05 |
+| 5. API 限流       | v1.1      | 3/3            | Complete    | 2026-04-06 |
+| 6. WebSocket 自动重连 | v1.1  | 3/3            | Complete    | 2026-04-06 |
 
 ---
-*Last updated: 2026-04-05 after v1.0 milestone completion*
+*Last updated: 2026-04-06 after Phase 5 completion*

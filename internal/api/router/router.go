@@ -7,9 +7,11 @@ import (
 
 	"github.com/WormW/auto-rss/internal/api/handler"
 	"github.com/WormW/auto-rss/internal/api/middleware"
+	"github.com/WormW/auto-rss/internal/api/middleware/ratelimit"
 	"github.com/WormW/auto-rss/internal/app"
 	"github.com/WormW/auto-rss/internal/config"
 	"github.com/WormW/auto-rss/internal/repository"
+	"github.com/WormW/auto-rss/internal/service/auth"
 	"github.com/WormW/auto-rss/internal/service/calendar"
 	"github.com/WormW/auto-rss/internal/service/disk"
 	"github.com/WormW/auto-rss/internal/service/downloader"
@@ -29,6 +31,29 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	r.Use(middleware.Logger())
 	r.Use(middleware.Recovery())
 	r.Use(middleware.CORS())
+
+	// 初始化限流器存储
+	rateLimitStore := ratelimit.NewStore(
+		cfg.RateLimit.MaxEntries, // Default: 10000
+		cfg.RateLimit.TTL,        // Default: 1 hour
+		cfg.RateLimit.RPS,        // Default: 10.0
+		cfg.RateLimit.Burst,      // Default: 20
+	)
+
+	// 启动后台清理
+	cleanupManager := ratelimit.NewCleanupManager(rateLimitStore, 5*time.Minute)
+	cleanupManager.Start()
+
+	// 应用限流中间件（使用配置值）
+	r.Use(middleware.RateLimitWithConfig(middleware.RateLimitConfig{
+		Store:         rateLimitStore,
+		GeneralRPS:    cfg.RateLimit.RPS,
+		GeneralBurst:  cfg.RateLimit.Burst,
+		AuthRPM:       cfg.RateLimit.AuthRPM,
+		AuthBurst:     5, // 固定突发值
+		AuthPaths:     []string{"/api/v1/auth/login", "/api/v1/auth/refresh"},
+		ExcludedPaths: []string{"/health", "/api/v1/health"},
+	}))
 
 	// 静态文件服务 - 封面图片
 	r.Static("/covers", "./data/covers")
@@ -65,6 +90,10 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	downloadMonitor.SetNotificationService(notificationSvc)
 	downloadMonitor.Start(30 * time.Second)
 
+	// 初始化 JWT 服务
+	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
+	jwtService := auth.NewJWTService(cfg, refreshTokenRepo)
+
 	// 初始化处理器
 	subscriptionHandler := handler.NewSubscriptionHandler(subscriptionRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath)
 	downloadHandler := handler.NewDownloadHandler(downloadRepo, qbClient, configRepo)
@@ -75,7 +104,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	bangumiHandler := handler.NewBangumiHandler(configRepo)
 	logHandler := handler.NewLogHandler(logRepo)
 	fileOrganizerHandler := handler.NewFileOrganizerHandler(appCtx)
-	notificationHandler := handler.NewNotificationHandler(db, notificationSvc, wsHub)
+	notificationHandler := handler.NewNotificationHandler(db, notificationSvc, wsHub, jwtService)
 	calendarHandler := handler.NewCalendarHandler(subscriptionRepo, downloadRepo)
 	diskHandler := handler.NewDiskHandler(db, downloadRepo, subscriptionRepo, configRepo)
 

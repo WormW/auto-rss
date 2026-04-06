@@ -4,11 +4,21 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/spf13/viper"
 	"gorm.io/gorm"
 )
+
+// RateLimitConfig 限流配置
+type RateLimitConfig struct {
+	RPS        float64       // 每秒请求数
+	Burst      int           // 突发请求数
+	AuthRPM    int           // 认证端点每分钟请求数
+	MaxEntries int           // 最大缓存条目数
+	TTL        time.Duration // 不活跃客户端清理时间
+}
 
 // Config 应用配置
 type Config struct {
@@ -38,6 +48,16 @@ type Config struct {
 	// 文件整理配置
 	FileOrganizerEnabled bool   // 是否启用文件自动整理
 	FileOrganizerDir     string // 整理目录（监控和目标是同一目录）
+
+	// JWT配置
+	JWTSecret             string
+	JWTAccessTokenExpiry  time.Duration
+	JWTRefreshTokenExpiry time.Duration
+	JWTUsername           string
+	JWTPassword           string
+
+	// 限流配置
+	RateLimit RateLimitConfig
 }
 
 // Load 加载配置
@@ -67,6 +87,22 @@ func Load() (*Config, error) {
 		// 文件整理配置
 		FileOrganizerEnabled: getEnv("FILE_ORGANIZER_ENABLED", "false") == "true",
 		FileOrganizerDir:     getEnv("FILE_ORGANIZER_DIR", ""),
+
+		// JWT配置
+		JWTSecret:             getEnv("JWT_SECRET", "your-secret-key-change-in-production"),
+		JWTAccessTokenExpiry:  getEnvAsDuration("JWT_ACCESS_TOKEN_EXPIRY", 30*time.Minute),
+		JWTRefreshTokenExpiry: getEnvAsDuration("JWT_REFRESH_TOKEN_EXPIRY", 7*24*time.Hour),
+		JWTUsername:           getEnv("JWT_USERNAME", "admin"),
+		JWTPassword:           getEnv("JWT_PASSWORD", "admin"),
+
+		// 限流配置
+		RateLimit: RateLimitConfig{
+			RPS:        getEnvAsFloat64("RATE_LIMIT_RPS", 10.0),
+			Burst:      getEnvAsInt("RATE_LIMIT_BURST", 20),
+			AuthRPM:    getEnvAsInt("RATE_LIMIT_AUTH_RPM", 5),
+			MaxEntries: getEnvAsInt("RATE_LIMIT_MAX_ENTRIES", 10000),
+			TTL:        getEnvAsDuration("RATE_LIMIT_TTL", 1*time.Hour),
+		},
 	}
 
 	// 验证配置
@@ -104,6 +140,26 @@ func getEnvAsInt(key string, defaultValue int) int {
 	if value := os.Getenv(key); value != "" {
 		if intValue, err := strconv.Atoi(value); err == nil {
 			return intValue
+		}
+	}
+	return defaultValue
+}
+
+// getEnvAsFloat64 获取环境变量并转换为浮点数
+func getEnvAsFloat64(key string, defaultValue float64) float64 {
+	if value := os.Getenv(key); value != "" {
+		if floatValue, err := strconv.ParseFloat(value, 64); err == nil {
+			return floatValue
+		}
+	}
+	return defaultValue
+}
+
+// getEnvAsDuration 获取环境变量并转换为时间间隔
+func getEnvAsDuration(key string, defaultValue time.Duration) time.Duration {
+	if value := os.Getenv(key); value != "" {
+		if duration, err := time.ParseDuration(value); err == nil {
+			return duration
 		}
 	}
 	return defaultValue
