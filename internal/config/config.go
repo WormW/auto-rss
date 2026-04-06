@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/spf13/viper"
@@ -38,6 +39,13 @@ type Config struct {
 	// 文件整理配置
 	FileOrganizerEnabled bool   // 是否启用文件自动整理
 	FileOrganizerDir     string // 整理目录（监控和目标是同一目录）
+
+	// JWT 认证配置
+	JWTUsername             string
+	JWTPassword             string
+	JWTSecret               string
+	JWTAccessTokenExpiry    time.Duration
+	JWTRefreshTokenExpiry   time.Duration
 }
 
 // Load 加载配置
@@ -67,6 +75,13 @@ func Load() (*Config, error) {
 		// 文件整理配置
 		FileOrganizerEnabled: getEnv("FILE_ORGANIZER_ENABLED", "false") == "true",
 		FileOrganizerDir:     getEnv("FILE_ORGANIZER_DIR", ""),
+
+		// JWT 认证配置
+		JWTUsername:             getEnv("JWT_USERNAME", "admin"),
+		JWTPassword:             getEnv("JWT_PASSWORD", ""),
+		JWTSecret:               getEnv("JWT_SECRET", ""),
+		JWTAccessTokenExpiry:    30 * time.Minute,
+		JWTRefreshTokenExpiry:   7 * 24 * time.Hour,
 	}
 
 	// 验证配置
@@ -87,6 +102,12 @@ func (c *Config) Validate() error {
 	}
 	if c.ServerPort <= 0 || c.ServerPort > 65535 {
 		return fmt.Errorf("invalid SERVER_PORT: %d", c.ServerPort)
+	}
+	if c.JWTSecret == "" {
+		return fmt.Errorf("JWT_SECRET is required")
+	}
+	if c.JWTPassword == "" {
+		return fmt.Errorf("JWT_PASSWORD is required")
 	}
 	return nil
 }

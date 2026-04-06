@@ -60,7 +60,12 @@
   3. 使用refresh token可以获取新的token对，旧token被标记为已使用
   4. 并发刷新请求不会导致竞态条件或token重用问题
   5. 受保护的API端点会验证JWT token并拒绝无效请求
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 04-01-PLAN.md — Core JWT Infrastructure (config, models, service)
+- [ ] 04-02-PLAN.md — Auth Handlers (login, refresh endpoints)
+- [ ] 04-03-PLAN.md — Auth Middleware (API protection)
 
 ### Phase 5: API Rate Limiting
 **Goal**: API端点受到限流保护，防止滥用和DoS攻击
@@ -108,10 +113,10 @@
 | 1. Bug 修复与安全 | v1.0 | 7/7 | Complete | 2025-04-05 |
 | 2. 代码重构 | v1.0 | 5/5 | Complete | 2025-04-05 |
 | 3. 性能与测试 | v1.0 | 5/5 | Complete | 2025-04-05 |
-| 4. JWT Authentication Foundation | v1.1 | 0/TBD | Not started | - |
+| 4. JWT Authentication Foundation | v1.1 | 0/3 | Not started | - |
 | 5. API Rate Limiting | v1.1 | 0/TBD | Not started | - |
 | 6. WebSocket Auto-Reconnection | v1.1 | 0/TBD | Not started | - |
 | 7. Task Queue | v1.1 | 0/TBD | Not started | - |
 
 ---
-*Last updated: 2026-04-06 after v1.1 roadmap creation*
+*Last updated: 2026-04-06 after Phase 4 planning*
