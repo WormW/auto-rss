@@ -120,7 +120,7 @@
                         <n-icon :class="{ 'spin-animation': wsStore.status === 'connecting' }">
                           <WifiOutline v-if="wsStore.status === 'connected'" />
                           <RefreshOutline v-else-if="wsStore.status === 'connecting'" />
-                          <WifiOffOutline v-else />
+                          <CloudOfflineOutline v-else />
                         </n-icon>
                       </template>
                       {{ wsStore.statusText }}
@@ -231,7 +231,7 @@ import {
   PersonOutline,
   MenuOutline,
   WifiOutline,
-  WifiOffOutline,
+  CloudOfflineOutline,
   RefreshOutline
 } from '@vicons/ionicons5'
 import TaskManager from './components/TaskManager.vue'
