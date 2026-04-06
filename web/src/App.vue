@@ -107,6 +107,52 @@
               <n-space align="center" size="large">
                 <TaskManager />
 
+                <!-- WebSocket Connection Status Indicator -->
+                <n-tooltip v-if="wsStore.status !== 'connected'" placement="bottom">
+                  <template #trigger>
+                    <n-tag
+                      :type="connectionTagType"
+                      size="small"
+                      style="cursor: pointer;"
+                      @click="handleReconnect"
+                    >
+                      <template #icon>
+                        <n-icon :class="{ 'spin-animation': wsStore.status === 'connecting' }">
+                          <WifiOutline v-if="wsStore.status === 'connected'" />
+                          <RefreshOutline v-else-if="wsStore.status === 'connecting'" />
+                          <WifiOffOutline v-else />
+                        </n-icon>
+                      </template>
+                      {{ wsStore.statusText }}
+                    </n-tag>
+                  </template>
+                  <div v-if="wsStore.status === 'connecting'">
+                    正在尝试重新连接... (第 {{ wsStore.reconnectAttempt }} 次)<br>
+                    下次重试: {{ Math.ceil(wsStore.nextReconnectDelay / 1000) }} 秒后
+                  </div>
+                  <div v-else-if="wsStore.lastError">
+                    错误: {{ wsStore.lastError }}
+                  </div>
+                  <div v-else>
+                    点击重新连接
+                  </div>
+                </n-tooltip>
+
+                <!-- Manual Reconnect Button (when disconnected and not connecting) -->
+                <n-button
+                  v-if="wsStore.canReconnect"
+                  size="small"
+                  secondary
+                  type="warning"
+                  @click="handleReconnect"
+                  :loading="wsStore.status === 'connecting'"
+                >
+                  <template #icon>
+                    <n-icon><RefreshOutline /></n-icon>
+                  </template>
+                  重新连接
+                </n-button>
+
                 <n-button circle secondary @click="toggleTheme" style="transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);">
                   <template #icon>
                     <n-icon style="transition: transform 0.3s ease;">
@@ -144,7 +190,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, h, onMounted, onUnmounted } from 'vue'
+import { ref, computed, h, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
   NConfigProvider,
@@ -162,6 +208,8 @@ import {
   NDropdown,
   NDrawer,
   NDrawerContent,
+  NTag,
+  NTooltip,
   darkTheme,
   zhCN,
   dateZhCN
@@ -181,12 +229,46 @@ import {
   Leaf,
   LogOutOutline,
   PersonOutline,
-  MenuOutline
+  MenuOutline,
+  WifiOutline,
+  WifiOffOutline,
+  RefreshOutline
 } from '@vicons/ionicons5'
 import TaskManager from './components/TaskManager.vue'
+import { useWebSocketStore } from './stores/websocket'
+import { createWebSocketService, WebSocketService } from './services/websocket'
 
 const router = useRouter()
 const route = useRoute()
+
+// WebSocket store and service
+const wsStore = useWebSocketStore()
+const wsService = ref<WebSocketService | null>(null)
+const token = ref<string>('')
+
+// Computed property for connection status tag type
+const connectionTagType = computed(() => {
+  switch (wsStore.status) {
+    case 'connected':
+      return 'success'
+    case 'connecting':
+      return 'warning'
+    case 'disconnected':
+    case 'error':
+    case 'max_retries_exceeded':
+      return 'error'
+    default:
+      return 'default'
+  }
+})
+
+// Handle manual reconnect
+const handleReconnect = () => {
+  if (wsService.value && wsStore.canReconnect) {
+    console.log('[App] Manual reconnect triggered')
+    wsService.value.reconnect()
+  }
+}
 
 // Theme logic
 const storedTheme = localStorage.getItem('theme')
@@ -416,6 +498,20 @@ const handleUserSelect = (key: string) => {
   }
   50% {
     transform: translateY(-10px);
+  }
+}
+
+/* Spin animation for connecting state */
+.spin-animation {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
   }
 }
 </style>
