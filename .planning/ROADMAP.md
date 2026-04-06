@@ -77,7 +77,12 @@ Plans:
   3. 超限时返回429状态码和Retry-After头
   4. 不活跃客户端的限流数据1小时后自动清理
   5. 限流器内存使用有上限，不会无限增长
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [x] 05-01-PLAN.md — Core Rate Limiter (token bucket, storage, cleanup)
+- [ ] 05-02-PLAN.md — Middleware Integration (Gin middleware, router mounting)
+- [ ] 05-03-PLAN.md — Configuration and Headers (env config, X-RateLimit headers)
 
 ### Phase 6: WebSocket Auto-Reconnection
 **Goal**: WebSocket连接断开后能够自动重连，保证实时通知的可靠性
@@ -114,9 +119,9 @@ Plans:
 | 2. 代码重构 | v1.0 | 5/5 | Complete | 2025-04-05 |
 | 3. 性能与测试 | v1.0 | 5/5 | Complete | 2025-04-05 |
 | 4. JWT Authentication Foundation | v1.1 | 0/3 | Not started | - |
-| 5. API Rate Limiting | v1.1 | 0/TBD | Not started | - |
+| 5. API Rate Limiting | v1.1 | 0/3 | Not started | - |
 | 6. WebSocket Auto-Reconnection | v1.1 | 0/TBD | Not started | - |
 | 7. Task Queue | v1.1 | 0/TBD | Not started | - |
 
 ---
-*Last updated: 2026-04-06 after Phase 4 planning*
+*Last updated: 2026-04-06 after Phase 5 planning*

@@ -55,12 +55,15 @@ Auto-RSS 是一个自动化动漫下载系统，已完成技术债务清理，�
 - ✓ PERF-01~PERF-03: 性能优化（N+1、分页、RSS超时）— v1.0
 - ✓ TEST-01~TEST-06: 测试覆盖提升 — v1.0
 
+### Validated (v1.1)
+
+- ✓ SEC-03: JWT 认证系统 — Phase 04
+- ✓ SEC-04: API 限流保护 — Phase 05
+
 ### Active (v1.1)
 
 - [ ] INF-02: WebSocket 自动重连机制
 - [ ] INF-03: 任务队列支持（多并发任务）
-- [ ] SEC-03: JWT 认证系统
-- [ ] SEC-04: API 限流保护
 
 ### Future (v1.2+)
 
@@ -137,4 +140,4 @@ This document evolves at phase transitions and milestone boundaries.
 
 ---
 
-*Last updated: 2026-04-06 after starting v1.1 milestone*
+*Last updated: 2026-04-06 after Phase 05 (API Rate Limiting) complete*
