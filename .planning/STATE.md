@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: 基础设施增强
-status: defining requirements
+status: roadmap_created
 last_updated: "2026-04-06T12:00:00.000Z"
 progress:
-  total_phases: 0
+  total_phases: 4
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -23,18 +23,29 @@ progress:
 ```
 v1.1 Milestone: ○○○○○○○○○○ 0%
 
-Status: Defining requirements
+Phases: 0/4 complete
+Plans: 0/TBD complete
 ```
 
 ## Current Position
 
-**Phase:** Not started (defining requirements)  
+**Phase:** Not started  
 **Plan:** —  
-**Status:** Defining requirements  
-**Last activity:** 2026-04-06 — Milestone v1.1 started
+**Status:** Roadmap created, awaiting phase planning  
+**Last activity:** 2026-04-06 — v1.1 roadmap created
+
+## Phase Status
+
+| Phase | Status | Plans | Complete |
+|-------|--------|-------|----------|
+| 4. JWT Authentication Foundation | Not started | TBD | 0% |
+| 5. API Rate Limiting | Not started | TBD | 0% |
+| 6. WebSocket Auto-Reconnection | Not started | TBD | 0% |
+| 7. Task Queue | Not started | TBD | 0% |
 
 ## Recent Activity
 
+- 2026-04-06: Created v1.1 roadmap with phases 4-7
 - 2026-04-06: Started v1.1 milestone planning
 - 2026-04-06: Cleared phase directories from v1.0
 - 2026-04-05: v1.0 milestone archived
@@ -43,7 +54,7 @@ Status: Defining requirements
 
 See: `.planning/PROJECT.md` (updated 2026-04-06)
 
-**Core value:** 修复关键 Bug 和安全问题，提升代码可维护性  
+**Core value:** 添加核心基础设施功能，提升系统稳定性和安全性  
 **Current focus:** v1.1 基础设施增强 — JWT认证、API限流、WebSocket重连、任务队列
 
 ## Decisions Log
@@ -57,6 +68,11 @@ See: `.planning/PROJECT.md` (updated 2026-04-06)
 | 2026-04-05 | CompletionHandler interface with HandleComplete method | Per D-04 interface design pattern |
 | 2026-04-05 | Nil DB handling in completion handler | Enable testing without real database |
 | 2026-04-05 | Helper functions kept at package level | mapQBStateToStatus reused across services |
+| 2026-04-06 | Phase 4-7 for v1.1 | Continue numbering from v1.0 (ended at Phase 3) |
+| 2026-04-06 | JWT first (Phase 4) | Foundation feature, no dependencies |
+| 2026-04-06 | Rate limiting after auth (Phase 5) | Protects auth endpoints |
+| 2026-04-06 | WebSocket reconnection (Phase 6) | Client-side only, independent |
+| 2026-04-06 | Task queue last (Phase 7) | Most complex, requires careful SQLite handling |
 
 ## Blockers
 
@@ -64,9 +80,10 @@ None
 
 ## Notes
 
-- v1.1 milestone started
-- Phase directories cleared, ready for new roadmap
-- Next: Define requirements → Create roadmap
+- v1.1 roadmap created with 4 phases (4-7)
+- 16 requirements mapped to phases (AUTH-01~04, RATE-01~04, WS-01~04, QUEUE-01~04)
+- Research findings incorporated into phase structure
+- Next: Plan Phase 4 (JWT Authentication Foundation)
 
 ---
-*State updated: 2026-04-06 after starting v1.1 milestone*
+*State updated: 2026-04-06 after v1.1 roadmap creation*
