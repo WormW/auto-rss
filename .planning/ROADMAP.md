@@ -63,9 +63,9 @@
 **Plans**: 3 plans
 
 Plans:
-- [ ] 04-01-PLAN.md — Core JWT Infrastructure (config, models, service)
-- [ ] 04-02-PLAN.md — Auth Handlers (login, refresh endpoints)
-- [ ] 04-03-PLAN.md — Auth Middleware (API protection)
+- [x] 04-01-PLAN.md — Core JWT Infrastructure (config, models, service)
+- [x] 04-02-PLAN.md — Auth Handlers (login, refresh endpoints)
+- [x] 04-03-PLAN.md — Auth Middleware (API protection)
 
 ### Phase 5: API Rate Limiting
 **Goal**: API端点受到限流保护，防止滥用和DoS攻击
