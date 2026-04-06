@@ -1,70 +1,63 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
-milestone_name: 技术债务清理
-status: v1.0 milestone complete
-last_updated: "2026-04-05T12:00:00.000Z"
+milestone: v1.1
+milestone_name: infrastructure-enhancement
+status: In Progress
+last_updated: "2026-04-06T19:55:00.000Z"
 progress:
-  total_phases: 3
-  completed_phases: 3
-  total_plans: 17
-  completed_plans: 17
-  percent: 100
+  total_phases: 2
+  completed_phases: 1
+  total_plans: 6
+  completed_plans: 3
+  percent: 50
 ---
 
 # Project State: Auto-RSS
 
 **Project:** Auto-RSS  
-**Milestone:** v1.0 技术债务清理 — **COMPLETE** ✅  
-**Last Updated:** 2026-04-05
+**Milestone:** v1.1 基础设施增强 — **IN PROGRESS** 🚧  
+**Last Updated:** 2026-04-06
 
 ## Progress Overview
 
 ```
-v1.0 Milestone: ████████████████████ 100%
+v1.1 Milestone: ██████████░░░░░░░░░░ 50%
 
-Phase 1 (Bug修复):  ████████████████████ 100% | 7 plans complete
-Phase 2 (重构):      ████████████████████ 100% | 5 plans complete  
-Phase 3 (性能测试):  ████████████████████ 100% | 5 plans complete
+Phase 5 (API Rate Limiting):       ░░░░░░░░░░░░░░░░░░░░ 0% | 3 plans pending
+Phase 6 (WebSocket Auto-Reconnect): ████████████████████ 100% | 3 plans complete
 ```
 
 ## Current Status
 
-**✅ v1.0 技术债务清理 — SHIPPED 2026-04-05**
+**🚧 v1.1 基础设施增强 — IN PROGRESS**
 
-All 17 plans completed across 3 phases:
-- 7 Bug fixes and security patches
-- 5 Refactoring plans (10 services extracted)
-- 5 Performance and testing plans
+| Phase | Status | Plans | Summary |
+|-------|--------|-------|---------|
+| 05-api-rate-limiting | ⏸️ On Hold | 0/3 | JWT基础完成后继续 |
+| 06-websocket-auto-reconnection | ✅ Complete | 3/3 | JWT认证 + 自动重连 + Vue集成 |
 
 ## Recent Activity
 
-- 2026-04-05: v1.0 milestone archived to `.planning/milestones/`
-- 2026-04-05: All 17 plans completed and summarized
-- 2026-04-05: Git tag v1.0 created
-- 2025-04-05: Phase 3 execution completed
-- 2025-04-05: Phase 2 execution completed
-- 2025-04-05: Phase 1 execution completed
+- 2026-04-06: Phase 6 (WebSocket) execution completed — 3 plans, JWT auth + auto-reconnection + Vue integration
+- 2026-04-06: Phase 6 verification passed (16/16 must-haves)
+- 2026-04-06: WebSocket service with exponential backoff (1s→30s), jitter, message buffering deployed
+- 2026-04-05: v1.0 milestone archived
 
-## Project Reference
+## What's Next
 
-See: `.planning/PROJECT.md` (updated 2026-04-05)
-See: `.planning/MILESTONES.md` for full v1.0 accomplishments
-
-**Core value:** 修复关键 Bug 和安全问题，提升代码可维护性
-**Current focus:** Planning next milestone (v1.1)
+Phase 05 (API Rate Limiting) has 3 plans ready to execute:
+- 05-01: Token bucket rate limiter implementation
+- 05-02: Middleware integration
+- 05-03: Configuration and error handling
 
 ## Decisions Log
 
 | Date | Decision | Reason |
 |------|----------|--------|
-| 2025-04-05 | 分三阶段清理 | 降低风险，每阶段可验证 |
-| 2025-04-05 | 先修复后重构 | 避免在不稳定基础上改动 |
-| 2025-04-05 | 保持向后兼容 | 不影响现有用户使用 |
-| 2026-04-05 | StatusSync interface with Sync, UpdateStatus, Reconcile methods | Per D-04 interface design pattern |
-| 2026-04-05 | CompletionHandler interface with HandleComplete method | Per D-04 interface design pattern |
-| 2026-04-05 | Nil DB handling in completion handler | Enable testing without real database |
-| 2026-04-05 | Helper functions kept at package level | mapQBStateToStatus reused across services |
+| 2026-04-06 | JWT token via query param for WebSocket | Header not available during WebSocket upgrade |
+| 2026-04-06 | Exponential backoff with ±50% jitter | Avoid thundering herd on server restart |
+| 2026-04-06 | Message buffer max 100, TTL 5min | Balance memory vs reliability |
+| 2026-04-06 | Page visibility triggers reconnect | Immediate UX improvement |
 
 ## Blockers
 
@@ -72,9 +65,9 @@ None
 
 ## Notes
 
-- v1.0 milestone archived: `.planning/milestones/v1.0-ROADMAP.md`
-- Phase directories preserved in `.planning/phases/`
-- Ready to start v1.1 milestone planning
+- Phase 6 VERIFICATION.md: `.planning/phases/06-websocket-auto-reconnection/06-VERIFICATION.md`
+- All WebSocket features tested and verified
+- Ready to resume Phase 05 or start new work
 
 ---
-*State updated: 2026-04-05 after v1.0 milestone completion*
+*State updated: 2026-04-06 after Phase 6 completion*
