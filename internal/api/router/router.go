@@ -7,6 +7,7 @@ import (
 
 	"github.com/WormW/auto-rss/internal/api/handler"
 	"github.com/WormW/auto-rss/internal/api/middleware"
+	"github.com/WormW/auto-rss/internal/api/middleware/ratelimit"
 	"github.com/WormW/auto-rss/internal/app"
 	"github.com/WormW/auto-rss/internal/config"
 	"github.com/WormW/auto-rss/internal/repository"
@@ -30,6 +31,21 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	r.Use(middleware.Logger())
 	r.Use(middleware.Recovery())
 	r.Use(middleware.CORS())
+
+	// 初始化限流器存储
+	rateLimitStore := ratelimit.NewStore(
+		ratelimit.DefaultMaxEntries, // 10000
+		ratelimit.DefaultTTL,        // 1 hour
+		10.0,                        // General RPS
+		20,                          // General burst
+	)
+
+	// 启动后台清理
+	cleanupManager := ratelimit.NewCleanupManager(rateLimitStore, 5*time.Minute)
+	cleanupManager.Start()
+
+	// 应用限流中间件（在认证之前，防止认证计算资源被耗尽）
+	r.Use(middleware.RateLimit(rateLimitStore))
 
 	// 静态文件服务 - 封面图片
 	r.Static("/covers", "./data/covers")
