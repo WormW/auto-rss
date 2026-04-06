@@ -43,7 +43,6 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	configRepo := repository.NewConfigRepository(db)
 	rssSourceRepo := repository.NewRSSSourceRepository(db)
 	logRepo := repository.NewLogRepository(db)
-	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
 
 	// 初始化调度器
 	rssScheduler := scheduler.NewScheduler(db, subscriptionRepo, downloadRepo, configRepo, cfg.RSSInterval, rssParser, qbClient)
@@ -51,9 +50,6 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	// 初始化通知服务
 	notificationSvc := notification.NewService(db)
 	wsHub := notificationSvc.GetWebSocketHub()
-
-	// 初始化JWT认证服务
-	jwtService := auth.NewJWTService(cfg, refreshTokenRepo)
 
 	// 初始化日历服务
 	calendarSvc := calendar.NewCalendar(subscriptionRepo, downloadRepo)
