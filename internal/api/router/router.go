@@ -23,7 +23,7 @@ import (
 )
 
 // Setup 设置路由
-func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClient, appCtx *app.Context) *gin.Engine {
+func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClient, appCtx *app.Context, jwtService auth.JWTService) *gin.Engine {
 	r := gin.New()
 
 	// 应用中间件
@@ -85,17 +85,30 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	diskHandler := handler.NewDiskHandler(db, downloadRepo, subscriptionRepo, configRepo)
 	authHandler := handler.NewAuthHandler(cfg, jwtService)
 
-	// API v1 路由组
-	v1 := r.Group("/api/v1")
-	{
-		// 认证路由（公开，无需认证）
-		auth := v1.Group("/auth")
-		{
-			auth.POST("/login", authHandler.Login)
-			auth.POST("/refresh", authHandler.Refresh)
-			auth.POST("/logout", authHandler.Logout)
-		}
+	// 认证中间件（用于保护路由）
+	authMiddleware := middleware.AuthMiddleware(jwtService)
 
+	// API v1 公开路由（无需认证）
+	v1Public := r.Group("/api/v1")
+	{
+		// 健康检查
+		v1Public.GET("/health", func(c *gin.Context) {
+			c.JSON(200, gin.H{"status": "ok"})
+		})
+	}
+
+	// 认证路由（公开）
+	v1Auth := r.Group("/api/v1/auth")
+	{
+		v1Auth.POST("/login", authHandler.Login)
+		v1Auth.POST("/refresh", authHandler.Refresh)
+		v1Auth.POST("/logout", authHandler.Logout)
+	}
+
+	// API v1 受保护路由（需要认证）
+	v1 := r.Group("/api/v1")
+	v1.Use(authMiddleware)
+	{
 		// Mikan 搜索
 		mikan := v1.Group("/mikan")
 		{

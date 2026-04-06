@@ -15,6 +15,7 @@ import (
 	"github.com/WormW/auto-rss/internal/pkg/database"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/repository"
+	"github.com/WormW/auto-rss/internal/service/auth"
 	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/gin-gonic/gin"
@@ -80,6 +81,10 @@ func main() {
 	downloadRepo := repository.NewDownloadRepository(db)
 	subscriptionRepo := repository.NewSubscriptionRepository(db)
 	configRepo := repository.NewConfigRepository(db)
+	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
+
+	// 初始化JWT服务
+	jwtService := auth.NewJWTService(cfg, refreshTokenRepo)
 
 	// 初始化 qBittorrent 客户端
 	qbClient := downloader.NewQBittorrentClient()
@@ -143,8 +148,8 @@ func main() {
 		}
 	}
 
-	// 初始化路由（传递应用上下文）
-	r := router.Setup(db, cfg, qbClient, appCtx)
+	// 初始化路由（传递应用上下文和JWT服务）
+	r := router.Setup(db, cfg, qbClient, appCtx, jwtService)
 
 	// 优雅关闭
 	quit := make(chan os.Signal, 1)
