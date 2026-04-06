@@ -10,6 +10,7 @@ import (
 	"github.com/WormW/auto-rss/internal/app"
 	"github.com/WormW/auto-rss/internal/config"
 	"github.com/WormW/auto-rss/internal/repository"
+	"github.com/WormW/auto-rss/internal/service/auth"
 	"github.com/WormW/auto-rss/internal/service/calendar"
 	"github.com/WormW/auto-rss/internal/service/disk"
 	"github.com/WormW/auto-rss/internal/service/downloader"
@@ -42,6 +43,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	configRepo := repository.NewConfigRepository(db)
 	rssSourceRepo := repository.NewRSSSourceRepository(db)
 	logRepo := repository.NewLogRepository(db)
+	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
 
 	// 初始化调度器
 	rssScheduler := scheduler.NewScheduler(db, subscriptionRepo, downloadRepo, configRepo, cfg.RSSInterval, rssParser, qbClient)
@@ -49,6 +51,9 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	// 初始化通知服务
 	notificationSvc := notification.NewService(db)
 	wsHub := notificationSvc.GetWebSocketHub()
+
+	// 初始化JWT认证服务
+	jwtService := auth.NewJWTService(cfg, refreshTokenRepo)
 
 	// 初始化日历服务
 	calendarSvc := calendar.NewCalendar(subscriptionRepo, downloadRepo)
@@ -78,10 +83,19 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	notificationHandler := handler.NewNotificationHandler(db, notificationSvc, wsHub)
 	calendarHandler := handler.NewCalendarHandler(subscriptionRepo, downloadRepo)
 	diskHandler := handler.NewDiskHandler(db, downloadRepo, subscriptionRepo, configRepo)
+	authHandler := handler.NewAuthHandler(cfg, jwtService)
 
 	// API v1 路由组
 	v1 := r.Group("/api/v1")
 	{
+		// 认证路由（公开，无需认证）
+		auth := v1.Group("/auth")
+		{
+			auth.POST("/login", authHandler.Login)
+			auth.POST("/refresh", authHandler.Refresh)
+			auth.POST("/logout", authHandler.Logout)
+		}
+
 		// Mikan 搜索
 		mikan := v1.Group("/mikan")
 		{
