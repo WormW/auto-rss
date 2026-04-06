@@ -2,55 +2,66 @@
 
 ## Current State
 
-**Shipped:** v1.0 技术债务清理 (2026-04-05)
+**Shipped:** v1.1 基础设施增强 (2026-04-06)
 
-Auto-RSS 是一个自动化动漫下载系统，已完成技术债务清理，系统稳定可靠运行。
+Auto-RSS 是一个自动化动漫下载系统，已完成基础设施增强，具备 JWT 认证、API 限流和 WebSocket 自动重连能力。
 
 **Stats:**
-- 代码库：~25,585 行 Go 代码
-- 测试覆盖：Handler 层、Service 层、文件操作、并发安全
-- 架构：服务化设计，10个独立服务组件
+- 代码库：~27,000 行 Go 代码
+- 测试覆盖：Handler 层、Service 层、文件操作、并发安全、限流、WebSocket
+- 架构：服务化设计，10+ 独立服务组件
 
 ---
 
 ## What This Is
 
-对 Auto-RSS 项目进行系统性的技术债务清理后的稳定版本，修复了已知 Bug、安全漏洞，重构了臃肿代码，为后续功能开发奠定稳固基础。
+基于 v1.0 技术债务清理成果，进一步增强基础设施：实现 JWT 认证系统保护 API 安全，添加 Token Bucket 限流防止 API 滥用，WebSocket 自动重连确保实时通知可靠性。系统现在更安全、更稳定、更可靠。
+
+<details>
+<summary>v1.0 技术债务清理 (Archived)</summary>
+
+对 Auto-RSS 项目进行系统性的技术债务清理，修复了已知 Bug、安全漏洞，重构了臃肿代码。
+
+**Key Deliverables:**
+- 7 个关键 Bug 修复
+- 10 个服务组件重构
+- 性能优化 (N+1 查询、分页、RSS 超时)
+- 测试覆盖提升
+
+</details>
 
 ## Core Value
 
-修复关键 Bug 和安全问题，让系统稳定可靠运行，同时提升代码可维护性。
+让 Auto-RSS 成为一个安全、稳定、可靠的自动化下载系统，具备良好的可维护性和扩展性。
 
 ---
 
 ## Requirements
 
-### Validated (v1.0)
+### Validated (v1.1)
 
 - ✓ 基础 RSS 订阅和下载功能 — 现有
 - ✓ qBittorrent 集成 — 现有
 - ✓ Bangumi 元数据获取 — 现有
 - ✓ Web UI 订阅管理 — 现有
 - ✓ 文件自动整理 — 现有
-- ✓ BUG-01: 下载重试逻辑修复 — v1.0
-- ✓ BUG-02: 日历下载状态修复 — v1.0
-- ✓ BUG-03: 磁盘监控暂停功能 — v1.0
-- ✓ BUG-04: Task Manager 竞态条件修复 — v1.0
-- ✓ BUG-05: 文件移动事务保护 — v1.0
-- ✓ SEC-01: 路径遍历防护 — v1.0
-- ✓ SEC-02: SQL 注入审计 — v1.0
-- ✓ REF-01~REF-10: 代码重构，提取 10 个服务 — v1.0
-- ✓ PERF-01~PERF-03: 性能优化（N+1、分页、RSS超时）— v1.0
-- ✓ TEST-01~TEST-06: 测试覆盖提升 — v1.0
+- ✓ BUG-01~BUG-05: 关键 Bug 修复 — v1.0
+- ✓ SEC-01~SEC-02: 安全防护 — v1.0
+- ✓ REF-01~REF-10: 代码重构 — v1.0
+- ✓ PERF-01~PERF-03: 性能优化 — v1.0
+- ✓ TEST-01~TEST-06: 测试覆盖 — v1.0
+- ✓ SEC-03: JWT 认证系统 — v1.1
+- ✓ SEC-04: API 限流保护 — v1.1
+- ✓ INF-02: WebSocket 自动重连机制 — v1.1
 
 ### Active (Next Milestone)
 
 - [ ] INF-01: Plex/Jellyfin 完整集成实现
-- [ ] INF-02: WebSocket 自动重连机制
 - [ ] INF-03: 任务队列支持（多并发任务）
 - [ ] INF-04: 数据库迁移至 PostgreSQL
-- [ ] SEC-03: 添加 JWT 认证系统
-- [ ] SEC-04: API 限流保护
+- [ ] FEAT-01: 更多下载器支持 (Transmission, Aria2)
+- [ ] FEAT-02: 通知渠道扩展 (Telegram, Discord)
+- [ ] FEAT-03: 高级过滤规则引擎
 
 ### Out of Scope
 
@@ -64,7 +75,14 @@ Auto-RSS 是一个自动化动漫下载系统，已完成技术债务清理，�
 
 ## Context
 
-### v1.0 技术债务清理成果
+### v1.1 基础设施增强成果
+
+1. **认证系统**：JWT access/refresh token 双令牌机制，支持登录/刷新/登出
+2. **API 限流**：Token bucket 算法，IP-based 限流，防止 API 滥用
+3. **WebSocket 增强**：自动重连、指数退避、消息缓冲、连接状态管理
+4. **配置扩展**：环境变量支持所有限流参数，灵活可调
+
+### v1.0 技术债务清理成果 (Archived)
 
 1. **功能缺陷修复**：所有关键 TODO 已实现（磁盘暂停、重试机制等）
 2. **代码结构优化**：单个文件从 2000+ 行降至 < 800 行
@@ -94,24 +112,33 @@ Auto-RSS 是一个自动化动漫下载系统，已完成技术债务清理，�
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
+| JWT via query param for WebSocket | Header unavailable during upgrade | ✓ 成功 — Working well |
+| Exponential backoff with ±50% jitter | Avoid thundering herd on server restart | ✓ 成功 — 有效分散重连请求 |
+| IP-based rate limiting | Simple and effective | ✓ 成功 — Per-IP isolation |
+| LRU eviction at 10k entries | Memory bound for safety | ✓ 成功 — Safe memory usage |
+| Token bucket algorithm | Industry standard, well-tested library | ✓ 成功 — golang.org/x/time/rate |
 | 分阶段清理 | 降低风险，每阶段可验证 | ✓ 成功 — 3 阶段顺利完成 |
 | 先修复后重构 | 避免在不稳定基础上改动 | ✓ 成功 — Bug 修复为基础 |
 | 保持向后兼容 | 不影响现有用户使用 | ✓ 成功 — API 行为不变 |
-| StatusSync interface | Per D-04 interface design pattern | ✓ 成功 — 测试性提升 |
-| CompletionHandler interface | Per D-04 interface design pattern | ✓ 成功 — 可测试性提升 |
-| Nil DB handling | Enable testing without real database | ✓ 成功 — 测试覆盖率提升 |
 
 ---
 
 ## Next Milestone Goals
 
-**v1.1 基础设施增强**
+**v1.2 功能扩展**
 
-1. 添加 JWT 认证系统（SEC-03）
-2. 实现 API 限流保护（SEC-04）
-3. 添加 WebSocket 自动重连机制（INF-02）
-4. 优化任务队列支持（INF-03）
+1. Plex/Jellyfin 完整集成实现（INF-01）
+2. 任务队列支持多并发任务（INF-03）
+3. 支持更多下载器（Transmission、Aria2）
+4. 通知渠道扩展（Telegram、Discord）
+5. 高级过滤规则引擎
+
+**v2.0 架构升级（Future）**
+
+1. 数据库迁移至 PostgreSQL（INF-04）
+2. 多用户支持
+3. 插件系统架构
 
 ---
 
-*Last updated: 2026-04-05 after v1.0 milestone completion*
+*Last updated: 2026-04-06 after v1.1 milestone completion*

@@ -2,7 +2,7 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: infrastructure-enhancement
-status: In Progress
+status: Complete
 last_updated: "2026-04-06T19:55:00.000Z"
 progress:
   total_phases: 2
@@ -15,7 +15,7 @@ progress:
 # Project State: Auto-RSS
 
 **Project:** Auto-RSS  
-**Milestone:** v1.1 基础设施增强 — **IN PROGRESS** 🚧  
+**Milestone:** v1.1 基础设施增强 — **COMPLETE** ✅  
 **Last Updated:** 2026-04-06
 
 ## Progress Overview
@@ -47,9 +47,14 @@ Phase 6 (WebSocket Auto-Reconnect): ██████████████�
 
 ## What's Next
 
-**v1.1 基础设施增强里程碑完成！**
+**v1.1 基础设施增强里程碑已归档！**
 
-两个 phase 全部完成，建议执行 `/gsd-complete-milestone` 来归档 v1.1。
+归档文件：
+- `.planning/milestones/v1.1-ROADMAP.md`
+- `.planning/milestones/v1.1-REQUIREMENTS.md`
+
+开始下一个里程碑：
+- 执行 `/gsd-new-milestone` 规划 v1.2 功能扩展
 
 ## Decisions Log
 

@@ -3,6 +3,7 @@
 ## Milestones
 
 - **v1.0 技术债务清理** — Phases 1-3 (shipped 2026-04-05) — [详情](milestones/v1.0-ROADMAP.md)
+- **v1.1 基础设施增强** — Phases 5-6 (shipped 2026-04-06) — [详情](milestones/v1.1-ROADMAP.md)
 
 ---
 
@@ -36,6 +37,21 @@
 
 </details>
 
+<details>
+<summary>✅ v1.1 基础设施增强 (Phases 5-6) — SHIPPED 2026-04-06</summary>
+
+### Phase 5: API 限流 (3 plans)
+- [x] 05-01: Token bucket rate limiter — completed 2026-04-06
+- [x] 05-02: Middleware integration — completed 2026-04-06
+- [x] 05-03: Configuration support — completed 2026-04-06
+
+### Phase 6: WebSocket 自动重连 (3 plans)
+- [x] 06-01: JWT authentication for WebSocket — completed 2026-04-06
+- [x] 06-02: WebSocket service with reconnection — completed 2026-04-06
+- [x] 06-03: Vue.js integration — completed 2026-04-06
+
+</details>
+
 ---
 
 ## Progress
@@ -47,6 +63,7 @@
 | 3. 性能与测试     | v1.0      | 5/5            | Complete    | 2025-04-05 |
 | 5. API 限流       | v1.1      | 3/3            | Complete    | 2026-04-06 |
 | 6. WebSocket 自动重连 | v1.1  | 3/3            | Complete    | 2026-04-06 |
+| 7. [Next]         | v1.2      | -              | Planned     | -          |
 
 ---
 *Last updated: 2026-04-06 after Phase 5 completion*
