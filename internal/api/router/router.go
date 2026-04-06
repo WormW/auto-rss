@@ -7,11 +7,9 @@ import (
 
 	"github.com/WormW/auto-rss/internal/api/handler"
 	"github.com/WormW/auto-rss/internal/api/middleware"
-	"github.com/WormW/auto-rss/internal/api/middleware/ratelimit"
 	"github.com/WormW/auto-rss/internal/app"
 	"github.com/WormW/auto-rss/internal/config"
 	"github.com/WormW/auto-rss/internal/repository"
-	"github.com/WormW/auto-rss/internal/service/auth"
 	"github.com/WormW/auto-rss/internal/service/calendar"
 	"github.com/WormW/auto-rss/internal/service/disk"
 	"github.com/WormW/auto-rss/internal/service/downloader"
@@ -24,36 +22,13 @@ import (
 )
 
 // Setup 设置路由
-func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClient, appCtx *app.Context, jwtService auth.JWTService) *gin.Engine {
+func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClient, appCtx *app.Context) *gin.Engine {
 	r := gin.New()
 
 	// 应用中间件
 	r.Use(middleware.Logger())
 	r.Use(middleware.Recovery())
 	r.Use(middleware.CORS())
-
-	// 初始化限流器存储
-	rateLimitStore := ratelimit.NewStore(
-		cfg.RateLimit.MaxEntries, // Default: 10000
-		cfg.RateLimit.TTL,        // Default: 1 hour
-		cfg.RateLimit.RPS,        // Default: 10.0
-		cfg.RateLimit.Burst,      // Default: 20
-	)
-
-	// 启动后台清理
-	cleanupManager := ratelimit.NewCleanupManager(rateLimitStore, 5*time.Minute)
-	cleanupManager.Start()
-
-	// 应用限流中间件（在认证之前，防止认证计算资源被耗尽）
-	r.Use(middleware.RateLimitWithConfig(middleware.RateLimitConfig{
-		Store:         rateLimitStore,
-		GeneralRPS:    cfg.RateLimit.RPS,
-		GeneralBurst:  cfg.RateLimit.Burst,
-		AuthRPM:       cfg.RateLimit.AuthRPM,
-		AuthBurst:     5, // Fixed burst for auth
-		AuthPaths:     []string{"/api/v1/auth/login", "/api/v1/auth/refresh"},
-		ExcludedPaths: []string{"/health", "/api/v1/health"},
-	}))
 
 	// 静态文件服务 - 封面图片
 	r.Static("/covers", "./data/covers")
@@ -103,31 +78,9 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	notificationHandler := handler.NewNotificationHandler(db, notificationSvc, wsHub)
 	calendarHandler := handler.NewCalendarHandler(subscriptionRepo, downloadRepo)
 	diskHandler := handler.NewDiskHandler(db, downloadRepo, subscriptionRepo, configRepo)
-	authHandler := handler.NewAuthHandler(cfg, jwtService)
 
-	// 认证中间件（用于保护路由）
-	authMiddleware := middleware.AuthMiddleware(jwtService)
-
-	// API v1 公开路由（无需认证）
-	v1Public := r.Group("/api/v1")
-	{
-		// 健康检查
-		v1Public.GET("/health", func(c *gin.Context) {
-			c.JSON(200, gin.H{"status": "ok"})
-		})
-	}
-
-	// 认证路由（公开）
-	v1Auth := r.Group("/api/v1/auth")
-	{
-		v1Auth.POST("/login", authHandler.Login)
-		v1Auth.POST("/refresh", authHandler.Refresh)
-		v1Auth.POST("/logout", authHandler.Logout)
-	}
-
-	// API v1 受保护路由（需要认证）
+	// API v1 路由组
 	v1 := r.Group("/api/v1")
-	v1.Use(authMiddleware)
 	{
 		// Mikan 搜索
 		mikan := v1.Group("/mikan")

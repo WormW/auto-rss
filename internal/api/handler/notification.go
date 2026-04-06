@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/WormW/auto-rss/internal/api/middleware"
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/service/notification"
@@ -18,14 +19,16 @@ type NotificationHandler struct {
 	db              *gorm.DB
 	notificationSvc notification.Service
 	wsHub           *notification.WebSocketHub
+	jwtService      middleware.JWTService
 }
 
 // NewNotificationHandler 创建通知处理器实例
-func NewNotificationHandler(db *gorm.DB, svc notification.Service, wsHub *notification.WebSocketHub) *NotificationHandler {
+func NewNotificationHandler(db *gorm.DB, svc notification.Service, wsHub *notification.WebSocketHub, jwtService middleware.JWTService) *NotificationHandler {
 	return &NotificationHandler{
 		db:              db,
 		notificationSvc: svc,
 		wsHub:           wsHub,
+		jwtService:      jwtService,
 	}
 }
 
@@ -286,7 +289,7 @@ func (h *NotificationHandler) WebSocketHandler(c *gin.Context) {
 		})
 		return
 	}
-	notification.HandleWebSocket(h.wsHub)(c)
+	notification.HandleWebSocket(h.wsHub, h.jwtService)(c)
 }
 
 // GetWebSocketStatus 获取 WebSocket 连接状态

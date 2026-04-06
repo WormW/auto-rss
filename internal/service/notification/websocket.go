@@ -2,10 +2,12 @@ package notification
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
 
+	"github.com/WormW/auto-rss/internal/api/middleware"
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
@@ -177,8 +179,28 @@ func (c *Client) writePump() {
 }
 
 // HandleWebSocket 处理 WebSocket 连接升级
-func HandleWebSocket(hub *WebSocketHub) gin.HandlerFunc {
+func HandleWebSocket(hub *WebSocketHub, jwtService middleware.JWTService) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Extract token from query parameter
+		token := c.Query("token")
+		if token == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"code":    401,
+				"message": "Token required",
+			})
+			return
+		}
+
+		// Validate the token
+		claims, err := jwtService.ValidateAccessToken(token)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"code":    401,
+				"message": "Invalid or expired token",
+			})
+			return
+		}
+
 		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {
 			logger.Error("Failed to upgrade WebSocket connection", "error", err)
@@ -188,7 +210,7 @@ func HandleWebSocket(hub *WebSocketHub) gin.HandlerFunc {
 			hub:      hub,
 			conn:     conn,
 			send:     make(chan []byte, 256),
-			clientID: c.ClientIP() + "_" + time.Now().Format("20060102150405"),
+			clientID: fmt.Sprintf("user_%d_%s_%s", claims.UserID, c.ClientIP(), time.Now().Format("20060102150405")),
 		}
 		client.hub.register <- client
 		go client.writePump()

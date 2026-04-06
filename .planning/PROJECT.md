@@ -1,17 +1,5 @@
 # Auto-RSS
 
-## Current Milestone: v1.1 基础设施增强
-
-**Goal:** 添加核心基础设施功能，提升系统稳定性和安全性
-
-**Target features:**
-- JWT 认证系统（SEC-03）
-- API 限流保护（SEC-04）
-- WebSocket 自动重连机制（INF-02）
-- 任务队列支持（多并发任务）（INF-03）
-
----
-
 ## Current State
 
 **Shipped:** v1.0 技术债务清理 (2026-04-05)
@@ -55,20 +43,14 @@ Auto-RSS 是一个自动化动漫下载系统，已完成技术债务清理，�
 - ✓ PERF-01~PERF-03: 性能优化（N+1、分页、RSS超时）— v1.0
 - ✓ TEST-01~TEST-06: 测试覆盖提升 — v1.0
 
-### Validated (v1.1)
+### Active (Next Milestone)
 
-- ✓ SEC-03: JWT 认证系统 — Phase 04
-- ✓ SEC-04: API 限流保护 — Phase 05
-
-### Active (v1.1)
-
+- [ ] INF-01: Plex/Jellyfin 完整集成实现
 - [ ] INF-02: WebSocket 自动重连机制
 - [ ] INF-03: 任务队列支持（多并发任务）
-
-### Future (v1.2+)
-
-- INF-01: Plex/Jellyfin 完整集成实现
-- INF-04: 数据库迁移至 PostgreSQL
+- [ ] INF-04: 数据库迁移至 PostgreSQL
+- [ ] SEC-03: 添加 JWT 认证系统
+- [ ] SEC-04: API 限流保护
 
 ### Out of Scope
 
@@ -121,23 +103,15 @@ Auto-RSS 是一个自动化动漫下载系统，已完成技术债务清理，�
 
 ---
 
-## Evolution
+## Next Milestone Goals
 
-This document evolves at phase transitions and milestone boundaries.
+**v1.1 基础设施增强**
 
-**After each phase transition** (via `/gsd-transition`):
-1. Requirements invalidated? → Move to Out of Scope with reason
-2. Requirements validated? → Move to Validated with phase reference
-3. New requirements emerged? → Add to Active
-4. Decisions to log? → Add to Key Decisions
-5. "What This Is" still accurate? → Update if drifted
-
-**After each milestone** (via `/gsd-complete-milestone`):
-1. Full review of all sections
-2. Core Value check — still the right priority?
-3. Audit Out of Scope — reasons still valid?
-4. Update Context with current state
+1. 添加 JWT 认证系统（SEC-03）
+2. 实现 API 限流保护（SEC-04）
+3. 添加 WebSocket 自动重连机制（INF-02）
+4. 优化任务队列支持（INF-03）
 
 ---
 
-*Last updated: 2026-04-06 after Phase 05 (API Rate Limiting) complete*
+*Last updated: 2026-04-05 after v1.0 milestone completion*
