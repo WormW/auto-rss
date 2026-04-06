@@ -1,5 +1,12 @@
 package middleware
 
+// Rate limiting implementation
+// Requirements coverage:
+// - RATE-01: Token bucket with 10 req/s, burst 20 (general); 5 req/min (auth)
+// - RATE-02: X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset headers
+// - RATE-03: 429 Too Many Requests with Retry-After header
+// - RATE-04: 1h TTL cleanup, 10k max entries, LRU eviction
+
 import (
 	"net/http"
 	"strconv"
