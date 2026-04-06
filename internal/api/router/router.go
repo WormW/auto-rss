@@ -34,10 +34,10 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 
 	// 初始化限流器存储
 	rateLimitStore := ratelimit.NewStore(
-		ratelimit.DefaultMaxEntries, // 10000
-		ratelimit.DefaultTTL,        // 1 hour
-		10.0,                        // General RPS
-		20,                          // General burst
+		cfg.RateLimit.MaxEntries, // Default: 10000
+		cfg.RateLimit.TTL,        // Default: 1 hour
+		cfg.RateLimit.RPS,        // Default: 10.0
+		cfg.RateLimit.Burst,      // Default: 20
 	)
 
 	// 启动后台清理
@@ -45,7 +45,15 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	cleanupManager.Start()
 
 	// 应用限流中间件（在认证之前，防止认证计算资源被耗尽）
-	r.Use(middleware.RateLimit(rateLimitStore))
+	r.Use(middleware.RateLimitWithConfig(middleware.RateLimitConfig{
+		Store:         rateLimitStore,
+		GeneralRPS:    cfg.RateLimit.RPS,
+		GeneralBurst:  cfg.RateLimit.Burst,
+		AuthRPM:       cfg.RateLimit.AuthRPM,
+		AuthBurst:     5, // Fixed burst for auth
+		AuthPaths:     []string{"/api/v1/auth/login", "/api/v1/auth/refresh"},
+		ExcludedPaths: []string{"/health", "/api/v1/health"},
+	}))
 
 	// 静态文件服务 - 封面图片
 	r.Static("/covers", "./data/covers")
