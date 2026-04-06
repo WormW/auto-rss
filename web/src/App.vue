@@ -270,6 +270,19 @@ const handleReconnect = () => {
   }
 }
 
+// Initialize WebSocket connection
+const initWebSocket = () => {
+  // Get token from localStorage (set during login)
+  const storedToken = localStorage.getItem('access_token')
+  if (!storedToken) {
+    console.log('[App] No token available, WebSocket not initialized')
+    return
+  }
+  token.value = storedToken
+  wsService.value = createWebSocketService(wsStore)
+  wsService.value.connect(token.value)
+}
+
 // Theme logic
 const storedTheme = localStorage.getItem('theme')
 const isDark = ref(storedTheme === 'dark')
@@ -291,10 +304,17 @@ const checkMobile = () => {
 onMounted(() => {
   checkMobile()
   window.addEventListener('resize', checkMobile)
+  // Initialize WebSocket after DOM is ready
+  initWebSocket()
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', checkMobile)
+  // Clean up WebSocket connection
+  if (wsService.value) {
+    wsService.value.disconnect()
+    wsService.value = null
+  }
 })
 
 // Sidebar logic
@@ -372,10 +392,29 @@ const handleMobileMenuSelect = (key: string) => {
 
 const handleUserSelect = (key: string) => {
   if (key === 'logout') {
-    // Implement logout logic here
-    console.log('Logout clicked')
+    // Disconnect WebSocket before logout
+    if (wsService.value) {
+      wsService.value.disconnect()
+    }
+    // Clear token from localStorage
+    localStorage.removeItem('access_token')
+    token.value = ''
+    console.log('[App] Logout completed, WebSocket disconnected')
+    // Redirect to login page (if exists) or reload
+    // router.push({ name: 'login' })
   }
 }
+
+// Watch for token expiration errors
+watch(() => wsStore.status, (newStatus) => {
+  if (newStatus === 'error' && wsStore.lastError?.toLowerCase().includes('token')) {
+    console.log('[App] Token error detected, redirecting to login')
+    localStorage.removeItem('access_token')
+    token.value = ''
+    // Redirect to login page (if exists)
+    // router.push({ name: 'login' })
+  }
+})
 </script>
 
 <style scoped>
