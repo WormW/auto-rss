@@ -40,5 +40,6 @@ func Migrate(db *gorm.DB) error {
 		&model.Log{},
 		&model.Notification{},
 		&model.NotificationSetting{},
+		&model.RefreshToken{},
 	)
 }
