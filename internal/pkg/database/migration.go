@@ -5,102 +5,110 @@ import (
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"github.com/go-gormigrate/gormigrate/v2"
 	"gorm.io/gorm"
 )
 
-// MigrationRecord 迁移记录表
-// 用于跟踪已执行的迁移，确保幂等性
-type MigrationRecord struct {
-	ID        uint   `gorm:"primaryKey"`
-	Version   string `gorm:"uniqueIndex;not null"`
-	AppliedAt int64  `gorm:"not null"`
-}
-
-// TableName 指定表名
-func (MigrationRecord) TableName() string {
-	return "migration_records"
-}
-
-// Migration 迁移函数类型
-type Migration func(*gorm.DB) error
-
-// migrations 注册所有迁移
-var migrations = []struct {
-	version string
-	name    string
-	fn      Migration
-}{
-	{"202403260001", "create_indexes", createIndexes},
-}
-
-// RunMigrations 执行所有未执行的迁移
+// RunMigrations 运行数据库迁移
 func RunMigrations(db *gorm.DB) error {
-	// 创建迁移记录表
-	if err := db.AutoMigrate(&MigrationRecord{}); err != nil {
-		return fmt.Errorf("failed to create migration_records table: %w", err)
+	m := gormigrate.New(db, gormigrate.DefaultOptions, []*gormigrate.Migration{
+		{
+			ID: "202504090001", // 初始迁移 - 创建所有表
+			Migrate: func(tx *gorm.DB) error {
+				return tx.AutoMigrate(
+					&model.Subscription{},
+					&model.Download{},
+					&model.Config{},
+					&model.RSSSource{},
+					&model.Log{},
+					&model.RefreshToken{},
+				)
+			},
+			Rollback: func(tx *gorm.DB) error {
+				// 回滚时删除所有表
+				return tx.Migrator().DropTable(
+					"subscriptions",
+					"downloads",
+					"configs",
+					"rss_sources",
+					"logs",
+					"refresh_tokens",
+				)
+			},
+		},
+		{
+			ID: "202504090002", // 添加索引优化
+			Migrate: func(tx *gorm.DB) error {
+				// 为常用查询字段添加索引
+				if err := tx.Exec("CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status)").Error; err != nil {
+					return err
+				}
+				if err := tx.Exec("CREATE INDEX IF NOT EXISTS idx_downloads_status ON downloads(status)").Error; err != nil {
+					return err
+				}
+				if err := tx.Exec("CREATE INDEX IF NOT EXISTS idx_logs_created_at ON logs(created_at)").Error; err != nil {
+					return err
+				}
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				tx.Exec("DROP INDEX IF EXISTS idx_subscriptions_status")
+				tx.Exec("DROP INDEX IF EXISTS idx_downloads_status")
+				tx.Exec("DROP INDEX IF EXISTS idx_logs_created_at")
+				return nil
+			},
+		},
+	})
+
+	// 设置迁移超时
+	sqlDB, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("获取底层数据库连接失败: %w", err)
 	}
+	sqlDB.SetConnMaxLifetime(time.Hour)
 
-	// 执行每个迁移
-	for _, m := range migrations {
-		var record MigrationRecord
-		result := db.Where("version = ?", m.version).First(&record)
-
-		if result.Error == nil {
-			// 已执行过，跳过
-			continue
-		}
-
-		if result.Error != nil && result.Error != gorm.ErrRecordNotFound {
-			return fmt.Errorf("failed to check migration %s: %w", m.version, result.Error)
-		}
-
-		// 执行迁移
-		if err := m.fn(db); err != nil {
-			return fmt.Errorf("failed to run migration %s (%s): %w", m.version, m.name, err)
-		}
-
-		// 记录迁移
-		record = MigrationRecord{
-			Version:   m.version,
-			AppliedAt: timeNow(),
-		}
-		if err := db.Create(&record).Error; err != nil {
-			return fmt.Errorf("failed to record migration %s: %w", m.version, err)
-		}
-	}
-
-	return nil
+	return m.Migrate()
 }
 
-// createIndexes 创建数据库索引
-// 注意：SQLite 和 GORM 支持通过 AutoMigrate 自动创建索引
-// 这里主要用于显式创建一些复杂的索引或处理兼容性问题
-func createIndexes(db *gorm.DB) error {
-	// GORM 的 AutoMigrate 会自动创建模型中定义的索引
-	// 这里可以添加一些自定义的 SQL 索引创建（如果需要）
-	
-	// 示例：如果某些索引需要特殊处理，可以在这里添加
-	// 例如：CREATE INDEX IF NOT EXISTS ...
-	
-	return nil
-}
-
-// timeNow 返回当前时间戳（秒）
-func timeNow() int64 {
-	return time.Now().Unix()
-}
-
-// MigrateRSSTimeout sets default timeout for existing RSS sources
-// This migration ensures that existing RSS sources have a valid timeout value
-func MigrateRSSTimeout(db *gorm.DB) error {
-	// Set default timeout (30 seconds = 30000000000 nanoseconds) for sources with timeout = 0 or NULL
-	result := db.Model(&model.RSSSource{}).
-		Where("timeout = ? OR timeout IS NULL", 0).
-		Update("timeout", 30*time.Second)
-
-	if result.Error != nil {
-		return fmt.Errorf("failed to migrate RSS timeout: %w", result.Error)
+// GetCurrentVersion 获取当前迁移版本
+func GetCurrentVersion(db *gorm.DB) (string, error) {
+	var migration gormigrate.MigrationRecord
+	err := db.Order("id DESC").First(&migration).Error
+	if err == gorm.ErrRecordNotFound {
+		return "none", nil
 	}
+	if err != nil {
+		return "", err
+	}
+	return migration.ID, nil
+}
 
-	return nil
+// ResetMigrations 重置所有迁移（危险操作，仅用于开发）
+func ResetMigrations(db *gorm.DB) error {
+	m := gormigrate.New(db, gormigrate.DefaultOptions, []*gormigrate.Migration{
+		{
+			ID: "202504090001",
+			Migrate: func(tx *gorm.DB) error {
+				return tx.AutoMigrate(
+					&model.Subscription{},
+					&model.Download{},
+					&model.Config{},
+					&model.RSSSource{},
+					&model.Log{},
+					&model.RefreshToken{},
+				)
+			},
+			Rollback: func(tx *gorm.DB) error {
+				return tx.Migrator().DropTable(
+					"subscriptions",
+					"downloads",
+					"configs",
+					"rss_sources",
+					"logs",
+					"refresh_tokens",
+				)
+			},
+		},
+	})
+	return m.RollbackTo("202504090001")
 }

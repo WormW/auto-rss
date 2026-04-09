@@ -1,6 +1,9 @@
 package repository
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/WormW/auto-rss/internal/model"
 	"gorm.io/gorm"
 )
@@ -53,6 +56,14 @@ func (r *logRepository) List(page, pageSize int, level, module string) ([]*model
 }
 
 func (r *logRepository) DeleteBefore(days int) error {
-	return r.db.Where("created_at < datetime('now', '-' || ? || ' days')", days).
+	// 参数验证，防止负数等非法输入
+	if days <= 0 {
+		return fmt.Errorf("days must be positive, got %d", days)
+	}
+
+	// 使用参数化查询，避免 SQL 注入
+	// GORM 的 Where 方法会自动处理参数转义
+	cutoffTime := time.Now().AddDate(0, 0, -days)
+	return r.db.Where("created_at < ?", cutoffTime).
 		Delete(&model.Log{}).Error
 }
