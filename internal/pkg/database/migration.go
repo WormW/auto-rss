@@ -9,6 +9,18 @@ import (
 	"gorm.io/gorm"
 )
 
+// MigrationRecord gormigrate 迁移记录表结构
+// 与 gormigrate 内部使用的结构对应
+type MigrationRecord struct {
+	ID        string `gorm:"primaryKey;size:255"`
+	AppliedAt time.Time
+}
+
+// TableName 指定表名
+func (MigrationRecord) TableName() string {
+	return "migrations"
+}
+
 // RunMigrations 运行数据库迁移
 func RunMigrations(db *gorm.DB) error {
 	m := gormigrate.New(db, gormigrate.DefaultOptions, []*gormigrate.Migration{
@@ -72,7 +84,7 @@ func RunMigrations(db *gorm.DB) error {
 
 // GetCurrentVersion 获取当前迁移版本
 func GetCurrentVersion(db *gorm.DB) (string, error) {
-	var migration gormigrate.MigrationRecord
+	var migration MigrationRecord
 	err := db.Order("id DESC").First(&migration).Error
 	if err == gorm.ErrRecordNotFound {
 		return "none", nil
@@ -81,6 +93,14 @@ func GetCurrentVersion(db *gorm.DB) (string, error) {
 		return "", err
 	}
 	return migration.ID, nil
+}
+
+// MigrateRSSTimeout 设置现有 RSS 源的默认超时（向后兼容函数）
+// Deprecated: 此函数保留用于向后兼容，新的迁移系统不再需要
+func MigrateRSSTimeout(db *gorm.DB) error {
+	// 此函数现在是一个空操作，因为新的迁移系统已经处理了这个问题
+	// 保留此函数是为了不破坏可能调用它的现有测试
+	return nil
 }
 
 // ResetMigrations 重置所有迁移（危险操作，仅用于开发）
