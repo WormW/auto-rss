@@ -28,6 +28,13 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	r := gin.New()
 
 	// 应用中间件
+	// 初始化指标收集器
+	handler.InitMetrics()
+	metricsCollector := handler.GetDefaultCollector()
+
+	// 应用指标中间件
+	r.Use(handler.MetricsMiddleware(metricsCollector))
+
 	r.Use(middleware.Logger())
 	r.Use(middleware.Recovery())
 	r.Use(middleware.CORS())
@@ -256,6 +263,9 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			"status": "ok",
 		})
 	})
+
+	// Prometheus 指标端点
+	r.GET("/metrics", handler.MetricsHandler())
 
 	// 静态文件服务 (前端)
 	if distFS, err := webui.DistFS(); err == nil {
