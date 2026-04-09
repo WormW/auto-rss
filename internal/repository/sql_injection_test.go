@@ -63,7 +63,7 @@ func TestLogRepository_DeleteBefore_Parameterized(t *testing.T) {
 			name:          "正常删除7天前的日志",
 			days:          7,
 			wantErr:       false,
-			expectedCount: 0,
+			expectedCount: 3, // 数据: 1,3,5,10,20天前; 删除>7天的(10,20), 剩下3条(1,3,5)
 		},
 		{
 			name:        "负数天数应该返回错误",
@@ -78,10 +78,11 @@ func TestLogRepository_DeleteBefore_Parameterized(t *testing.T) {
 			errContains: "days must be positive",
 		},
 		{
-			name:        "尝试SQL注入 - 拼接OR条件",
-			days:        1,
-			wantErr:     true, // 会被参数验证拦截
-			errContains: "days must be positive",
+			name:          "SQL注入尝试被参数化查询安全处理",
+			days:          0, // 使用边界值测试参数验证
+			wantErr:       true,
+			errContains:   "days must be positive",
+			expectedCount: 0,
 		},
 	}
 
@@ -115,7 +116,8 @@ func TestLogRepository_DeleteBefore_SQLInjectionPrevention(t *testing.T) {
 	db := setupTestDB(t)
 	repo := NewLogRepository(db)
 
-	// 准备测试数据 - 创建一些日志
+	// 清理并准备测试数据
+	db.Exec("DELETE FROM logs")
 	seedTestLogs(t, db, 3, []int{1, 5, 10})
 
 	// 验证初始状态

@@ -43,9 +43,6 @@ const (
 
 // 文件路径相关常量
 const (
-	// DefaultDownloadPath 默认下载路径
-	DefaultDownloadPath = "./downloads"
-
 	// DefaultCoverPath 默认封面存储路径
 	DefaultCoverPath = "./data/covers"
 
