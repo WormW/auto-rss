@@ -126,7 +126,14 @@ func (s *service) loadChannels() {
 			s.RegisterChannel(channel)
 			logger.Info("Webhook channel registered", "name", channel.Name())
 		case "email":
-			logger.Info("Email channel not yet implemented")
+			config := &EmailConfig{}
+			if err := json.Unmarshal([]byte(setting.Config), config); err != nil {
+				logger.Error("Failed to unmarshal email config", "error", err)
+				continue
+			}
+			channel := NewEmailChannel(config)
+			s.RegisterChannel(channel)
+			logger.Info("Email channel registered")
 		}
 	}
 }

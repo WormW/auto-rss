@@ -257,12 +257,14 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		panic(err)
 	}
 
-	// 健康检查
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{
-			"status": "ok",
-		})
-	})
+	// 初始化健康检查器
+	healthChecker := handler.NewHealthChecker(db, qbClient)
+
+	// 健康检查端点
+	r.GET("/health", healthChecker.HealthHandler)
+	r.GET("/ready", healthChecker.ReadyHandler)
+	r.GET("/live", healthChecker.LiveHandler)
+	r.GET("/api/v1/health", healthChecker.HealthHandler)
 
 	// Prometheus 指标端点
 	r.GET("/metrics", handler.MetricsHandler())
