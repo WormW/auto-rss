@@ -59,11 +59,33 @@ type Subscription struct {
 	// 完结时间追踪 - 用于判断完结后多久停止检查
 	CompletedAt *time.Time `json:"completed_at"` // 完结时间（首次检测到 CurrentEpisode >= TotalEpisodes 时设置）
 
+	// 分组相关字段
+	GroupID *uint             `json:"group_id" gorm:"index"`                  // 所属分组ID
+	Group   *SubscriptionGroup `json:"group,omitempty" gorm:"foreignKey:GroupID"` // 所属分组
+	Tags    string            `json:"tags" gorm:"type:text"`                  // 标签（JSON数组格式）
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 
 	Downloads []Download `json:"downloads,omitempty" gorm:"foreignKey:SubscriptionID"`
 	RSSSource *RSSSource `json:"rss_source,omitempty" gorm:"foreignKey:RSSSourceID"`
+}
+
+// SubscriptionGroup 订阅分组模型
+type SubscriptionGroup struct {
+	ID          uint      `json:"id" gorm:"primaryKey"`
+	Name        string    `json:"name" gorm:"not null;size:100;index"` // 分组名称
+	Description string    `json:"description" gorm:"size:500"`          // 分组描述
+	Color       string    `json:"color" gorm:"size:20;default:'#18a058'"` // 分组颜色
+	SortOrder   int       `json:"sort_order" gorm:"default:0"`          // 排序顺序
+	IsDefault   bool      `json:"is_default" gorm:"default:false"`      // 是否为默认分组
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// TableName 指定表名
+func (SubscriptionGroup) TableName() string {
+	return "subscription_groups"
 }
 
 // TableName 指定表名

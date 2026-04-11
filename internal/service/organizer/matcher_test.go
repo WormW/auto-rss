@@ -278,3 +278,54 @@ func TestAbs(t *testing.T) {
 		})
 	}
 }
+
+
+// 批量操作相关方法（mock实现）
+
+
+// 批量操作相关方法（mock实现）
+func (m *MockSubscriptionRepository) BatchUpdateEnabled(ids []uint, enabled bool) error {
+	return nil
+}
+
+func (m *MockSubscriptionRepository) BatchDelete(ids []uint) error {
+	return nil
+}
+
+func (m *MockSubscriptionRepository) BatchUpdateGroup(ids []uint, groupID *uint) error {
+	return nil
+}
+
+// 分组管理相关方法（mock实现）
+func (m *MockSubscriptionRepository) CreateGroup(group *model.SubscriptionGroup) error {
+	return nil
+}
+
+func (m *MockSubscriptionRepository) UpdateGroup(group *model.SubscriptionGroup) error {
+	return nil
+}
+
+func (m *MockSubscriptionRepository) DeleteGroup(id uint) error {
+	return nil
+}
+
+func (m *MockSubscriptionRepository) GetGroupByID(id uint) (*model.SubscriptionGroup, error) {
+	return nil, nil
+}
+
+func (m *MockSubscriptionRepository) ListGroups() ([]model.SubscriptionGroup, error) {
+	return nil, nil
+}
+
+func (m *MockSubscriptionRepository) GetDefaultGroup() (*model.SubscriptionGroup, error) {
+	return nil, nil
+}
+
+// 统计相关方法（mock实现）
+func (m *MockSubscriptionRepository) GetStatistics() (*repository.SubscriptionStatistics, error) {
+	return nil, nil
+}
+
+func (m *MockSubscriptionRepository) GetWeeklyUpdates() (int64, error) {
+	return 0, nil
+}

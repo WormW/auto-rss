@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"gorm.io/gorm"
@@ -103,6 +104,11 @@ func (m *MockSubscriptionRepository) BatchDelete(ids []uint) error {
 func (m *MockSubscriptionRepository) BatchUpdateStatus(ids []uint, status string) error {
 	args := m.Called(ids, status)
 	return args.Error(0)
+}
+
+func (m *MockSubscriptionRepository) GetSubscriptionsWithDownloadCount() ([]repository.SubscriptionWithStats, error) {
+	args := m.Called()
+	return args.Get(0).([]repository.SubscriptionWithStats), args.Error(1)
 }
 
 func (m *MockSubscriptionRepository) UpdateInTx(tx *gorm.DB, sub *model.Subscription) error {
@@ -543,4 +549,50 @@ func TestIsDownloadedFalseWhenStatusStalled(t *testing.T) {
 
 	mockSubRepo.AssertExpectations(t)
 	mockDownloadRepo.AssertExpectations(t)
+}
+
+
+// 批量操作相关方法（mock实现）
+
+// 批量操作相关方法（mock实现）
+func (m *MockSubscriptionRepository) BatchUpdateEnabled(ids []uint, enabled bool) error {
+	return nil
+}
+
+func (m *MockSubscriptionRepository) BatchUpdateGroup(ids []uint, groupID *uint) error {
+	return nil
+}
+
+// 分组管理相关方法（mock实现）
+func (m *MockSubscriptionRepository) CreateGroup(group *model.SubscriptionGroup) error {
+	return nil
+}
+
+func (m *MockSubscriptionRepository) UpdateGroup(group *model.SubscriptionGroup) error {
+	return nil
+}
+
+func (m *MockSubscriptionRepository) DeleteGroup(id uint) error {
+	return nil
+}
+
+func (m *MockSubscriptionRepository) GetGroupByID(id uint) (*model.SubscriptionGroup, error) {
+	return nil, nil
+}
+
+func (m *MockSubscriptionRepository) ListGroups() ([]model.SubscriptionGroup, error) {
+	return nil, nil
+}
+
+func (m *MockSubscriptionRepository) GetDefaultGroup() (*model.SubscriptionGroup, error) {
+	return nil, nil
+}
+
+// 统计相关方法（mock实现）
+func (m *MockSubscriptionRepository) GetStatistics() (*repository.SubscriptionStatistics, error) {
+	return nil, nil
+}
+
+func (m *MockSubscriptionRepository) GetWeeklyUpdates() (int64, error) {
+	return 0, nil
 }

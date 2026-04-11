@@ -51,7 +51,7 @@ export class WebSocketService {
       return ''
     }
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    return `${protocol}//${window.location.host}/ws`
+    return `${protocol}//${window.location.host}/ws/notifications`
   }
 
   /**

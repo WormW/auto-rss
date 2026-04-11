@@ -162,6 +162,21 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			subscriptions.POST("/:id/reorganize-files", subscriptionHandler.ReorganizeFiles)
 			subscriptions.POST("/:id/rename-files", subscriptionHandler.RenameFiles)
 			subscriptions.POST("/batch-import-from-rss", subscriptionHandler.BatchImportFromRSS)
+			// 批量操作
+			subscriptions.POST("/batch/enable", subscriptionHandler.BatchUpdateEnabled)
+			subscriptions.POST("/batch/delete", subscriptionHandler.BatchDelete)
+			subscriptions.POST("/batch/group", subscriptionHandler.BatchUpdateGroup)
+			// 导入/导出
+			subscriptions.GET("/export", subscriptionHandler.ExportSubscriptions)
+			subscriptions.POST("/import", subscriptionHandler.ImportSubscriptions)
+			// 统计
+			subscriptions.GET("/statistics", subscriptionHandler.GetStatistics)
+			// 分组管理
+			subscriptions.GET("/groups", subscriptionHandler.ListGroups)
+			subscriptions.POST("/groups", subscriptionHandler.CreateGroup)
+			subscriptions.GET("/groups/:id", subscriptionHandler.GetGroup)
+			subscriptions.PUT("/groups/:id", subscriptionHandler.UpdateGroup)
+			subscriptions.DELETE("/groups/:id", subscriptionHandler.DeleteGroup)
 		}
 
 		// 下载管理

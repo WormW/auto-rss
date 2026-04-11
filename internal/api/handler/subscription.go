@@ -2,17 +2,20 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/pkg/utils"
-	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/mikan"
@@ -1452,4 +1455,641 @@ func (h *SubscriptionHandler) doRenameFiles(ctx context.Context, t *task.Task, s
 
 	manager.SetResult(result)
 	return nil
+}
+
+// ==================== 批量操作 API ====================
+
+// BatchUpdateEnabledRequest 批量更新启用状态请求
+type BatchUpdateEnabledRequest struct {
+	IDs     []uint `json:"ids" binding:"required"`
+	Enabled bool   `json:"enabled" binding:"required"`
+}
+
+// BatchUpdateEnabled 批量更新订阅启用状态
+func (h *SubscriptionHandler) BatchUpdateEnabled(c *gin.Context) {
+	var req BatchUpdateEnabledRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Invalid request body",
+		})
+		return
+	}
+
+	if len(req.IDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Subscription IDs are required",
+		})
+		return
+	}
+
+	logger.Info("Batch updating subscription enabled status",
+		"count", len(req.IDs),
+		"enabled", req.Enabled,
+		"client_ip", c.ClientIP())
+
+	if err := h.repo.BatchUpdateEnabled(req.IDs, req.Enabled); err != nil {
+		logger.Error("Failed to batch update enabled status", "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Failed to update subscriptions",
+		})
+		return
+	}
+
+	logger.Info("Batch update enabled status completed", "count", len(req.IDs))
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Success",
+		"data": gin.H{
+			"updated_count": len(req.IDs),
+			"enabled":       req.Enabled,
+		},
+	})
+}
+
+// BatchDeleteRequest 批量删除请求
+type BatchDeleteRequest struct {
+	IDs []uint `json:"ids" binding:"required"`
+}
+
+// BatchDelete 批量删除订阅
+func (h *SubscriptionHandler) BatchDelete(c *gin.Context) {
+	var req BatchDeleteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Invalid request body",
+		})
+		return
+	}
+
+	if len(req.IDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Subscription IDs are required",
+		})
+		return
+	}
+
+	logger.Info("Batch deleting subscriptions",
+		"count", len(req.IDs),
+		"client_ip", c.ClientIP())
+
+	if err := h.repo.BatchDelete(req.IDs); err != nil {
+		logger.Error("Failed to batch delete subscriptions", "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Failed to delete subscriptions",
+		})
+		return
+	}
+
+	logger.Info("Batch delete completed", "count", len(req.IDs))
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Success",
+		"data": gin.H{
+			"deleted_count": len(req.IDs),
+		},
+	})
+}
+
+// BatchUpdateGroupRequest 批量更新分组请求
+type BatchUpdateGroupRequest struct {
+	IDs     []uint `json:"ids" binding:"required"`
+	GroupID *uint  `json:"group_id"`
+}
+
+// BatchUpdateGroup 批量更新订阅分组
+func (h *SubscriptionHandler) BatchUpdateGroup(c *gin.Context) {
+	var req BatchUpdateGroupRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Invalid request body",
+		})
+		return
+	}
+
+	if len(req.IDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Subscription IDs are required",
+		})
+		return
+	}
+
+	// 如果指定了分组ID，检查分组是否存在
+	if req.GroupID != nil {
+		if _, err := h.repo.GetGroupByID(*req.GroupID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"code":    400,
+				"message": "Group not found",
+			})
+			return
+		}
+	}
+
+	logger.Info("Batch updating subscription group",
+		"count", len(req.IDs),
+		"group_id", req.GroupID,
+		"client_ip", c.ClientIP())
+
+	if err := h.repo.BatchUpdateGroup(req.IDs, req.GroupID); err != nil {
+		logger.Error("Failed to batch update group", "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Failed to update subscriptions",
+		})
+		return
+	}
+
+	logger.Info("Batch update group completed", "count", len(req.IDs))
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Success",
+		"data": gin.H{
+			"updated_count": len(req.IDs),
+			"group_id":      req.GroupID,
+		},
+	})
+}
+
+// ==================== 分组管理 API ====================
+
+// CreateGroup 创建订阅分组
+func (h *SubscriptionHandler) CreateGroup(c *gin.Context) {
+	var group model.SubscriptionGroup
+	if err := c.ShouldBindJSON(&group); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Invalid request body",
+		})
+		return
+	}
+
+	if group.Name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Group name is required",
+		})
+		return
+	}
+
+	logger.Info("Creating subscription group",
+		"name", group.Name,
+		"client_ip", c.ClientIP())
+
+	if err := h.repo.CreateGroup(&group); err != nil {
+		logger.Error("Failed to create group", "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Failed to create group",
+		})
+		return
+	}
+
+	logger.Info("Group created successfully", "id", group.ID, "name", group.Name)
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Success",
+		"data":    group,
+	})
+}
+
+// UpdateGroup 更新订阅分组
+func (h *SubscriptionHandler) UpdateGroup(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Invalid group ID",
+		})
+		return
+	}
+
+	existing, err := h.repo.GetGroupByID(uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"code":    404,
+			"message": "Group not found",
+		})
+		return
+	}
+
+	var updates map[string]interface{}
+	if err := c.ShouldBindJSON(&updates); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Invalid request body",
+		})
+		return
+	}
+
+	if name, ok := updates["name"].(string); ok && name != "" {
+		existing.Name = name
+	}
+	if desc, ok := updates["description"].(string); ok {
+		existing.Description = desc
+	}
+	if color, ok := updates["color"].(string); ok {
+		existing.Color = color
+	}
+	if sortOrder, ok := updates["sort_order"].(float64); ok {
+		existing.SortOrder = int(sortOrder)
+	}
+
+	logger.Info("Updating group",
+		"id", id,
+		"name", existing.Name,
+		"client_ip", c.ClientIP())
+
+	if err := h.repo.UpdateGroup(existing); err != nil {
+		logger.Error("Failed to update group", "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Failed to update group",
+		})
+		return
+	}
+
+	logger.Info("Group updated successfully", "id", id)
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Success",
+		"data":    existing,
+	})
+}
+
+// DeleteGroup 删除订阅分组
+func (h *SubscriptionHandler) DeleteGroup(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Invalid group ID",
+		})
+		return
+	}
+
+	// 检查是否是默认分组
+	group, err := h.repo.GetGroupByID(uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"code":    404,
+			"message": "Group not found",
+		})
+		return
+	}
+
+	if group.IsDefault {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Cannot delete default group",
+		})
+		return
+	}
+
+	logger.Info("Deleting group",
+		"id", id,
+		"name", group.Name,
+		"client_ip", c.ClientIP())
+
+	if err := h.repo.DeleteGroup(uint(id)); err != nil {
+		logger.Error("Failed to delete group", "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Failed to delete group",
+		})
+		return
+	}
+
+	logger.Info("Group deleted successfully", "id", id)
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Success",
+	})
+}
+
+// ListGroups 获取所有分组
+func (h *SubscriptionHandler) ListGroups(c *gin.Context) {
+	groups, err := h.repo.ListGroups()
+	if err != nil {
+		logger.Error("Failed to list groups", "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Failed to get groups",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Success",
+		"data":    groups,
+	})
+}
+
+// GetGroup 获取分组详情
+func (h *SubscriptionHandler) GetGroup(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Invalid group ID",
+		})
+		return
+	}
+
+	group, err := h.repo.GetGroupByID(uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"code":    404,
+			"message": "Group not found",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Success",
+		"data":    group,
+	})
+}
+
+// ==================== 统计 API ====================
+
+// GetStatistics 获取订阅统计信息
+func (h *SubscriptionHandler) GetStatistics(c *gin.Context) {
+	stats, err := h.repo.GetStatistics()
+	if err != nil {
+		logger.Error("Failed to get statistics", "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Failed to get statistics",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Success",
+		"data":    stats,
+	})
+}
+
+// ==================== 导入/导出 API ====================
+
+// ExportSubscriptions 导出订阅（支持 JSON 和 OPML 格式）
+func (h *SubscriptionHandler) ExportSubscriptions(c *gin.Context) {
+	format := c.DefaultQuery("format", "json")
+
+	subscriptions, err := h.repo.GetSubscriptionsWithDownloadCount()
+	if err != nil {
+		logger.Error("Failed to get subscriptions for export", "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Failed to export subscriptions",
+		})
+		return
+	}
+
+	switch format {
+	case "opml":
+		opml := h.generateOPML(subscriptions)
+		c.Header("Content-Type", "application/xml")
+		c.Header("Content-Disposition", "attachment; filename=subscriptions.opml")
+		c.String(http.StatusOK, opml)
+	case "json":
+		c.JSON(http.StatusOK, gin.H{
+			"code":    0,
+			"message": "Success",
+			"data": gin.H{
+				"export_time":   time.Now().Format(time.RFC3339),
+				"version":       "1.0",
+				"subscriptions": subscriptions,
+			},
+		})
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Unsupported format. Use 'json' or 'opml'",
+		})
+	}
+}
+
+// generateOPML 生成 OPML 格式
+func (h *SubscriptionHandler) generateOPML(subscriptions []repository.SubscriptionWithStats) string {
+	var buf strings.Builder
+	buf.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
+	buf.WriteString(`<opml version="2.0">` + "\n")
+	buf.WriteString("  <head>\n")
+	buf.WriteString(fmt.Sprintf("    <title>Auto-RSS Subscriptions - %s</title>\n", time.Now().Format("2006-01-02")))
+	buf.WriteString("  </head>\n")
+	buf.WriteString("  <body>\n")
+
+	for _, sub := range subscriptions {
+		title := html.EscapeString(sub.Name)
+		rssURL := html.EscapeString(sub.RssURL)
+		buf.WriteString(fmt.Sprintf(`    <outline type="rss" text="%s" title="%s" xmlUrl="%s" />`+"\n", title, title, rssURL))
+	}
+
+	buf.WriteString("  </body>\n")
+	buf.WriteString("</opml>")
+	return buf.String()
+}
+
+// ImportSubscriptionsRequest 导入订阅请求
+type ImportSubscriptionsRequest struct {
+	Data    string `json:"data" binding:"required"`   // JSON 或 OPML 数据
+	Format  string `json:"format" binding:"required"` // "json" 或 "opml"
+	GroupID *uint  `json:"group_id"`                  // 可选：导入到的分组
+}
+
+// ImportSubscriptions 导入订阅（支持 JSON 和 OPML 格式）
+func (h *SubscriptionHandler) ImportSubscriptions(c *gin.Context) {
+	var req ImportSubscriptionsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Invalid request body",
+		})
+		return
+	}
+
+	logger.Info("Importing subscriptions",
+		"format", req.Format,
+		"group_id", req.GroupID,
+		"client_ip", c.ClientIP())
+
+	var results []subscription.ImportResult
+	var importErr error
+
+	switch req.Format {
+	case "json":
+		results, importErr = h.importFromJSON(req.Data, req.GroupID)
+	case "opml":
+		results, importErr = h.importFromOPML(req.Data, req.GroupID)
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Unsupported format. Use 'json' or 'opml'",
+		})
+		return
+	}
+
+	if importErr != nil {
+		logger.Error("Import failed", "error", importErr.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Import failed: " + importErr.Error(),
+		})
+		return
+	}
+
+	successCount := 0
+	skippedCount := 0
+	failedCount := 0
+	for _, r := range results {
+		if r.Skipped {
+			skippedCount++
+		} else if r.Success {
+			successCount++
+		} else {
+			failedCount++
+		}
+	}
+
+	logger.Info("Import completed",
+		"total", len(results),
+		"success", successCount,
+		"skipped", skippedCount,
+		"failed", failedCount)
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Import completed",
+		"data": gin.H{
+			"total":   len(results),
+			"success": successCount,
+			"skipped": skippedCount,
+			"failed":  failedCount,
+			"results": results,
+		},
+	})
+}
+
+// importFromJSON 从 JSON 导入
+func (h *SubscriptionHandler) importFromJSON(data string, groupID *uint) ([]subscription.ImportResult, error) {
+	var exportData struct {
+		Subscriptions []model.Subscription `json:"subscriptions"`
+	}
+
+	if err := json.Unmarshal([]byte(data), &exportData); err != nil {
+		// 尝试直接解析为订阅数组
+		var subs []model.Subscription
+		if err := json.Unmarshal([]byte(data), &subs); err != nil {
+			return nil, fmt.Errorf("invalid JSON format: %w", err)
+		}
+		exportData.Subscriptions = subs
+	}
+
+	results := make([]subscription.ImportResult, 0, len(exportData.Subscriptions))
+
+	for _, sub := range exportData.Subscriptions {
+		result := subscription.ImportResult{Title: sub.Name, Success: false}
+
+		// 检查是否已存在
+		if sub.RssURL != "" {
+			existing, err := h.repo.GetByRSSURL(sub.RssURL)
+			if err == nil && existing != nil {
+				result.Skipped = true
+				result.Success = true
+				result.Message = "Already exists"
+				results = append(results, result)
+				continue
+			}
+		}
+
+		// 重置 ID 和时间戳
+		sub.ID = 0
+		sub.CreatedAt = time.Time{}
+		sub.UpdatedAt = time.Time{}
+		sub.GroupID = groupID
+
+		// 丰富 Bangumi 数据
+		h.enrichWithBangumi(&sub)
+
+		if err := h.repo.Create(&sub); err != nil {
+			result.Message = "Create failed: " + err.Error()
+			results = append(results, result)
+			continue
+		}
+
+		result.Success = true
+		result.Message = "Imported successfully"
+		result.Subscription = &sub
+		results = append(results, result)
+	}
+
+	return results, nil
+}
+
+// importFromOPML 从 OPML 导入
+func (h *SubscriptionHandler) importFromOPML(data string, groupID *uint) ([]subscription.ImportResult, error) {
+	// 简单的 OPML 解析（提取 outline 元素）
+	outlineRegex := regexp.MustCompile(`<outline[^>]*text="([^"]*)"[^>]*xmlUrl="([^"]*)"[^>]*/>`)
+	matches := outlineRegex.FindAllStringSubmatch(data, -1)
+
+	results := make([]subscription.ImportResult, 0, len(matches))
+
+	for _, match := range matches {
+		if len(match) < 3 {
+			continue
+		}
+
+		name := match[1]
+		rssURL := match[2]
+
+		result := subscription.ImportResult{Title: name, Success: false}
+
+		// 检查是否已存在
+		if rssURL != "" {
+			existing, err := h.repo.GetByRSSURL(rssURL)
+			if err == nil && existing != nil {
+				result.Skipped = true
+				result.Success = true
+				result.Message = "Already exists"
+				results = append(results, result)
+				continue
+			}
+		}
+
+		sub := model.Subscription{
+			Name:    name,
+			RssURL:  rssURL,
+			Season:  1,
+			Status:  "active",
+			Enabled: true,
+			GroupID: groupID,
+		}
+
+		// 丰富 Bangumi 数据
+		h.enrichWithBangumi(&sub)
+
+		if err := h.repo.Create(&sub); err != nil {
+			result.Message = "Create failed: " + err.Error()
+			results = append(results, result)
+			continue
+		}
+
+		result.Success = true
+		result.Message = "Imported successfully"
+		result.Subscription = &sub
+		results = append(results, result)
+	}
+
+	return results, nil
 }
