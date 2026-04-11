@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"runtime"
 	"time"
 
-	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
@@ -329,12 +329,55 @@ func (h *HealthChecker) checkDiskSpace() HealthCheck {
 		}
 	}
 
-	// 这里使用简单的统计，实际可以使用 syscall.Statfs
-	// 简化实现，返回 healthy，实际项目中应实现真正的磁盘检查
-	return HealthCheck{
-		Status: "healthy",
-		Message: "disk space check placeholder - implement platform-specific disk check",
+	// 获取下载路径的磁盘使用情况
+	diskStatus, err := getDiskUsage(getDownloadPath())
+	if err != nil {
+		return HealthCheck{
+			Status:  "unknown",
+			Message: fmt.Sprintf("failed to get disk usage: %v", err),
+		}
 	}
+
+	// 计算使用百分比
+	usedPercent := (float64(diskStatus.Used) / float64(diskStatus.Total)) * 100
+
+	// 确定状态
+	status := "healthy"
+	if usedPercent >= h.config.DiskCriticalPercent {
+		status = "critical"
+	} else if usedPercent >= h.config.DiskWarningPercent {
+		status = "warning"
+	}
+
+	return HealthCheck{
+		Status:  status,
+		Message: fmt.Sprintf("disk usage: %.1f%%", usedPercent),
+		Details: map[string]interface{}{
+			"total_gb":      formatBytes(diskStatus.Total),
+			"used_gb":       formatBytes(diskStatus.Used),
+			"free_gb":       formatBytes(diskStatus.Free),
+			"usage_percent": fmt.Sprintf("%.1f%%", usedPercent),
+			"path":          diskStatus.Path,
+		},
+	}
+}
+
+// getDownloadPath 获取下载路径
+func getDownloadPath() string {
+	// 优先使用环境变量
+	if path := os.Getenv("DOWNLOAD_PATH"); path != "" {
+		return path
+	}
+	// 默认路径
+	return "/downloads"
+}
+
+// DiskUsage 磁盘使用情况
+type DiskUsage struct {
+	Path  string
+	Total uint64
+	Used  uint64
+	Free  uint64
 }
 
 // formatBytes 格式化字节大小

@@ -1,9 +1,9 @@
 package handler
 
 import (
-	"net/http"
 	"strconv"
 
+	"github.com/WormW/auto-rss/internal/api/response"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/calendar"
@@ -29,18 +29,11 @@ func (h *CalendarHandler) GetWeekSchedule(c *gin.Context) {
 	schedule, err := h.calendarSvc.GetWeekSchedule(weekOffset)
 	if err != nil {
 		logger.Error("Failed to get week schedule", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "获取日历失败",
-		})
+		response.InternalError(c, "获取日历失败")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"code":    0,
-		"message": "Success",
-		"data":    schedule,
-	})
+	response.Success(c, schedule)
 }
 
 // GetTodaySchedule 获取今日排期
@@ -48,16 +41,9 @@ func (h *CalendarHandler) GetTodaySchedule(c *gin.Context) {
 	items, err := h.calendarSvc.GetTodaySchedule()
 	if err != nil {
 		logger.Error("Failed to get today schedule", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "获取今日更新失败",
-		})
+		response.InternalError(c, "获取今日更新失败")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"code":    0,
-		"message": "Success",
-		"data":    items,
-	})
+	response.Success(c, items)
 }

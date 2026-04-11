@@ -164,8 +164,7 @@ func (e *EmailChannel) sendViaStartTLS(toList []string, msg string) error {
 	}
 
 	logger.Debug("Email notification sent successfully",
-		"to", strings.Join(toList, ", "),
-		"subject", headers["Subject"])
+		"to", strings.Join(toList, ", "))
 
 	return nil
 }

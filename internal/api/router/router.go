@@ -35,8 +35,10 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	// 应用指标中间件
 	r.Use(handler.MetricsMiddleware(metricsCollector))
 
+	// 错误处理和恢复中间件（必须在最前面捕获所有错误）
+	r.Use(middleware.RecoveryWithResponse())
+	r.Use(middleware.ErrorHandler())
 	r.Use(middleware.Logger())
-	r.Use(middleware.Recovery())
 	r.Use(middleware.CORS())
 
 	// 初始化限流器存储
