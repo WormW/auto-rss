@@ -1,0 +1,25 @@
+[Unit]
+Description=Auto-RSS Service
+After=network.target
+
+[Service]
+Type=simple
+User=%USER%
+WorkingDirectory=%WORK_DIR%
+ExecStart=%WORK_DIR%/auto-rss
+Restart=always
+RestartSec=5
+
+# Environment variables
+Environment="DB_PATH=%WORK_DIR%/data/auto-rss.db"
+Environment="SERVER_PORT=7892"
+Environment="LOG_LEVEL=info"
+Environment="DOWNLOAD_PATH=/downloads"
+Environment="QB_HOST=http://localhost:8080"
+Environment="QB_USERNAME=admin"
+Environment="RSS_INTERVAL=30m"
+Environment="RATE_LIMIT_RPS=10"
+Environment="RATE_LIMIT_BURST=20"
+
+[Install]
+WantedBy=multi-user.target

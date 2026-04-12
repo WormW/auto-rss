@@ -11,7 +11,9 @@ data/
 downloads/
 
 # 日志文件
+logs/
 *.log
+nohup.out
 
 # 文档目录
 claudedocs/
