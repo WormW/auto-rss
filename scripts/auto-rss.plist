@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.wormw.auto-rss</string>
+    
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/wormw/service/auto-rss/auto-rss</string>
+    </array>
+    
+    <key>WorkingDirectory</key>
+    <string>/Users/wormw/service/auto-rss</string>
+    
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DB_PATH</key>
+        <string>/Users/wormw/service/auto-rss/data/auto-rss.db</string>
+        <key>SERVER_PORT</key>
+        <string>7892</string>
+        <key>LOG_LEVEL</key>
+        <string>info</string>
+        <key>DOWNLOAD_PATH</key>
+        <string>/Users/wormw/Downloads/auto-rss</string>
+        <key>QB_HOST</key>
+        <string>http://localhost:8080</string>
+        <key>QB_USERNAME</key>
+        <string>admin</string>
+        <key>QB_PASSWORD</key>
+        <string></string>
+        <key>RSS_INTERVAL</key>
+        <string>30m</string>
+        <key>RATE_LIMIT_RPS</key>
+        <string>10</string>
+        <key>RATE_LIMIT_BURST</key>
+        <string>20</string>
+    </dict>
+    
+    <key>RunAtLoad</key>
+    <true/>
+    
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+    
+    <key>StandardOutPath</key>
+    <string>/Users/wormw/service/auto-rss/logs/auto-rss.out.log</string>
+    
+    <key>StandardErrorPath</key>
+    <string>/Users/wormw/service/auto-rss/logs/auto-rss.err.log</string>
+    
+    <key>ProcessType</key>
+    <string>Background</string>
+    
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>
