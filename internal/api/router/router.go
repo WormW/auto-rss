@@ -106,6 +106,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	// 初始化处理器
 	subscriptionHandler := handler.NewSubscriptionHandler(subscriptionRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath)
 	downloadHandler := handler.NewDownloadHandler(downloadRepo, qbClient, configRepo)
+	downloadHistoryHandler := handler.NewDownloadHistoryHandler(downloadRepo)
 	rssHandler := handler.NewRSSHandler(rssScheduler)
 	configHandler := handler.NewConfigHandler(configRepo)
 	rssSourceHandler := handler.NewRSSSourceHandler(rssSourceRepo, configRepo, rssParser)
@@ -116,6 +117,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	notificationHandler := handler.NewNotificationHandler(db, notificationSvc, wsHub, jwtService)
 	calendarHandler := handler.NewCalendarHandler(subscriptionRepo, downloadRepo)
 	diskHandler := handler.NewDiskHandler(db, downloadRepo, subscriptionRepo, configRepo)
+	tagHandler := handler.NewTagHandler(subscriptionRepo)
 
 	// API v1 路由组
 	v1 := r.Group("/api/v1")
@@ -188,12 +190,24 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			downloads.POST("/:id/retry", downloadHandler.Retry)
 			downloads.POST("/batch-delete", downloadHandler.BatchDelete)
 			downloads.DELETE("/clear", downloadHandler.Clear)
+			// 下载历史和统计
+			downloads.GET("/history", downloadHistoryHandler.GetHistory)
+			downloads.GET("/statistics", downloadHistoryHandler.GetStatistics)
 		}
 
 		// RSS 管理
-		rss := v1.Group("/rss")
+		rssGroup := v1.Group("/rss")
 		{
-			rss.POST("/refresh", rssHandler.Refresh)
+			rssGroup.POST("/refresh", rssHandler.Refresh)
+
+			// RSS 健康检查
+			rssHealthChecker := rss.NewHealthChecker(subscriptionRepo)
+			rssHealthHandler := handler.NewRSSHealthHandler(rssHealthChecker, subscriptionRepo)
+
+			rssGroup.GET("/health", rssHealthHandler.CheckAll)
+			rssGroup.GET("/health/:subscription_id", rssHealthHandler.CheckOne)
+			rssGroup.GET("/dead", rssHealthHandler.GetDead)
+			rssGroup.POST("/health-check", rssHealthHandler.TriggerCheck)
 		}
 
 		// 配置管理
@@ -264,6 +278,20 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			disks.POST("/cleanup", diskHandler.TriggerCleanup)
 			disks.GET("/history", diskHandler.GetHistory)
 		}
+
+		// 标签管理
+		tags := v1.Group("/tags")
+		{
+			tags.GET("", tagHandler.List)
+			tags.POST("", tagHandler.Create)
+			tags.PUT("/:id", tagHandler.Update)
+			tags.DELETE("/:id", tagHandler.Delete)
+		}
+
+		// 订阅标签关联 (在订阅路由组内)
+		subscriptions.GET("/:id/tags", tagHandler.GetSubscriptionTags)
+		subscriptions.POST("/:id/tags", tagHandler.AddTagsToSubscription)
+		subscriptions.DELETE("/:id/tags/:tag_id", tagHandler.RemoveTagFromSubscription)
 	}
 
 	// WebSocket 端点
