@@ -31,7 +31,16 @@ clean:
 	@rm -rf bin/
 	@rm -rf web/dist/
 	@rm -rf internal/webui/dist/
+
+# 清理所有包括数据（危险！）
+clean-all:
+	@echo "Cleaning everything including data..."
+	@rm -f $(BINARY_NAME)
+	@rm -rf bin/
+	@rm -rf web/dist/
+	@rm -rf internal/webui/dist/
 	@rm -rf data/
+	@rm -rf logs/
 
 # 运行后端
 run: build
