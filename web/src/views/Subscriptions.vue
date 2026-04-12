@@ -28,7 +28,7 @@
     <div v-if="todayUpdates.length > 0" class="today-updates-section">
       <div class="section-header">
         <h3>
-          <n-icon size="18" color="#18a058"><TodayOutlined /></n-icon>
+          <n-icon size="18" color="#18a058"><CalendarOutlined /></n-icon>
           今日更新 ({{ todayUpdates.length }})
         </h3>
         <n-tag type="success" size="small" v-if="todayPendingCount > 0">
@@ -684,7 +684,7 @@
   </div>
 </template>
 
-<script setup lang="ts">
+<script setup lang="tsx">
 import { ref, onMounted, computed } from 'vue'
 import {
   NButton,
@@ -724,7 +724,7 @@ import {
   PlusOutlined,
   AppstoreOutlined,
   UnorderedListOutlined,
-  TodayOutlined,
+  CalendarOutlined,
   WarningOutlined,
   CalculatorOutlined,
   FileSearchOutlined,
