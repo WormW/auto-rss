@@ -202,11 +202,23 @@ func (h *NotificationHandler) TestChannel(c *gin.Context) {
 		}
 		err = notification.TestWebhookConfig(config)
 	case req.Channel == "email":
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "Email 渠道尚未实现",
-		})
-		return
+		config := &notification.EmailConfig{}
+		if err = json.Unmarshal(req.Config, config); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"code":    400,
+				"message": "Email 配置格式错误: " + err.Error(),
+			})
+			return
+		}
+		// 先验证配置格式
+		if err = notification.ValidateEmailConfig(config); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"code":    400,
+				"message": "Email 配置验证失败: " + err.Error(),
+			})
+			return
+		}
+		err = notification.TestEmailConfig(config)
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    400,
