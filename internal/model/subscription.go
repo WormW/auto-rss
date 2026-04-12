@@ -92,3 +92,37 @@ func (SubscriptionGroup) TableName() string {
 func (Subscription) TableName() string {
 	return "subscriptions"
 }
+
+// SubscriptionTag 订阅标签模型
+type SubscriptionTag struct {
+	ID          uint      `json:"id" gorm:"primaryKey"`
+	Name        string    `json:"name" gorm:"not null;size:50;index;uniqueIndex"` // 标签名称（唯一）
+	Color       string    `json:"color" gorm:"size:20;default:'#18a058'"`         // 标签颜色
+	Description string    `json:"description" gorm:"size:200"`                    // 标签描述
+	SortOrder   int       `json:"sort_order" gorm:"default:0"`                    // 排序
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// TableName 指定表名
+func (SubscriptionTag) TableName() string {
+	return "subscription_tags"
+}
+
+// SubscriptionTagRelation 订阅-标签关联表
+type SubscriptionTagRelation struct {
+	SubscriptionID uint `json:"subscription_id" gorm:"primaryKey;index"`
+	TagID          uint `json:"tag_id" gorm:"primaryKey;index"`
+	CreatedAt      time.Time
+}
+
+// TableName 指定表名
+func (SubscriptionTagRelation) TableName() string {
+	return "subscription_tag_relations"
+}
+
+// SubscriptionWithTags 带标签的订阅
+type SubscriptionWithTags struct {
+	Subscription
+	Tags []SubscriptionTag `json:"tags"`
+}

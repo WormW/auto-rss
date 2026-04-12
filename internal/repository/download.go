@@ -38,6 +38,12 @@ type DownloadRepository interface {
 	CreateInTx(tx *gorm.DB, download *model.Download) error
 	// UpdateInTx 在事务中更新下载任务
 	UpdateInTx(tx *gorm.DB, download *model.Download) error
+
+	// 下载历史记录
+	GetDownloadHistory(filter *DownloadHistoryFilter, offset, limit int) ([]model.Download, int64, error)
+
+	// 下载统计
+	GetDownloadStatistics(days int) (*DownloadStatistics, error)
 }
 
 type downloadRepository struct {
@@ -204,4 +210,159 @@ func (r *downloadRepository) CreateInTx(tx *gorm.DB, download *model.Download) e
 // UpdateInTx 在事务中更新下载任务
 func (r *downloadRepository) UpdateInTx(tx *gorm.DB, download *model.Download) error {
 	return tx.Save(download).Error
+}
+
+// ==================== 下载历史记录 ====================
+
+// DownloadHistoryFilter 下载历史筛选条件
+type DownloadHistoryFilter struct {
+	SubscriptionID *uint
+	Status         string
+	StartDate      *time.Time
+	EndDate        *time.Time
+}
+
+// GetDownloadHistory 获取下载历史记录（支持筛选和分页）
+func (r *downloadRepository) GetDownloadHistory(filter *DownloadHistoryFilter, offset, limit int) ([]model.Download, int64, error) {
+	var downloads []model.Download
+	var total int64
+
+	query := r.db.Model(&model.Download{}).Preload("Subscription")
+
+	if filter != nil {
+		if filter.SubscriptionID != nil {
+			query = query.Where("subscription_id = ?", *filter.SubscriptionID)
+		}
+		if filter.Status != "" {
+			query = query.Where("status = ?", filter.Status)
+		}
+		if filter.StartDate != nil {
+			query = query.Where("created_at >= ?", *filter.StartDate)
+		}
+		if filter.EndDate != nil {
+			query = query.Where("created_at <= ?", *filter.EndDate)
+		}
+	}
+
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	if limit <= 0 {
+		limit = DefaultPageSize
+	}
+	if limit > MaxPageSize {
+		limit = MaxPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	err := query.Offset(offset).Limit(limit).Order("created_at DESC").Find(&downloads).Error
+	return downloads, total, err
+}
+
+// ==================== 下载统计 ====================
+
+// DownloadStatistics 下载统计信息
+type DownloadStatistics struct {
+	TotalCount       int64            `json:"total_count"`
+	CompletedCount   int64            `json:"completed_count"`
+	FailedCount      int64            `json:"failed_count"`
+	DownloadingCount int64            `json:"downloading_count"`
+	PendingCount     int64            `json:"pending_count"`
+	DailyStats       []DailyStat      `json:"daily_stats"`
+	SubscriptionStats []SubscriptionStat `json:"subscription_stats"`
+}
+
+// DailyStat 每日统计
+type DailyStat struct {
+	Date          string `json:"date"`
+	Count         int64  `json:"count"`
+	Completed     int64  `json:"completed"`
+	Failed        int64  `json:"failed"`
+	TotalSize     int64  `json:"total_size"`
+}
+
+// SubscriptionStat 订阅下载统计
+type SubscriptionStat struct {
+	SubscriptionID uint   `json:"subscription_id"`
+	Name           string `json:"name"`
+	Count          int64  `json:"count"`
+}
+
+// GetDownloadStatistics 获取下载统计数据
+func (r *downloadRepository) GetDownloadStatistics(days int) (*DownloadStatistics, error) {
+	var stats DownloadStatistics
+
+	// 获取各状态数量
+	type StatusCount struct {
+		Status string
+		Count  int64
+	}
+	var statusCounts []StatusCount
+	err := r.db.Model(&model.Download{}).
+		Select("status, COUNT(*) as count").
+		Group("status").
+		Scan(&statusCounts).Error
+	if err != nil {
+		return nil, err
+	}
+
+	for _, sc := range statusCounts {
+		switch sc.Status {
+		case "completed":
+			stats.CompletedCount = sc.Count
+		case "failed":
+			stats.FailedCount = sc.Count
+		case "downloading":
+			stats.DownloadingCount = sc.Count
+		case "pending":
+			stats.PendingCount = sc.Count
+		}
+		stats.TotalCount += sc.Count
+	}
+
+	// 获取每日统计
+	if days > 0 {
+		err = r.db.Raw(`
+			SELECT
+				DATE(created_at) as date,
+				COUNT(*) as count,
+				SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+				SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+				0 as total_size
+			FROM downloads
+			WHERE created_at >= DATE('now', '-' || ? || ' days')
+			GROUP BY DATE(created_at)
+			ORDER BY date DESC
+		`, days).Scan(&stats.DailyStats).Error
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// 获取订阅下载排行 Top 10
+	err = r.db.Raw(`
+		SELECT
+			subscription_id,
+			COUNT(*) as count
+		FROM downloads
+		GROUP BY subscription_id
+		ORDER BY count DESC
+		LIMIT 10
+	`).Scan(&stats.SubscriptionStats).Error
+	if err != nil {
+		return nil, err
+	}
+
+	// 填充订阅名称
+	for i := range stats.SubscriptionStats {
+		var sub model.Subscription
+		if err := r.db.Select("name").First(&sub, stats.SubscriptionStats[i].SubscriptionID).Error; err == nil {
+			stats.SubscriptionStats[i].Name = sub.Name
+		}
+	}
+
+	return &stats, nil
 }

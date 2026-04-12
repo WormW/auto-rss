@@ -58,6 +58,21 @@ type SubscriptionRepository interface {
 	// 统计
 	GetStatistics() (*SubscriptionStatistics, error)
 	GetWeeklyUpdates() (int64, error)
+
+	// 搜索
+	SearchSubscriptions(query string, groupID *uint, tagIDs []uint, enabled *bool, offset, limit int) ([]model.Subscription, int64, error)
+
+	// 标签管理
+	CreateTag(tag *model.SubscriptionTag) error
+	UpdateTag(tag *model.SubscriptionTag) error
+	DeleteTag(id uint) error
+	GetTagByID(id uint) (*model.SubscriptionTag, error)
+	GetTagByName(name string) (*model.SubscriptionTag, error)
+	ListTags() ([]model.SubscriptionTag, error)
+	AddTagsToSubscription(subscriptionID uint, tagIDs []uint) error
+	RemoveTagsFromSubscription(subscriptionID uint, tagIDs []uint) error
+	GetSubscriptionTags(subscriptionID uint) ([]model.SubscriptionTag, error)
+	GetSubscriptionsByTag(tagID uint) ([]model.Subscription, error)
 }
 
 type subscriptionRepository struct {
@@ -301,4 +316,162 @@ func (r *subscriptionRepository) GetWeeklyUpdates() (int64, error) {
 		Where("last_download_at >= datetime('now', '-7 days')").
 		Count(&count).Error
 	return count, err
+}
+
+// ==================== 标签管理 ====================
+
+// CreateTag 创建标签
+func (r *subscriptionRepository) CreateTag(tag *model.SubscriptionTag) error {
+	return r.db.Create(tag).Error
+}
+
+// UpdateTag 更新标签
+func (r *subscriptionRepository) UpdateTag(tag *model.SubscriptionTag) error {
+	return r.db.Save(tag).Error
+}
+
+// DeleteTag 删除标签
+func (r *subscriptionRepository) DeleteTag(id uint) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		// 先删除关联关系
+		if err := tx.Where("tag_id = ?", id).Delete(&model.SubscriptionTagRelation{}).Error; err != nil {
+			return err
+		}
+		// 删除标签
+		return tx.Delete(&model.SubscriptionTag{}, id).Error
+	})
+}
+
+// GetTagByID 根据ID获取标签
+func (r *subscriptionRepository) GetTagByID(id uint) (*model.SubscriptionTag, error) {
+	var tag model.SubscriptionTag
+	err := r.db.First(&tag, id).Error
+	if err != nil {
+		return nil, err
+	}
+	return &tag, nil
+}
+
+// GetTagByName 根据名称获取标签
+func (r *subscriptionRepository) GetTagByName(name string) (*model.SubscriptionTag, error) {
+	var tag model.SubscriptionTag
+	err := r.db.Where("name = ?", name).First(&tag).Error
+	if err != nil {
+		return nil, err
+	}
+	return &tag, nil
+}
+
+// ListTags 获取所有标签
+func (r *subscriptionRepository) ListTags() ([]model.SubscriptionTag, error) {
+	var tags []model.SubscriptionTag
+	err := r.db.Order("sort_order ASC, id ASC").Find(&tags).Error
+	return tags, err
+}
+
+// AddTagsToSubscription 为订阅添加标签
+func (r *subscriptionRepository) AddTagsToSubscription(subscriptionID uint, tagIDs []uint) error {
+	if len(tagIDs) == 0 {
+		return nil
+	}
+
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		for _, tagID := range tagIDs {
+			relation := model.SubscriptionTagRelation{
+				SubscriptionID: subscriptionID,
+				TagID:          tagID,
+			}
+			// 忽略重复插入的错误
+			if err := tx.Create(&relation).Error; err != nil {
+				// 如果是重复键错误，忽略
+				if !strings.Contains(err.Error(), "UNIQUE constraint failed") {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}
+
+// RemoveTagsFromSubscription 从订阅移除标签
+func (r *subscriptionRepository) RemoveTagsFromSubscription(subscriptionID uint, tagIDs []uint) error {
+	if len(tagIDs) == 0 {
+		return nil
+	}
+	return r.db.Where("subscription_id = ? AND tag_id IN ?", subscriptionID, tagIDs).
+		Delete(&model.SubscriptionTagRelation{}).Error
+}
+
+// GetSubscriptionTags 获取订阅的标签列表
+func (r *subscriptionRepository) GetSubscriptionTags(subscriptionID uint) ([]model.SubscriptionTag, error) {
+	var tags []model.SubscriptionTag
+	err := r.db.Table("subscription_tags").
+		Select("subscription_tags.*").
+		Joins("JOIN subscription_tag_relations ON subscription_tag_relations.tag_id = subscription_tags.id").
+		Where("subscription_tag_relations.subscription_id = ?", subscriptionID).
+		Order("subscription_tags.sort_order ASC").
+		Find(&tags).Error
+	return tags, err
+}
+
+// GetSubscriptionsByTag 获取带有指定标签的所有订阅
+func (r *subscriptionRepository) GetSubscriptionsByTag(tagID uint) ([]model.Subscription, error) {
+	var subscriptions []model.Subscription
+	err := r.db.Table("subscriptions").
+		Select("subscriptions.*").
+		Joins("JOIN subscription_tag_relations ON subscription_tag_relations.subscription_id = subscriptions.id").
+		Where("subscription_tag_relations.tag_id = ?", tagID).
+		Find(&subscriptions).Error
+	return subscriptions, err
+}
+
+// SearchSubscriptions 搜索订阅（支持关键词、标签、分组筛选）
+func (r *subscriptionRepository) SearchSubscriptions(query string, groupID *uint, tagIDs []uint, enabled *bool, offset, limit int) ([]model.Subscription, int64, error) {
+	var subscriptions []model.Subscription
+	var total int64
+
+	db := r.db.Model(&model.Subscription{})
+
+	// 关键词搜索
+	if query != "" {
+		db = db.Where("name LIKE ? OR fansub LIKE ?", "%"+query+"%", "%"+query+"%")
+	}
+
+	// 分组筛选
+	if groupID != nil {
+		db = db.Where("group_id = ?", *groupID)
+	}
+
+	// 标签筛选
+	if len(tagIDs) > 0 {
+		db = db.Table("subscriptions").
+			Select("subscriptions.*").
+			Joins("JOIN subscription_tag_relations ON subscription_tag_relations.subscription_id = subscriptions.id").
+			Where("subscription_tag_relations.tag_id IN ?", tagIDs).
+			Group("subscriptions.id")
+	}
+
+	// 启用状态筛选
+	if enabled != nil {
+		db = db.Where("enabled = ?", *enabled)
+	}
+
+	// 获取总数
+	if err := db.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	// 分页
+	if limit <= 0 {
+		limit = DefaultPageSize
+	}
+	if limit > MaxPageSize {
+		limit = MaxPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	err := db.Offset(offset).Limit(limit).Find(&subscriptions).Error
+	return subscriptions, total, err
 }
