@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -170,6 +171,14 @@ func (m *mockDownloadRepo) UpdateInTx(tx *gorm.DB, download *model.Download) err
 		return m.updateInTxFunc(tx, download)
 	}
 	return nil
+}
+
+func (m *mockDownloadRepo) GetDownloadHistory(filter *repository.DownloadHistoryFilter, offset, limit int) ([]model.Download, int64, error) {
+	return nil, 0, nil
+}
+
+func (m *mockDownloadRepo) GetDownloadStatistics(days int) (*repository.DownloadStatistics, error) {
+	return nil, nil
 }
 
 func TestDownloadHandler_List(t *testing.T) {

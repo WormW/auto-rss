@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"strings"
+
 	"github.com/WormW/auto-rss/internal/model"
 	"gorm.io/gorm"
 )

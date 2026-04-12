@@ -344,3 +344,47 @@ func (m *mockSubscriptionRepo) GetStatistics() (*repository.SubscriptionStatisti
 func (m *mockSubscriptionRepo) GetWeeklyUpdates() (int64, error) {
 	return 0, nil
 }
+
+func (m *mockSubscriptionRepo) SearchSubscriptions(query string, groupID *uint, tagIDs []uint, enabled *bool, offset, limit int) ([]model.Subscription, int64, error) {
+	return nil, 0, nil
+}
+
+func (m *mockSubscriptionRepo) CreateTag(tag *model.SubscriptionTag) error {
+	return nil
+}
+
+func (m *mockSubscriptionRepo) UpdateTag(tag *model.SubscriptionTag) error {
+	return nil
+}
+
+func (m *mockSubscriptionRepo) DeleteTag(id uint) error {
+	return nil
+}
+
+func (m *mockSubscriptionRepo) GetTagByID(id uint) (*model.SubscriptionTag, error) {
+	return nil, nil
+}
+
+func (m *mockSubscriptionRepo) GetTagByName(name string) (*model.SubscriptionTag, error) {
+	return nil, nil
+}
+
+func (m *mockSubscriptionRepo) ListTags() ([]model.SubscriptionTag, error) {
+	return nil, nil
+}
+
+func (m *mockSubscriptionRepo) AddTagsToSubscription(subscriptionID uint, tagIDs []uint) error {
+	return nil
+}
+
+func (m *mockSubscriptionRepo) RemoveTagsFromSubscription(subscriptionID uint, tagIDs []uint) error {
+	return nil
+}
+
+func (m *mockSubscriptionRepo) GetSubscriptionTags(subscriptionID uint) ([]model.SubscriptionTag, error) {
+	return nil, nil
+}
+
+func (m *mockSubscriptionRepo) GetSubscriptionsByTag(tagID uint) ([]model.Subscription, error) {
+	return nil, nil
+}
