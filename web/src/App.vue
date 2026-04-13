@@ -118,8 +118,7 @@
                     >
                       <template #icon>
                         <n-icon :class="{ 'spin-animation': wsStore.status === 'connecting' }">
-                          <WifiOutline v-if="wsStore.status === 'connected'" />
-                          <RefreshOutline v-else-if="wsStore.status === 'connecting'" />
+                          <RefreshOutline v-if="wsStore.status === 'connecting'" />
                           <CloudOfflineOutline v-else />
                         </n-icon>
                       </template>
@@ -230,7 +229,6 @@ import {
   LogOutOutline,
   PersonOutline,
   MenuOutline,
-  WifiOutline,
   CloudOfflineOutline,
   RefreshOutline
 } from '@vicons/ionicons5'

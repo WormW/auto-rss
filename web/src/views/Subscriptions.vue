@@ -206,8 +206,8 @@
                       缺 {{ getMissingEpisodes(sub).length }} 集
                     </div>
                     <!-- 下载中标识 -->
-                    <div v-if="sub.downloading_count > 0" class="downloading-badge">
-                      <n-spin size="small" /> {{ sub.downloading_count }}
+                    <div v-if="(sub.downloading_count || 0) > 0" class="downloading-badge">
+                      <n-spin size="small" /> {{ sub.downloading_count || 0 }}
                     </div>
                     <!-- 今日更新标识 -->
                     <div v-if="isTodayUpdate(sub)" class="today-badge">今日</div>
@@ -904,15 +904,17 @@ const filteredCompletedSubscriptions = computed(() => {
   return filteredAllSubscriptions.value.filter(sub => isCompleted(sub))
 })
 
+import type { DataTableColumns } from 'naive-ui'
+
 // 列表视图列定义
-const listColumns = computed(() => [
+const listColumns = computed<DataTableColumns<Subscription>>(() => [
   { type: 'selection', fixed: 'left' },
   {
     title: '番剧',
     key: 'name',
     fixed: 'left',
     width: 250,
-    render: (row: Subscription) => (
+    render: (row) => (
       <NSpace align="center" size={8}>
         {row.bangumi_cover_local ? (
           <img src={`/covers/${row.bangumi_cover_local}`} style="width: 40px; height: 56px; object-fit: cover; border-radius: 4px;" />
@@ -935,7 +937,7 @@ const listColumns = computed(() => [
     title: '进度',
     key: 'progress',
     width: 150,
-    render: (row: Subscription) => (
+    render: (row) => (
       <div>
         <NProgress
           percentage={getProgressPercent(row)}
@@ -945,7 +947,7 @@ const listColumns = computed(() => [
         />
         <div style="font-size: 12px; color: #666; margin-top: 4px;">
           {row.current_episode || 0} / {row.total_episodes || '?'}
-          {row.latest_episode > (row.current_episode || 0) && (
+          {(row.latest_episode || 0) > (row.current_episode || 0) && (
             <span style="color: #18a058; margin-left: 8px;">最新 {row.latest_episode}</span>
           )}
         </div>
@@ -956,11 +958,11 @@ const listColumns = computed(() => [
     title: '状态',
     key: 'status',
     width: 100,
-    render: (row: Subscription) => (
+    render: (row) => (
       <NSpace>
         {!row.enabled && <NTag size="small" type="default">已禁用</NTag>}
         {isCompleted(row) && <NTag size="small" type="success">完结</NTag>}
-        {row.downloading_count > 0 && <NTag size="small" type="info">下载中</NTag>}
+        {(row.downloading_count || 0) > 0 && <NTag size="small" type="info">下载中</NTag>}
         {getMissingEpisodes(row).length > 0 && <NTag size="small" type="warning">有缺失</NTag>}
       </NSpace>
     )
@@ -969,7 +971,7 @@ const listColumns = computed(() => [
     title: '更新时间',
     key: 'update_time',
     width: 120,
-    render: (row: Subscription) => (
+    render: (row) => (
       <div>
         {row.air_time && <div>{row.air_time}</div>}
         {(() => {
@@ -987,7 +989,7 @@ const listColumns = computed(() => [
     key: 'actions',
     fixed: 'right',
     width: 180,
-    render: (row: Subscription) => (
+    render: (row) => (
       <NSpace>
         <NButton text size="small" onClick={() => handleCollectEpisodes(row.id)}>
           <NIcon size={16}><DownloadOutlined /></NIcon>
@@ -1185,8 +1187,8 @@ const toggleSelection = (id: number, checked: boolean) => {
   }
 }
 
-const handleCheck = (keys: number[]) => {
-  selectedIds.value = keys
+const handleCheck = (keys: (string | number)[]) => {
+  selectedIds.value = keys.map(k => Number(k))
 }
 
 // 批量操作
@@ -1338,10 +1340,6 @@ const showAddDialog = () => {
   activeTab.value = 'rss_source'
   showRssStep.value = true
   showModal.value = true
-}
-
-const showAnimeSearch = () => {
-  animeSearchRef.value?.show()
 }
 
 const handleSearchSubscribe = (data: {
