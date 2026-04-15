@@ -115,6 +115,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	logHandler := handler.NewLogHandler(logRepo)
 	fileOrganizerHandler := handler.NewFileOrganizerHandler(appCtx)
 	notificationHandler := handler.NewNotificationHandler(db, notificationSvc, wsHub, jwtService)
+	recoveryHandler := handler.NewRecoveryHandler(db, subscriptionRepo, downloadRepo, configRepo, nil)
 	calendarHandler := handler.NewCalendarHandler(subscriptionRepo, downloadRepo)
 	diskHandler := handler.NewDiskHandler(db, downloadRepo, subscriptionRepo, configRepo)
 	tagHandler := handler.NewTagHandler(subscriptionRepo)
@@ -237,6 +238,12 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		{
 			fileOrganizer.POST("/trigger", fileOrganizerHandler.TriggerScan)
 			fileOrganizer.POST("/reload", fileOrganizerHandler.ReloadConfig)
+		}
+
+		// 扫描恢复
+		recovery := v1.Group("/recovery")
+		{
+			recovery.POST("/scan", recoveryHandler.Scan)
 		}
 
 		// 任务管理

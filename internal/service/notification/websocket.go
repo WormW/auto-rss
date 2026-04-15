@@ -181,24 +181,25 @@ func (c *Client) writePump() {
 // HandleWebSocket 处理 WebSocket 连接升级
 func HandleWebSocket(hub *WebSocketHub, jwtService middleware.JWTService) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Extract token from query parameter
+		// Extract token from query parameter (optional for read-only access)
 		token := c.Query("token")
-		if token == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"code":    401,
-				"message": "Token required",
-			})
-			return
-		}
-
-		// Validate the token
-		claims, err := jwtService.ValidateAccessToken(token)
-		if err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"code":    401,
-				"message": "Invalid or expired token",
-			})
-			return
+		
+		var clientID string
+		
+		if token != "" {
+			// Validate the token if provided
+			claims, err := jwtService.ValidateAccessToken(token)
+			if err != nil {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+					"code":    401,
+					"message": "Invalid or expired token",
+				})
+				return
+			}
+			clientID = fmt.Sprintf("user_%d_%s_%s", claims.UserID, c.ClientIP(), time.Now().Format("20060102150405"))
+		} else {
+			// Anonymous connection (no token)
+			clientID = fmt.Sprintf("anon_%s_%s", c.ClientIP(), time.Now().Format("20060102150405"))
 		}
 
 		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
@@ -210,7 +211,7 @@ func HandleWebSocket(hub *WebSocketHub, jwtService middleware.JWTService) gin.Ha
 			hub:      hub,
 			conn:     conn,
 			send:     make(chan []byte, 256),
-			clientID: fmt.Sprintf("user_%d_%s_%s", claims.UserID, c.ClientIP(), time.Now().Format("20060102150405")),
+			clientID: clientID,
 		}
 		client.hub.register <- client
 		go client.writePump()

@@ -262,21 +262,31 @@ const connectionTagType = computed(() => {
 
 // Handle manual reconnect
 const handleReconnect = () => {
-  if (wsService.value && wsStore.canReconnect) {
-    console.log('[App] Manual reconnect triggered')
+  console.log('[App] Manual reconnect triggered, current status:', wsStore.status)
+  
+  // If service doesn't exist, initialize it first
+  if (!wsService.value) {
+    console.log('[App] WebSocket service not initialized, creating new instance')
+    initWebSocket()
+    return
+  }
+  
+  // If service exists and reconnection is possible, trigger reconnect
+  if (wsStore.canReconnect) {
+    console.log('[App] Triggering WebSocket reconnect')
     wsService.value.reconnect()
+  } else {
+    console.log('[App] Cannot reconnect, status:', wsStore.status)
   }
 }
 
 // Initialize WebSocket connection
 const initWebSocket = () => {
-  // Get token from localStorage (set during login)
+  // Get token from localStorage (optional, for authenticated access)
   const storedToken = localStorage.getItem('access_token')
-  if (!storedToken) {
-    console.log('[App] No token available, WebSocket not initialized')
-    return
-  }
-  token.value = storedToken
+  token.value = storedToken || ''
+  
+  // Always create WebSocket service, token is optional
   wsService.value = createWebSocketService(wsStore)
   wsService.value.connect(token.value)
 }

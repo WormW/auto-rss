@@ -65,21 +65,23 @@ export class WebSocketService {
   }
 
   /**
-   * Connect to WebSocket server with JWT token
+   * Connect to WebSocket server with optional JWT token
    */
-  connect(token: string): void {
+  connect(token?: string): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
       console.log('[WebSocket] Already connected')
       return
     }
 
-    this.currentToken = token
+    this.currentToken = token || null
     this.isManualClose = false
     this.store.setStatus('connecting')
 
     try {
-      // Do not log token values (per T-06-05 threat mitigation)
-      const urlWithToken = `${this.url}?token=${encodeURIComponent(token)}`
+      // Build URL with optional token
+      const urlWithToken = token 
+        ? `${this.url}?token=${encodeURIComponent(token)}`
+        : this.url
       this.ws = new WebSocket(urlWithToken)
 
       this.ws.onopen = this.onOpen.bind(this)
@@ -125,9 +127,8 @@ export class WebSocketService {
       this.ws = null
     }
 
-    if (this.currentToken) {
-      this.connect(this.currentToken)
-    }
+    // Reconnect with or without token
+    this.connect(this.currentToken || undefined)
   }
 
   /**
@@ -237,9 +238,8 @@ export class WebSocketService {
     console.log(`[WebSocket] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempt}/${MAX_RETRIES})`)
 
     this.reconnectTimer = window.setTimeout(() => {
-      if (this.currentToken) {
-        this.connect(this.currentToken)
-      }
+      // Reconnect with or without token
+      this.connect(this.currentToken || undefined)
     }, delay)
   }
 
