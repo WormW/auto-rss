@@ -796,7 +796,7 @@ const statusOptions = [
 ]
 
 // 统计计算
-const activeCount = computed(() => subscriptions.value.filter(s => !isCompleted(s)).length)
+const activeCount = computed(() => subscriptions.value.filter(s => !isCompleted(s) && s.enabled).length)
 const todayUpdateCount = computed(() => todayUpdates.value.length)
 const downloadingCount = computed(() => subscriptions.value.reduce((sum, s) => sum + (s.downloading_count || 0), 0))
 const missingEpisodesCount = computed(() => subscriptions.value.filter(s => getMissingEpisodes(s).length > 0).length)
