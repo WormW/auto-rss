@@ -1,8 +1,13 @@
 package router
 
 import (
+	"io"
 	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/WormW/auto-rss/internal/api/handler"
@@ -10,8 +15,12 @@ import (
 	"github.com/WormW/auto-rss/internal/api/middleware/ratelimit"
 	"github.com/WormW/auto-rss/internal/app"
 	"github.com/WormW/auto-rss/internal/config"
+	"github.com/WormW/auto-rss/internal/model"
+	"github.com/WormW/auto-rss/internal/pkg/logger"
+	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/auth"
+	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/calendar"
 	"github.com/WormW/auto-rss/internal/service/disk"
 	"github.com/WormW/auto-rss/internal/service/downloader"
@@ -64,8 +73,9 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		ExcludedPaths: []string{"/health", "/api/v1/health"},
 	}))
 
-	// 静态文件服务 - 封面图片
-	r.Static("/covers", "./data/covers")
+	// 静态文件服务 - 封面图片（带 fallback）
+	coverPath := utils.GetCoverPath()
+	r.GET("/covers/*filepath", coverHandler(coverPath, db))
 
 	// 初始化服务
 	rssParser := rss.NewParser()
@@ -341,4 +351,107 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	}
 
 	return r
+}
+
+// coverHandler 封面图片处理：本地存在则直接返回，否则从 Bangumi 原 URL fallback 并异步重新下载
+func coverHandler(coverPath string, db *gorm.DB) gin.HandlerFunc {
+	imgService := bangumi.NewImageService(coverPath)
+	return func(c *gin.Context) {
+		filename := filepath.Base(c.Param("filepath"))
+		if filename == "" || filename == "." || filename == "/" {
+			c.Status(http.StatusNotFound)
+			return
+		}
+
+		localPath := filepath.Join(coverPath, filename)
+		if _, err := os.Stat(localPath); err == nil {
+			c.File(localPath)
+			return
+		}
+
+		// 本地缺失，尝试从文件名提取 bangumi_id 做 fallback
+		bangumiID := extractBangumiIDFromCoverFilename(filename)
+		if bangumiID <= 0 {
+			c.Status(http.StatusNotFound)
+			return
+		}
+
+		var sub model.Subscription
+		if err := db.Where("bangumi_id = ?", bangumiID).First(&sub).Error; err != nil {
+			c.Status(http.StatusNotFound)
+			return
+		}
+
+		if sub.BangumiCover == "" {
+			c.Status(http.StatusNotFound)
+			return
+		}
+
+		// 设置代理（如果配置了）
+		configRepo := repository.NewConfigRepository(db)
+		if proxyConfig, err := configRepo.Get("system_proxy"); err == nil && proxyConfig != nil && proxyConfig.Value != "" {
+			imgService.SetProxy(proxyConfig.Value)
+		}
+
+		// 代理返回原始图片
+		proxyCoverImage(c, sub.BangumiCover)
+
+		// 异步触发重新下载
+		go func() {
+			if _, err := imgService.DownloadCover(sub.BangumiCover, bangumiID); err != nil {
+				logger.Error("Failed to re-download cover", "filename", filename, "error", err)
+			} else {
+				logger.Info("Cover re-downloaded successfully", "filename", filename)
+			}
+		}()
+	}
+}
+
+// extractBangumiIDFromCoverFilename 从封面文件名提取 bangumi_id
+func extractBangumiIDFromCoverFilename(filename string) int {
+	re := regexp.MustCompile(`^bangumi_(\d+)_[a-f0-9]+\.[a-z]+$`)
+	if matches := re.FindStringSubmatch(filename); len(matches) > 1 {
+		if id, err := strconv.Atoi(matches[1]); err == nil {
+			return id
+		}
+	}
+	return 0
+}
+
+// proxyCoverImage 代理返回远程封面图片
+func proxyCoverImage(c *gin.Context, imageURL string) {
+	req, err := http.NewRequest("GET", imageURL, nil)
+	if err != nil {
+		c.Status(http.StatusInternalServerError)
+		return
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("Referer", "https://bgm.tv/")
+	req.Header.Set("Accept", "image/webp,image/apng,image/*,*/*;q=0.8")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		c.Status(http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		c.Status(resp.StatusCode)
+		return
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "image/jpeg"
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.Status(http.StatusBadGateway)
+		return
+	}
+
+	c.Data(http.StatusOK, contentType, data)
 }

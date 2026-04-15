@@ -2,6 +2,7 @@ package utils
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -9,6 +10,19 @@ import (
 	"unicode"
 	"unicode/utf8"
 )
+
+// GetExecutableDir 返回可执行文件所在目录
+func GetExecutableDir() string {
+	if exePath, err := os.Executable(); err == nil {
+		return filepath.Dir(exePath)
+	}
+	return "."
+}
+
+// GetCoverPath 返回封面图片的绝对存储路径
+func GetCoverPath() string {
+	return filepath.Join(GetExecutableDir(), "data", "covers")
+}
 
 // GenerateDownloadPath 生成下载路径（包含番剧名子目录）
 // 智能检测：如果 basePath 已经包含番剧名，则不再重复添加

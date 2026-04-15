@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"html"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -53,7 +55,7 @@ func NewSubscriptionHandler(
 ) *SubscriptionHandler {
 	// Create internal services
 	bgService := bangumi.NewBangumiService()
-	imgService := bangumi.NewImageService("./data/covers")
+	imgService := bangumi.NewImageService(utils.GetCoverPath())
 	mikanService := mikan.NewMikanService("")
 	rssParser := rss.NewParser()
 
@@ -752,6 +754,9 @@ func (h *SubscriptionHandler) List(c *gin.Context) {
 		return
 	}
 
+	// 异步补下载缺失的封面
+	go h.repairMissingCovers(subscriptionsWithStats)
+
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
 		"message": "Success",
@@ -759,6 +764,31 @@ func (h *SubscriptionHandler) List(c *gin.Context) {
 			"list": subscriptionsWithStats,
 		},
 	})
+}
+
+// repairMissingCovers 检查并补下载磁盘上缺失的封面
+func (h *SubscriptionHandler) repairMissingCovers(subscriptions []repository.SubscriptionWithStats) {
+	coverPath := utils.GetCoverPath()
+	h.setProxy()
+	for _, sub := range subscriptions {
+		if sub.BangumiCoverLocal == "" || sub.BangumiCover == "" || sub.BangumiID <= 0 {
+			continue
+		}
+		localPath := filepath.Join(coverPath, sub.BangumiCoverLocal)
+		if _, err := os.Stat(localPath); err == nil {
+			continue
+		}
+		if _, err := h.imageService.DownloadCover(sub.BangumiCover, sub.BangumiID); err != nil {
+			logger.Error("Failed to repair missing cover",
+				"subscription_id", sub.ID,
+				"filename", sub.BangumiCoverLocal,
+				"error", err)
+		} else {
+			logger.Info("Repaired missing cover",
+				"subscription_id", sub.ID,
+				"filename", sub.BangumiCoverLocal)
+		}
+	}
 }
 
 // CollectEpisodes 手动收集缺失的剧集（异步执行）
