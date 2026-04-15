@@ -257,39 +257,11 @@ export interface DiskStatus {
   status: 'healthy' | 'warning' | 'critical'
 }
 
-export interface CleanupSettings {
-  enabled: boolean
-  strategy: 'age' | 'space' | 'hybrid'
-  retention_days: number
-  min_free_gb: number
-  warning_threshold_gb: number
-  critical_threshold_gb: number
-}
-
-export interface CleanupHistoryItem {
-  id: number
-  trigger_type: 'auto' | 'manual'
-  before_free: number
-  after_free: number
-  deleted_count: number
-  freed_bytes: number
-  status: 'success' | 'failed'
-  created_at: string
-}
-
 export const diskApi = {
   getStatus: () =>
     api.get('/disk/status'),
   getInfo: () =>
-    api.get('/disk/info'),
-  getSettings: () =>
-    api.get('/disk/settings'),
-  updateSettings: (settings: CleanupSettings) =>
-    api.put('/disk/settings', settings),
-  triggerCleanup: (strategy?: string, keepDays?: number) =>
-    api.post('/disk/cleanup', { strategy, keep_days: keepDays }),
-  getHistory: (page = 1, pageSize = 20) =>
-    api.get('/disk/history', { params: { page, page_size: pageSize } })
+    api.get('/disk/info')
 }
 
 export * from './rss-source'
