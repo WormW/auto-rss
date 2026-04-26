@@ -2,6 +2,7 @@ package downloader
 
 import (
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
@@ -184,7 +185,10 @@ func (h *completionHandler) renameFile(download *model.Download, subscription *m
 	// Step 1: 移动种子到新位置（如果需要）
 	targetLocation := torrent.SavePath
 	if newDir != "" && newDir != "." {
-		targetLocation = torrent.SavePath + "/" + newDir
+		// torrent.SavePath 已经是 basePath/番剧名（由 GenerateDownloadPath 生成），
+		// newDir 也以番剧名开头（如 "番剧名/Season 1"），
+		// 直接拼接会导致番剧名重复嵌套，所以取 torrent.SavePath 的父目录作为 base。
+		targetLocation = filepath.Join(filepath.Dir(torrent.SavePath), newDir)
 	}
 
 	if torrent.SavePath != targetLocation {
