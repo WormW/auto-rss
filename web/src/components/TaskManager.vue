@@ -82,7 +82,14 @@
                 {{ task.error }}
               </div>
               <div v-if="task.result" style="font-size: 12px; color: #67c23a; margin-top: 4px;">
-                收集: {{ task.result.collected || 0 }} 条
+                <template v-if="task.result.total !== undefined">
+                  <!-- 导入任务结果 -->
+                  导入: 成功 {{ task.result.success || 0 }} / 跳过 {{ task.result.skipped || 0 }} / 失败 {{ task.result.failed || 0 }} (共{{ task.result.total }})
+                </template>
+                <template v-else>
+                  <!-- 采集任务结果 -->
+                  收集: {{ task.result.collected || 0 }} 条
+                </template>
               </div>
               <div style="font-size: 11px; color: #999; margin-top: 4px;">
                 {{ formatTime(task.completed_at) }}

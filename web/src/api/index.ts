@@ -103,8 +103,10 @@ export const subscriptionApi = {
     api.delete(`/subscriptions/${id}`),
   renameFiles: (id: number) =>
     api.post(`/subscriptions/${id}/rename-files`),
-  batchImportFromRSS: (items: Array<{title: string, fansub?: string, rss_url?: string, source_id?: number, source_name?: string}>) =>
-    api.post('/subscriptions/batch-import-from-rss', { items })
+  scanFolder: (id: number, data: { folder_path: string; dry_run: boolean; rename_files: boolean }) =>
+    api.post(`/subscriptions/${id}/scan-folder`, data),
+  batchImportFromRSS: (items: Array<{title: string, fansub?: string, rss_url?: string, season?: number, source_id?: number, source_name?: string}>) =>
+    api.post('/subscriptions/batch-import-from-rss', { items }),
 }
 
 export const downloadApi = {
@@ -224,6 +226,7 @@ export interface CalendarItem {
   current_episode: number
   total_episodes: number
   is_downloaded: boolean
+  is_completed: boolean
   cover?: string
 }
 

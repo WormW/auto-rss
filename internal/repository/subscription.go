@@ -15,11 +15,11 @@ type SubscriptionWithStats struct {
 
 // SubscriptionStatistics 订阅统计信息
 type SubscriptionStatistics struct {
-	TotalCount        int64 `json:"total_count"`
-	ActiveCount       int64 `json:"active_count"`
-	DisabledCount     int64 `json:"disabled_count"`
-	CompletedCount    int64 `json:"completed_count"`
-	WeeklyUpdateCount int64 `json:"weekly_update_count"`
+	TotalCount        int64            `json:"total_count"`
+	ActiveCount       int64            `json:"active_count"`
+	DisabledCount     int64            `json:"disabled_count"`
+	CompletedCount    int64            `json:"completed_count"`
+	WeeklyUpdateCount int64            `json:"weekly_update_count"`
 	GroupStats        []GroupStatistic `json:"group_stats"`
 }
 
@@ -37,6 +37,7 @@ type SubscriptionRepository interface {
 	Delete(id uint) error
 	GetByID(id uint) (*model.Subscription, error)
 	GetByRSSURL(rssURL string) (*model.Subscription, error)
+	GetByRSSURLAndSeason(rssURL string, season int) (*model.Subscription, error)
 	List(offset, limit int) ([]model.Subscription, int64, error)
 	GetActiveSubscriptions() ([]model.Subscription, error)
 	// UpdateInTx 在事务中更新订阅
@@ -115,6 +116,16 @@ func (r *subscriptionRepository) GetByID(id uint) (*model.Subscription, error) {
 func (r *subscriptionRepository) GetByRSSURL(rssURL string) (*model.Subscription, error) {
 	var subscription model.Subscription
 	err := r.db.Where("rss_url = ?", rssURL).First(&subscription).Error
+	if err != nil {
+		return nil, err
+	}
+	return &subscription, nil
+}
+
+// GetByRSSURLAndSeason 根据 RSS URL 和 Season 获取订阅
+func (r *subscriptionRepository) GetByRSSURLAndSeason(rssURL string, season int) (*model.Subscription, error) {
+	var subscription model.Subscription
+	err := r.db.Where("rss_url = ? AND season = ?", rssURL, season).First(&subscription).Error
 	if err != nil {
 		return nil, err
 	}

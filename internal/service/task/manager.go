@@ -14,6 +14,7 @@ type TaskType string
 
 const (
 	TaskTypeCollect TaskType = "collect" // 采集任务
+	TaskTypeImport  TaskType = "import"  // 导入任务
 )
 
 // TaskStatus 任务状态
@@ -34,8 +35,8 @@ type Task struct {
 	Status         TaskStatus `json:"status"`
 	SubscriptionID uint       `json:"subscription_id,omitempty"`
 	Name           string     `json:"name"`
-	Progress       int        `json:"progress"`       // 进度 0-100
-	Message        string     `json:"message"`        // 当前状态消息
+	Progress       int        `json:"progress"` // 进度 0-100
+	Message        string     `json:"message"`  // 当前状态消息
 	Error          string     `json:"error,omitempty"`
 	StartedAt      *time.Time `json:"started_at,omitempty"`
 	CompletedAt    *time.Time `json:"completed_at,omitempty"`
@@ -44,11 +45,11 @@ type Task struct {
 
 // Manager 任务管理器
 type Manager struct {
-	mu           sync.RWMutex
-	currentTask  *Task
-	cancelFunc   context.CancelFunc
-	taskHistory  []*Task
-	maxHistory   int
+	mu          sync.RWMutex
+	currentTask *Task
+	cancelFunc  context.CancelFunc
+	taskHistory []*Task
+	maxHistory  int
 }
 
 var (

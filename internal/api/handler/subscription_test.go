@@ -18,15 +18,16 @@ import (
 
 // mockSubscriptionRepo is a mock implementation of SubscriptionRepository for testing
 type mockSubscriptionRepo struct {
-	createFunc       func(subscription *model.Subscription) error
-	updateFunc       func(subscription *model.Subscription) error
-	deleteFunc       func(id uint) error
-	getByIDFunc      func(id uint) (*model.Subscription, error)
-	getByRSSURLFunc  func(rssURL string) (*model.Subscription, error)
-	listFunc         func(offset, limit int) ([]model.Subscription, int64, error)
-	getActiveFunc    func() ([]model.Subscription, error)
-	updateInTxFunc   func(tx *gorm.DB, subscription *model.Subscription) error
-	getWithCountFunc func() ([]repository.SubscriptionWithStats, error)
+	createFunc            func(subscription *model.Subscription) error
+	updateFunc            func(subscription *model.Subscription) error
+	deleteFunc            func(id uint) error
+	getByIDFunc           func(id uint) (*model.Subscription, error)
+	getByRSSURLFunc       func(rssURL string) (*model.Subscription, error)
+	getByRSSURLSeasonFunc func(rssURL string, season int) (*model.Subscription, error)
+	listFunc              func(offset, limit int) ([]model.Subscription, int64, error)
+	getActiveFunc         func() ([]model.Subscription, error)
+	updateInTxFunc        func(tx *gorm.DB, subscription *model.Subscription) error
+	getWithCountFunc      func() ([]repository.SubscriptionWithStats, error)
 
 	listCalls    int
 	getByIDCalls int
@@ -66,6 +67,13 @@ func (m *mockSubscriptionRepo) GetByID(id uint) (*model.Subscription, error) {
 func (m *mockSubscriptionRepo) GetByRSSURL(rssURL string) (*model.Subscription, error) {
 	if m.getByRSSURLFunc != nil {
 		return m.getByRSSURLFunc(rssURL)
+	}
+	return nil, errors.New("not found")
+}
+
+func (m *mockSubscriptionRepo) GetByRSSURLAndSeason(rssURL string, season int) (*model.Subscription, error) {
+	if m.getByRSSURLSeasonFunc != nil {
+		return m.getByRSSURLSeasonFunc(rssURL, season)
 	}
 	return nil, errors.New("not found")
 }
@@ -296,7 +304,6 @@ func TestSubscriptionHandler_Create(t *testing.T) {
 		})
 	}
 }
-
 
 // 批量操作相关方法（mock实现）
 func (m *mockSubscriptionRepo) BatchUpdateEnabled(ids []uint, enabled bool) error {

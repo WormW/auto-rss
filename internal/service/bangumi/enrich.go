@@ -177,16 +177,30 @@ func (e *enricher) populateSubscription(subscription *model.Subscription, subjec
 				"total_episodes", subject.TotalEps,
 				"reason", "Bangumi episodes API unavailable")
 		} else {
-			subscription.LatestEpisode = latestEp
-			logger.Info("Got latest episode from Bangumi API",
-				"subscription_name", subscription.Name,
-				"latest_episode", latestEp)
+			// Bangumi 的 episode sort 可能是累计集数（跨季），不能直接作为本季 latest_episode
+			if latestEp > subject.TotalEps+subscription.EpisodeOffset {
+				logger.Warn("Bangumi episode sort appears cumulative, not using as latest episode",
+					"subscription_name", subscription.Name,
+					"latest_episode", latestEp,
+					"total_episodes", subject.TotalEps,
+					"episode_offset", subscription.EpisodeOffset)
+				// 保持原有 latest_episode 不变，由 RSS 提供准确的本季集数
+			} else {
+				subscription.LatestEpisode = latestEp
+				logger.Info("Got latest episode from Bangumi API",
+					"subscription_name", subscription.Name,
+					"latest_episode", latestEp)
+			}
 		}
 	}
 
 	// 如果更新日期为空，尝试从Bangumi获取
 	if subscription.UpdateDay == "" && subject.AirWeekday >= 0 {
 		subscription.UpdateDay = strconv.Itoa(subject.AirWeekday)
+	}
+	// 同步填充追番日历使用的 AirDay（Smart Fetch 和日历服务均依赖此字段）
+	if subscription.AirDay == "" && subject.AirWeekday >= 0 {
+		subscription.AirDay = strconv.Itoa(subject.AirWeekday)
 	}
 
 	// 提取开播日期和年份

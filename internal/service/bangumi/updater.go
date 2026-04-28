@@ -180,7 +180,18 @@ func (u *BangumiUpdater) updateAllSubscriptions() {
 		}
 
 		// 如果集数有更新，则更新数据库
-		if latestEp > sub.LatestEpisode {
+		threshold := sub.TotalEpisodes + sub.EpisodeOffset
+		if latestEp > threshold && sub.TotalEpisodes > 0 {
+			logger.Warn("Bangumi episode sort appears cumulative, skipping update",
+				"id", sub.ID,
+				"name", sub.Name,
+				"latest_episode", latestEp,
+				"total_episodes", sub.TotalEpisodes,
+				"episode_offset", sub.EpisodeOffset,
+				"threshold", threshold)
+			skippedCount++
+		} else if latestEp > sub.LatestEpisode {
+			previous := sub.LatestEpisode
 			sub.LatestEpisode = latestEp
 			if err := u.subscriptionRepo.Update(&sub); err != nil {
 				logger.Error("Failed to update subscription latest episode",
@@ -195,7 +206,7 @@ func (u *BangumiUpdater) updateAllSubscriptions() {
 			logger.Info("Updated subscription latest episode",
 				"id", sub.ID,
 				"name", sub.Name,
-				"previous", sub.LatestEpisode,
+				"previous", previous,
 				"latest", latestEp)
 			successCount++
 		} else {

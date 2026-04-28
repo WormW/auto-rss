@@ -1,6 +1,8 @@
 package subscription
 
 import (
+	"fmt"
+
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/repository"
@@ -13,6 +15,7 @@ type ImportItem struct {
 	Title      string
 	Fansub     string
 	RssURL     string
+	Season     int
 	SourceID   uint
 	SourceName string
 }
@@ -60,15 +63,33 @@ func (b *batchImporter) Import(items []ImportItem) ([]ImportResult, error) {
 	if err != nil {
 		logger.Error("Failed to get existing subscriptions", "error", err)
 	}
-	existingNames := make(map[string]bool)
+	existingKeys := make(map[string]bool)
 	for _, sub := range existingSubs {
-		existingNames[sub.Name] = true
+		key := fmt.Sprintf("%s|%s|%d", sub.Name, sub.RssURL, sub.Season)
+		existingKeys[key] = true
 	}
+
+	// 对导入列表自身去重
+	seenKeys := make(map[string]bool)
 
 	for _, item := range items {
 		result := ImportResult{Title: item.Title, Success: false}
+		season := item.Season
+		if season <= 0 {
+			season = 1
+		}
+		key := fmt.Sprintf("%s|%s|%d", item.Title, item.RssURL, season)
 
-		if existingNames[item.Title] {
+		if seenKeys[key] {
+			result.Skipped = true
+			result.Success = true
+			result.Message = "导入列表内重复,跳过"
+			results = append(results, result)
+			continue
+		}
+		seenKeys[key] = true
+
+		if existingKeys[key] {
 			result.Skipped = true
 			result.Success = true
 			result.Message = "已存在,跳过"
@@ -144,13 +165,25 @@ func (b *batchImporter) Import(items []ImportItem) ([]ImportResult, error) {
 		}
 
 		subscription := &model.Subscription{
-			Name: item.Title, RssURL: selectedGroup.RSS, Season: 1,
+			Name: item.Title, RssURL: selectedGroup.RSS, Season: season,
 			Status: "active", Enabled: true, Fansub: selectedGroup.Name, RenameEnabled: true,
 		}
 
 		logger.Info("Fetching Bangumi data before creating subscription", "title", item.Title)
 		if err := b.bangumiEnricher.Enrich(subscription, false); err != nil {
 			logger.Warn("Failed to enrich subscription with Bangumi data", "title", item.Title, "error", err)
+		}
+
+		// 创建前数据库层面最终确认（防并发）
+		if subscription.RssURL != "" {
+			if _, dupErr := b.subscriptionRepo.GetByRSSURLAndSeason(subscription.RssURL, subscription.Season); dupErr == nil {
+				result.Skipped = true
+				result.Success = true
+				result.Message = "创建前检测到已存在,跳过"
+				results = append(results, result)
+				existingKeys[key] = true
+				continue
+			}
 		}
 
 		if err := b.subscriptionRepo.Create(subscription); err != nil {
@@ -173,7 +206,7 @@ func (b *batchImporter) Import(items []ImportItem) ([]ImportResult, error) {
 		result.Message = "导入成功"
 		result.Subscription = subscription
 		results = append(results, result)
-		existingNames[item.Title] = true
+		existingKeys[key] = true
 
 		logger.Info("Subscription imported successfully", "title", item.Title, "fansub", selectedGroup.Name, "subscription_id", subscription.ID)
 	}

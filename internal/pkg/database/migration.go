@@ -70,6 +70,20 @@ func RunMigrations(db *gorm.DB) error {
 				return nil
 			},
 		},
+		{
+			ID: "202504230001", // 回填 air_day 数据（从 update_day 复制）
+			Migrate: func(tx *gorm.DB) error {
+				result := tx.Exec(`UPDATE subscriptions SET air_day = update_day WHERE (air_day = '' OR air_day IS NULL) AND update_day != ''`)
+				if result.Error != nil {
+					return result.Error
+				}
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				// 回滚无意义，无法区分原有值和回填值
+				return nil
+			},
+		},
 	})
 
 	// 设置迁移超时

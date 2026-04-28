@@ -129,6 +129,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	calendarHandler := handler.NewCalendarHandler(subscriptionRepo, downloadRepo)
 	diskHandler := handler.NewDiskHandler(db, downloadRepo, subscriptionRepo, configRepo)
 	tagHandler := handler.NewTagHandler(subscriptionRepo)
+	scannerHandler := handler.NewScannerHandler(db, subscriptionRepo, downloadRepo, configRepo)
 
 	// API v1 路由组
 	v1 := r.Group("/api/v1")
@@ -174,6 +175,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			subscriptions.POST("/:id/collect-episodes", subscriptionHandler.CollectEpisodes)
 			subscriptions.POST("/:id/reorganize-files", subscriptionHandler.ReorganizeFiles)
 			subscriptions.POST("/:id/rename-files", subscriptionHandler.RenameFiles)
+			subscriptions.POST("/:id/scan-folder", scannerHandler.ScanFolder)
 			subscriptions.POST("/batch-import-from-rss", subscriptionHandler.BatchImportFromRSS)
 			// 批量操作
 			subscriptions.POST("/batch/enable", subscriptionHandler.BatchUpdateEnabled)

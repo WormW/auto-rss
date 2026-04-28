@@ -290,6 +290,14 @@
                         </n-tooltip>
                         <n-tooltip trigger="hover">
                           <template #trigger>
+                            <n-button text size="small" @click="handleScanFolder(sub)">
+                              <template #icon><n-icon size="16"><FolderOpenOutlined /></n-icon></template>
+                            </n-button>
+                          </template>
+                          文件夹扫描
+                        </n-tooltip>
+                        <n-tooltip trigger="hover">
+                          <template #trigger>
                             <n-button text size="small" @click="$router.push({ path: '/downloads', query: { sub_id: sub.id } })">
                               <template #icon><n-icon size="16"><FileSearchOutlined /></n-icon></template>
                             </n-button>
@@ -388,6 +396,9 @@
                       <n-button text size="small" @click="$router.push({ path: '/downloads', query: { sub_id: sub.id } })">
                         <template #icon><n-icon size="16"><FileSearchOutlined /></n-icon></template>
                       </n-button>
+                      <n-button text size="small" @click="handleScanFolder(sub)">
+                        <template #icon><n-icon size="16"><FolderOpenOutlined /></n-icon></template>
+                      </n-button>
                       <n-button text size="small" @click="handleEdit(sub)">
                         <template #icon><n-icon size="16"><EditOutlined /></n-icon></template>
                       </n-button>
@@ -469,6 +480,97 @@
           <div class="preview-meta">
             <n-tag v-if="previewSub.bangumi_score">评分: {{ previewSub.bangumi_score }}</n-tag>
             <n-tag v-if="previewSub.bangumi_rank">排名: {{ previewSub.bangumi_rank }}</n-tag>
+          </div>
+        </div>
+      </div>
+    </n-modal>
+
+    <!-- 文件夹扫描弹窗 -->
+    <n-modal v-model:show="showScanModal" preset="card" :title="`文件夹扫描 - ${scanSub?.name || ''}`" style="width: 700px; max-width: 95vw;">
+      <div v-if="scanSub">
+        <!-- 输入区域 -->
+        <n-form label-placement="left" label-width="90px" v-if="!scanResult || scanLoading">
+          <n-form-item label="文件夹路径">
+            <n-input v-model:value="scanFolderPath" placeholder="/downloads/番剧名 S01" />
+          </n-form-item>
+          <n-form-item label="预览模式">
+            <n-switch v-model:value="scanDryRun" />
+            <span style="margin-left: 8px; font-size: 13px; color: #666;">{{ scanDryRun ? '仅预览，不修改文件' : '执行重命名并写入数据库' }}</span>
+          </n-form-item>
+          <n-form-item label="重命名文件">
+            <n-switch v-model:value="scanRenameFiles" :disabled="!scanDryRun && scanRenameFiles === false ? false : false" />
+            <span style="margin-left: 8px; font-size: 13px; color: #666;">扫描后按模板重命名到目标位置</span>
+          </n-form-item>
+          <n-form-item>
+            <n-space>
+              <n-button type="primary" :loading="scanLoading" @click="doScanFolder">
+                {{ scanDryRun ? '预览扫描' : '开始扫描' }}
+              </n-button>
+              <n-button @click="showScanModal = false; scanResult = null">取消</n-button>
+            </n-space>
+          </n-form-item>
+        </n-form>
+
+        <!-- 扫描结果 -->
+        <div v-if="scanResult && !scanLoading" class="scan-result">
+          <!-- 统计概览 -->
+          <div class="scan-stats">
+            <n-tag type="info">扫描 {{ scanResult.scanned }} 个文件</n-tag>
+            <n-tag type="success">匹配 {{ scanResult.matched }} 集</n-tag>
+            <n-tag v-if="scanResult.orphan > 0" type="warning">未识别 {{ scanResult.orphan }} 个</n-tag>
+            <n-tag v-if="scanResult.rename_count > 0" type="info">将重命名 {{ scanResult.rename_count }} 个</n-tag>
+            <n-tag v-if="scanResult.renamed_count > 0" type="success">已重命名 {{ scanResult.renamed_count }} 个</n-tag>
+          </div>
+
+          <!-- 大小统计 -->
+          <div v-if="scanResult.stats" class="scan-stats" style="margin-top: 8px;">
+            <span style="font-size: 13px; color: #666;">总大小: {{ scanResult.stats.total_size_gb?.toFixed(1) }} GB</span>
+          </div>
+
+          <!-- 集数信息 -->
+          <div v-if="scanResult.episodes_on_disk?.length" class="scan-episodes" style="margin-top: 12px;">
+            <div><strong>已有集数:</strong> {{ scanResult.episodes_on_disk.join(', ') }}</div>
+            <div v-if="scanResult.missing_episodes?.length" style="color: #d03050; margin-top: 4px;">
+              <strong>缺失集数:</strong> {{ scanResult.missing_episodes.join(', ') }}
+            </div>
+          </div>
+
+          <!-- 文件列表 -->
+          <div v-if="scanResult.files?.length" class="scan-files" style="margin-top: 12px; max-height: 300px; overflow-y: auto;">
+            <div v-for="(f, idx) in scanResult.files" :key="idx" class="scan-file-item" :class="{ 'is-orphan': f.episode <= 0 }">
+              <div class="file-episode">
+                <n-tag v-if="f.episode > 0" size="small" type="success">第{{ f.episode }}集</n-tag>
+                <n-tag v-else size="small" type="default">未识别</n-tag>
+              </div>
+              <div class="file-info">
+                <div class="file-name">{{ fileBaseName(f.path) }}</div>
+                <div class="file-meta">
+                  <n-tag v-if="f.resolution" size="tiny">{{ f.resolution }}</n-tag>
+                  <n-tag v-if="f.video_codec" size="tiny" type="info">{{ f.video_codec }}</n-tag>
+                  <n-tag v-if="f.fansub" size="tiny" type="warning">{{ f.fansub }}</n-tag>
+                  <span style="font-size: 11px; color: #999; margin-left: 4px;">{{ f.size_mb?.toFixed(1) }} MB</span>
+                </div>
+                <div v-if="f.rename_to && f.will_rename" class="file-rename-preview" style="font-size: 11px; color: #18a058; margin-top: 2px;">
+                  → {{ fileBaseName(f.rename_to) }}
+                </div>
+                <div v-if="f.renamed" class="file-renamed" style="font-size: 11px; color: #2080f0; margin-top: 2px;">
+                  ✓ 已重命名
+                </div>
+                <div v-if="f.rename_error" class="file-rename-error" style="font-size: 11px; color: #d03050; margin-top: 2px;">
+                  ✗ {{ f.rename_error }}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 操作按钮 -->
+          <div style="margin-top: 16px;">
+            <n-space>
+              <n-button v-if="scanResult.dry_run" type="primary" :loading="scanLoading" @click="scanDryRun = false; doScanFolder()">
+                确认并执行
+              </n-button>
+              <n-button @click="showScanModal = false; scanResult = null; scanDryRun = true">关闭</n-button>
+            </n-space>
           </div>
         </div>
       </div>
@@ -729,7 +831,8 @@ import {
   CalculatorOutlined,
   FileSearchOutlined,
   PlayCircleOutlined,
-  PauseCircleOutlined
+  PauseCircleOutlined,
+  FolderOpenOutlined
 } from '@vicons/antd'
 import AnimeSearch from '@/components/AnimeSearch.vue'
 
@@ -764,6 +867,15 @@ const showMissingModal = ref(false)
 const missingEpisodesSub = ref<Subscription | null>(null)
 const showPreviewModal = ref(false)
 const previewSub = ref<Subscription | null>(null)
+
+// 文件夹扫描弹窗
+const showScanModal = ref(false)
+const scanSub = ref<Subscription | null>(null)
+const scanFolderPath = ref('')
+const scanDryRun = ref(true)
+const scanRenameFiles = ref(true)
+const scanLoading = ref(false)
+const scanResult = ref<any>(null)
 
 // 星期列表
 const weekList = [
@@ -1516,6 +1628,50 @@ const handleCollectEpisodes = async (id: number) => {
       message.error(error.response?.data?.message || error.message || '启动采集任务失败')
     }
   }
+}
+
+const handleScanFolder = (sub: Subscription) => {
+  scanSub.value = sub
+  scanFolderPath.value = ''
+  scanDryRun.value = true
+  scanRenameFiles.value = true
+  scanResult.value = null
+  scanLoading.value = false
+  showScanModal.value = true
+}
+
+const doScanFolder = async () => {
+  if (!scanSub.value || !scanFolderPath.value) {
+    message.warning('请输入文件夹路径')
+    return
+  }
+  scanLoading.value = true
+  scanResult.value = null
+  try {
+    const response: any = await api.post(`/subscriptions/${scanSub.value.id}/scan-folder`, {
+      folder_path: scanFolderPath.value,
+      dry_run: scanDryRun.value,
+      rename_files: scanRenameFiles.value
+    })
+    if (response.code === 0) {
+      scanResult.value = response.data
+      if (!scanResult.value.dry_run) {
+        message.success(response.message || '扫描完成')
+        loadSubscriptions()
+      }
+    } else {
+      message.error(response.message || '扫描失败')
+    }
+  } catch (error: any) {
+    message.error(error.response?.data?.message || error.message || '扫描失败')
+  } finally {
+    scanLoading.value = false
+  }
+}
+
+const fileBaseName = (path: string) => {
+  if (!path) return ''
+  return path.split('/').pop() || path.split('\\').pop() || path
 }
 
 onMounted(() => {

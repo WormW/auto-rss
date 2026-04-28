@@ -25,29 +25,30 @@ type NotificationService interface {
 
 // CalendarItem 日历条目
 type CalendarItem struct {
-	SubscriptionID   uint   `json:"subscription_id"`
-	Name             string `json:"name"`
-	Episode          int    `json:"episode"`
-	AirTime          string `json:"air_time"`
-	AirDay           string `json:"air_day"`
-	CurrentEpisode   int    `json:"current_episode"`
-	TotalEpisodes    int    `json:"total_episodes"`
-	IsDownloaded     bool   `json:"is_downloaded"`
-	Cover            string `json:"cover"`
+	SubscriptionID uint   `json:"subscription_id"`
+	Name           string `json:"name"`
+	Episode        int    `json:"episode"`
+	AirTime        string `json:"air_time"`
+	AirDay         string `json:"air_day"`
+	CurrentEpisode int    `json:"current_episode"`
+	TotalEpisodes  int    `json:"total_episodes"`
+	IsDownloaded   bool   `json:"is_downloaded"`
+	IsCompleted    bool   `json:"is_completed"`
+	Cover          string `json:"cover"`
 }
 
 // DaySchedule 每日排期
 type DaySchedule struct {
-	Day       string         `json:"day"`        // 星期几: monday, tuesday...
-	DayCN     string         `json:"day_cn"`     // 中文: 周一, 周二...
-	Items     []CalendarItem `json:"items"`      // 该日的番剧
-	IsToday   bool           `json:"is_today"`   // 是否是今天
+	Day     string         `json:"day"`      // 星期几: monday, tuesday...
+	DayCN   string         `json:"day_cn"`   // 中文: 周一, 周二...
+	Items   []CalendarItem `json:"items"`    // 该日的番剧
+	IsToday bool           `json:"is_today"` // 是否是今天
 }
 
 // WeekSchedule 每周排期
 type WeekSchedule struct {
-	Week   string        `json:"week"`   // current, next
-	Days   []DaySchedule `json:"days"`   // 7天的排期
+	Week string        `json:"week"` // current, next
+	Days []DaySchedule `json:"days"` // 7天的排期
 }
 
 // dayNames 星期名称映射
@@ -132,6 +133,7 @@ func (c *Calendar) GetWeekSchedule(weekOffset int) (*WeekSchedule, error) {
 			CurrentEpisode: sub.CurrentEpisode,
 			TotalEpisodes:  sub.TotalEpisodes,
 			IsDownloaded:   isDownloaded,
+			IsCompleted:    sub.TotalEpisodes > 0 && sub.CurrentEpisode >= sub.TotalEpisodes,
 			Cover:          sub.BangumiCoverLocal,
 		}
 
@@ -231,6 +233,7 @@ func (c *Calendar) CheckUpcomingAiring() ([]CalendarItem, error) {
 				AirTime:        sub.AirTime,
 				AirDay:         sub.AirDay,
 				CurrentEpisode: sub.CurrentEpisode,
+				IsCompleted:    sub.TotalEpisodes > 0 && sub.CurrentEpisode >= sub.TotalEpisodes,
 			})
 		}
 	}
@@ -342,14 +345,14 @@ func parseStandardDay(input string) string {
 
 	// 中文映射
 	cnMap := map[string]string{
-		"周日": "sunday",
+		"周日":  "sunday",
 		"星期天": "sunday",
-		"周一": "monday",
-		"周二": "tuesday",
-		"周三": "wednesday",
-		"周四": "thursday",
-		"周五": "friday",
-		"周六": "saturday",
+		"周一":  "monday",
+		"周二":  "tuesday",
+		"周三":  "wednesday",
+		"周四":  "thursday",
+		"周五":  "friday",
+		"周六":  "saturday",
 		"星期六": "saturday",
 	}
 

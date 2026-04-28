@@ -470,26 +470,18 @@ const handleSingleImport = async (anime: RSSAnime) => {
       title: anime.title,
       fansub: anime.fansub,
       rss_url: anime.rss_url,
+      season: anime.season || 1,
       source_id: anime.source_id,
       source_name: anime.source_name
     }])
 
     if (res.code === 0) {
-      const result = res.data.results[0]
-      if (result.success) {
-        if (result.skipped) {
-          message.warning(result.message)
-        } else {
-          message.success(`${anime.title} 导入成功`)
-        }
-      } else {
-        message.error(`${anime.title} 导入失败: ${result.message}`)
-      }
+      message.success(`${anime.title} 导入任务已提交，可在右上角任务管理中查看进度`)
     } else {
-      message.error('导入失败')
+      message.error(res.message || '导入失败')
     }
   } catch (error: any) {
-    message.error('导入失败: ' + (error.message || '未知错误'))
+    message.error('导入失败: ' + (error.response?.data?.message || error.message || '未知错误'))
   } finally {
     importingAnimes.value.delete(anime.title)
   }
@@ -507,6 +499,7 @@ const handleBatchImport = async () => {
       title: anime.title,
       fansub: anime.fansub,
       rss_url: anime.rss_url,
+      season: anime.season || 1,
       source_id: anime.source_id,
       source_name: anime.source_name
     }))
@@ -514,15 +507,14 @@ const handleBatchImport = async () => {
     const res: any = await subscriptionApi.batchImportFromRSS(items)
 
     if (res.code === 0) {
-      importResults.value = res.data
+      message.success(`批量导入任务已提交（共 ${items.length} 个），可在右上角任务管理中查看进度`)
       showAnimesModal.value = false
-      showResultModal.value = true
       selectedAnimes.value = []
     } else {
       message.error('批量导入失败: ' + (res.message || '未知错误'))
     }
   } catch (error: any) {
-    message.error('批量导入失败: ' + (error.message || '未知错误'))
+    message.error('批量导入失败: ' + (error.response?.data?.message || error.message || '未知错误'))
   } finally {
     batchImporting.value = false
   }

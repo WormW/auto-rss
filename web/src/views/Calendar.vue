@@ -41,7 +41,12 @@
                       <span class="air-time">{{ item.air_time || '待定' }}</span>
                       <span class="episode">第 {{ item.episode }} 集</span>
                       <n-tag
-                        v-if="item.is_downloaded"
+                        v-if="item.is_completed"
+                        type="info"
+                        size="tiny"
+                      >已完结</n-tag>
+                      <n-tag
+                        v-else-if="item.is_downloaded"
                         type="success"
                         size="tiny"
                       >已下载</n-tag>
@@ -81,7 +86,12 @@
                       进度: {{ item.current_episode }} / {{ item.total_episodes || '?' }}
                     </span>
                     <n-tag
-                      v-if="item.is_downloaded"
+                      v-if="item.is_completed"
+                      type="info"
+                      size="small"
+                    >已完结</n-tag>
+                    <n-tag
+                      v-else-if="item.is_downloaded"
                       type="success"
                       size="small"
                     >已下载</n-tag>
@@ -142,7 +152,6 @@ const message = useMessage()
 const activeTab = ref('current')
 const currentWeek = ref<WeekSchedule | null>(null)
 const todayItems = ref<CalendarItem[]>([])
-const completedCount = ref(0)
 
 // 当前星期的每一天
 const currentWeekDays = computed(() => {
@@ -154,19 +163,36 @@ const weekStats = computed(() => {
   const days = currentWeek.value?.days || []
   let total = 0
   let downloaded = 0
+  let completed = 0
 
   days.forEach(day => {
     day.items.forEach(item => {
-      total++
-      if (item.is_downloaded) downloaded++
+      if (item.is_completed) {
+        completed++
+      } else {
+        total++
+        if (item.is_downloaded) downloaded++
+      }
     })
   })
 
   return {
-    total,
+    total: total + completed,
     downloaded,
     pending: total - downloaded
   }
+})
+
+// 完结番剧数量
+const completedCount = computed(() => {
+  const days = currentWeek.value?.days || []
+  let count = 0
+  days.forEach(day => {
+    day.items.forEach(item => {
+      if (item.is_completed) count++
+    })
+  })
+  return count
 })
 
 // 加载本周日历

@@ -18,6 +18,7 @@ export interface RSSAnime {
   episodes: string[]
   source_id: number
   source_name: string
+  season?: number
 }
 
 export const rssSourceApi = {

@@ -15,9 +15,9 @@ import (
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
-	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/pkg/utils"
+	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/mikan"
@@ -30,15 +30,15 @@ import (
 
 // SubscriptionHandler 订阅处理器
 type SubscriptionHandler struct {
-	repo                repository.SubscriptionRepository
-	downloadRepo        repository.DownloadRepository
-	configRepo          repository.ConfigRepository
-	bangumiService      *bangumi.BangumiService
-	imageService        *bangumi.ImageService
-	mikanService        mikan.Service
-	rssParser           rss.Parser
-	qbClient            downloader.QBittorrentClient
-	downloadPath        string
+	repo           repository.SubscriptionRepository
+	downloadRepo   repository.DownloadRepository
+	configRepo     repository.ConfigRepository
+	bangumiService *bangumi.BangumiService
+	imageService   *bangumi.ImageService
+	mikanService   mikan.Service
+	rssParser      rss.Parser
+	qbClient       downloader.QBittorrentClient
+	downloadPath   string
 	// New service interfaces
 	bangumiEnricher      bangumi.Enricher
 	batchImporter        subscription.BatchImporter
@@ -298,8 +298,14 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		"rss_url", subscription.RssURL,
 		"client_ip", c.ClientIP())
 
+	// 自动获取Bangumi数据
+	h.enrichWithBangumi(&subscription)
+
+	// 将标题中的"第X季/Season X"规范到 season 字段
+	subscription.Name, subscription.Season = normalizeSubscriptionNameAndSeason(subscription.Name, subscription.Season)
+
 	if subscription.RssURL != "" {
-		existing, err := h.repo.GetByRSSURL(subscription.RssURL)
+		existing, err := h.repo.GetByRSSURLAndSeason(subscription.RssURL, subscription.Season)
 		if err == nil {
 			c.JSON(http.StatusConflict, gin.H{
 				"code":    409,
@@ -309,8 +315,9 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 			return
 		}
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			logger.Error("Failed to check existing subscription by RSS URL",
+			logger.Error("Failed to check existing subscription by RSS URL and season",
 				"rss_url", subscription.RssURL,
+				"season", subscription.Season,
 				"error", err.Error())
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"code":    500,
@@ -319,12 +326,6 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 			return
 		}
 	}
-
-	// 自动获取Bangumi数据
-	h.enrichWithBangumi(&subscription)
-
-	// 将标题中的"第X季/Season X"规范到 season 字段
-	subscription.Name, subscription.Season = normalizeSubscriptionNameAndSeason(subscription.Name, subscription.Season)
 
 	if err := h.repo.Create(&subscription); err != nil {
 		logger.Error("Failed to create subscription",
@@ -1199,6 +1200,7 @@ type RSSAnimeImportItem struct {
 	Title      string `json:"title" binding:"required"`
 	Fansub     string `json:"fansub"`
 	RssURL     string `json:"rss_url"`
+	Season     int    `json:"season"`
 	SourceID   uint   `json:"source_id"`
 	SourceName string `json:"source_name"`
 }
@@ -1227,42 +1229,73 @@ func (h *SubscriptionHandler) BatchImportFromRSS(c *gin.Context) {
 	// Convert request items to import items
 	importItems := make([]subscription.ImportItem, len(req.Items))
 	for i, item := range req.Items {
+		season := item.Season
+		if season <= 0 {
+			season = 1
+		}
 		importItems[i] = subscription.ImportItem{
 			Title:      item.Title,
 			Fansub:     item.Fansub,
 			RssURL:     item.RssURL,
+			Season:     season,
 			SourceID:   item.SourceID,
 			SourceName: item.SourceName,
 		}
 	}
 
-	results, err := h.batchImporter.Import(importItems)
-	if err != nil {
-		logger.Error("Batch import failed", "error", err)
+	manager := task.GetManager()
+	taskName := fmt.Sprintf("批量导入 %d 个订阅", len(req.Items))
+	if len(req.Items) == 1 {
+		taskName = fmt.Sprintf("导入订阅: %s", req.Items[0].Title)
 	}
 
-	successCount := 0
-	skippedCount := 0
-	failedCount := 0
-	for _, r := range results {
-		if r.Skipped {
-			skippedCount++
-		} else if r.Success {
-			successCount++
-		} else {
-			failedCount++
+	newTask, err := manager.StartTask(task.TaskTypeImport, 0, taskName, func(ctx context.Context, t *task.Task) error {
+		total := len(importItems)
+		manager.UpdateProgress(5, "开始导入...")
+
+		results, importErr := h.batchImporter.Import(importItems)
+		if importErr != nil {
+			logger.Error("Batch import failed", "error", importErr)
+			return importErr
 		}
-	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"code":    0,
-		"message": "批量导入完成",
-		"data": gin.H{
-			"total":   len(req.Items),
+		successCount := 0
+		skippedCount := 0
+		failedCount := 0
+		for _, r := range results {
+			if r.Skipped {
+				skippedCount++
+			} else if r.Success {
+				successCount++
+			} else {
+				failedCount++
+			}
+		}
+
+		manager.UpdateProgress(100, "导入完成")
+		manager.SetResult(gin.H{
+			"total":   total,
 			"success": successCount,
 			"skipped": skippedCount,
 			"failed":  failedCount,
 			"results": results,
+		})
+		return nil
+	})
+
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{
+			"code":    409,
+			"message": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "导入任务已提交",
+		"data": gin.H{
+			"task_id": newTask.ID,
 		},
 	})
 }
@@ -2033,7 +2066,7 @@ func (h *SubscriptionHandler) importFromJSON(data string, groupID *uint) ([]subs
 
 		// 检查是否已存在
 		if sub.RssURL != "" {
-			existing, err := h.repo.GetByRSSURL(sub.RssURL)
+			existing, err := h.repo.GetByRSSURLAndSeason(sub.RssURL, sub.Season)
 			if err == nil && existing != nil {
 				result.Skipped = true
 				result.Success = true
@@ -2087,7 +2120,7 @@ func (h *SubscriptionHandler) importFromOPML(data string, groupID *uint) ([]subs
 
 		// 检查是否已存在
 		if rssURL != "" {
-			existing, err := h.repo.GetByRSSURL(rssURL)
+			existing, err := h.repo.GetByRSSURLAndSeason(rssURL, 1)
 			if err == nil && existing != nil {
 				result.Skipped = true
 				result.Success = true
