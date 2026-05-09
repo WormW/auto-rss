@@ -1,6 +1,7 @@
 package router
 
 import (
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -32,8 +33,12 @@ import (
 	"gorm.io/gorm"
 )
 
+var newScheduler = func(db *gorm.DB, subscriptionRepo repository.SubscriptionRepository, downloadRepo repository.DownloadRepository, configRepo repository.ConfigRepository, rssInterval string, rssParser rss.Parser, qbClient downloader.QBittorrentClient) scheduler.Scheduler {
+	return scheduler.NewScheduler(db, subscriptionRepo, downloadRepo, configRepo, rssInterval, rssParser, qbClient)
+}
+
 // Setup 设置路由
-func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClient, appCtx *app.Context) *gin.Engine {
+func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClient, appCtx *app.Context) (*gin.Engine, error) {
 	r := gin.New()
 
 	// 应用中间件
@@ -88,7 +93,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	logRepo := repository.NewLogRepository(db)
 
 	// 初始化调度器
-	rssScheduler := scheduler.NewScheduler(db, subscriptionRepo, downloadRepo, configRepo, cfg.RSSInterval, rssParser, qbClient)
+	rssScheduler := newScheduler(db, subscriptionRepo, downloadRepo, configRepo, cfg.RSSInterval, rssParser, qbClient)
 
 	// 初始化通知服务
 	notificationSvc := notification.NewService(db)
@@ -318,7 +323,10 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 
 	// 启动后台调度器
 	if err := rssScheduler.Start(); err != nil {
-		panic(err)
+		if cfg.BlockAPIBootOnSchedulerFailure {
+			return nil, fmt.Errorf("failed to start RSS scheduler: %w", err)
+		}
+		logger.Error("Failed to start RSS scheduler, API continues without scheduler", "error", err)
 	}
 
 	// 初始化健康检查器
@@ -352,7 +360,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		r.NoRoute(serveIndex)
 	}
 
-	return r
+	return r, nil
 }
 
 // coverHandler 封面图片处理：本地存在则直接返回，否则从 Bangumi 原 URL fallback 并异步重新下载
