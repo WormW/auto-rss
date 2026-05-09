@@ -32,6 +32,8 @@ type Config struct {
 
 	// RSS 配置
 	RSSInterval string
+	// 调度器启动失败是否阻断 API 启动
+	BlockAPIBootOnSchedulerFailure bool
 
 	// Bangumi 更新配置
 	BangumiUpdateInterval int // 小时为单位，0表示禁用自动更新
@@ -74,15 +76,16 @@ func Load() (*Config, error) {
 	_ = viper.ReadInConfig()
 
 	cfg := &Config{
-		DBPath:                getEnv("DB_PATH", "./data/auto-rss.db"),
-		QBHost:                getEnv("QB_HOST", "http://localhost:8080"),
-		QBUsername:            getEnv("QB_USERNAME", "admin"),
-		QBPassword:            getEnv("QB_PASSWORD", ""),
-		RSSInterval:           getEnv("RSS_INTERVAL", "30m"),
-		BangumiUpdateInterval: getEnvAsInt("BANGUMI_UPDATE_INTERVAL", 6), // 默认6小时
-		LogLevel:              getEnv("LOG_LEVEL", "info"),
-		ServerPort:            getEnvAsInt("SERVER_PORT", 7892),
-		DownloadPath:          getEnv("DOWNLOAD_PATH", "/downloads"),
+		DBPath:                         getEnv("DB_PATH", "./data/auto-rss.db"),
+		QBHost:                         getEnv("QB_HOST", "http://localhost:8080"),
+		QBUsername:                     getEnv("QB_USERNAME", "admin"),
+		QBPassword:                     getEnv("QB_PASSWORD", ""),
+		RSSInterval:                    getEnv("RSS_INTERVAL", "30m"),
+		BlockAPIBootOnSchedulerFailure: getEnv("BLOCK_API_BOOT_ON_SCHEDULER_FAILURE", "true") == "true",
+		BangumiUpdateInterval:          getEnvAsInt("BANGUMI_UPDATE_INTERVAL", 6), // 默认6小时
+		LogLevel:                       getEnv("LOG_LEVEL", "info"),
+		ServerPort:                     getEnvAsInt("SERVER_PORT", 7892),
+		DownloadPath:                   getEnv("DOWNLOAD_PATH", "/downloads"),
 
 		// 文件整理配置
 		FileOrganizerEnabled: getEnv("FILE_ORGANIZER_ENABLED", "false") == "true",

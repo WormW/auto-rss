@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -21,15 +20,22 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		logger.Error("Server exited with error", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	// 加载配置
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		return fmt.Errorf("failed to load config: %w", err)
 	}
 
 	// 初始化日志
 	if err := logger.Init(cfg.LogLevel); err != nil {
-		log.Fatalf("Failed to init logger: %v", err)
+		return fmt.Errorf("failed to init logger: %w", err)
 	}
 	defer logger.Sync()
 
@@ -38,19 +44,19 @@ func main() {
 	// 初始化数据库
 	db, err := database.Init(cfg.DBPath)
 	if err != nil {
-		logger.Fatal("Failed to init database", "error", err)
+		return fmt.Errorf("failed to init database: %w", err)
 	}
 	logger.Info("Database initialized", "path", cfg.DBPath)
 
 	// 运行数据库迁移
 	if err := database.Migrate(db); err != nil {
-		logger.Fatal("Failed to migrate database", "error", err)
+		return fmt.Errorf("failed to migrate database: %w", err)
 	}
 	logger.Info("Database migration completed")
 
 	// 运行额外迁移（索引创建等）
 	if err := database.RunMigrations(db); err != nil {
-		logger.Fatal("Failed to run migrations", "error", err)
+		return fmt.Errorf("failed to run migrations: %w", err)
 	}
 	logger.Info("Database index migration completed")
 
@@ -65,7 +71,7 @@ func main() {
 
 	// 重新初始化日志以包含数据库写入
 	if err := logger.InitWithDB(cfg.LogLevel, db); err != nil {
-		log.Fatalf("Failed to reinit logger with DB: %v", err)
+		return fmt.Errorf("failed to reinit logger with DB: %w", err)
 	}
 	logger.Info("Logger initialized with database writer")
 
@@ -144,7 +150,10 @@ func main() {
 	}
 
 	// 初始化路由（传递应用上下文）
-	r := router.Setup(db, cfg, qbClient, appCtx)
+	r, err := router.Setup(db, cfg, qbClient, appCtx)
+	if err != nil {
+		return fmt.Errorf("failed to setup router: %w", err)
+	}
 
 	// 优雅关闭
 	quit := make(chan os.Signal, 1)
@@ -156,7 +165,8 @@ func main() {
 
 	go func() {
 		if err := r.Run(addr); err != nil {
-			logger.Fatal("Failed to start server", "error", err)
+			logger.Error("Failed to start server", "error", err)
+			quit <- syscall.SIGTERM
 		}
 	}()
 
@@ -177,4 +187,5 @@ func main() {
 	logger.Info("Download monitor stopped")
 
 	logger.Info("Server exited")
+	return nil
 }
