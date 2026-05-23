@@ -21,6 +21,7 @@ type Context struct {
 	bangumiService   *bangumi.BangumiService
 	renameTemplate   string
 	fileOrganizer    *organizer.FileOrganizer
+	shutdownHooks    []func()
 }
 
 // NewContext 创建应用上下文
@@ -46,6 +47,17 @@ func (ctx *Context) GetFileOrganizer() *organizer.FileOrganizer {
 	ctx.mu.RLock()
 	defer ctx.mu.RUnlock()
 	return ctx.fileOrganizer
+}
+
+// RegisterShutdownHook registers a service cleanup callback for graceful shutdown.
+func (ctx *Context) RegisterShutdownHook(hook func()) {
+	if hook == nil {
+		return
+	}
+
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	ctx.shutdownHooks = append(ctx.shutdownHooks, hook)
 }
 
 // ReloadFileOrganizer 重新加载文件整理服务
@@ -118,4 +130,9 @@ func (ctx *Context) Shutdown() {
 		ctx.fileOrganizer.Stop()
 		ctx.fileOrganizer = nil
 	}
+
+	for i := len(ctx.shutdownHooks) - 1; i >= 0; i-- {
+		ctx.shutdownHooks[i]()
+	}
+	ctx.shutdownHooks = nil
 }

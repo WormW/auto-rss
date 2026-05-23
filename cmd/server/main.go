@@ -6,7 +6,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"github.com/WormW/auto-rss/internal/api/router"
 	"github.com/WormW/auto-rss/internal/app"
@@ -106,20 +105,6 @@ func run() error {
 		logger.Info("Loaded rename template from config", "template", renameTemplate)
 	}
 
-	// 初始化下载监控服务
-	downloadMonitor := downloader.NewDownloadMonitor(
-		db,
-		qbClient,
-		downloadRepo,
-		subscriptionRepo,
-		configRepo,
-		renameTemplate,
-	)
-
-	// 启动下载监控（30秒检查一次）
-	downloadMonitor.Start(30 * time.Second)
-	logger.Info("Download monitor started", "interval", "30s", "category", "AutoRss")
-
 	// 初始化 Bangumi 更新服务
 	bangumiService := bangumi.NewBangumiService()
 	bangumiUpdater := bangumi.NewBangumiUpdater(
@@ -150,7 +135,7 @@ func run() error {
 	}
 
 	// 初始化路由（传递应用上下文）
-	r, err := router.Setup(db, cfg, qbClient, appCtx)
+	r, err := router.Setup(db, cfg, qbClient, appCtx, renameTemplate)
 	if err != nil {
 		return fmt.Errorf("failed to setup router: %w", err)
 	}
@@ -181,10 +166,6 @@ func run() error {
 	// 停止 Bangumi 更新服务
 	bangumiUpdater.Stop()
 	logger.Info("Bangumi updater stopped")
-
-	// 停止下载监控
-	downloadMonitor.Stop()
-	logger.Info("Download monitor stopped")
 
 	logger.Info("Server exited")
 	return nil

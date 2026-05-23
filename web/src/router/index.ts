@@ -1,12 +1,4 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import RSSSources from '@/views/RSSSources.vue'
-import Subscriptions from '@/views/Subscriptions.vue'
-import Downloads from '@/views/Downloads.vue'
-import Config from '@/views/Config.vue'
-import Logs from '@/views/Logs.vue'
-import Notifications from '@/views/Notifications.vue'
-import Calendar from '@/views/Calendar.vue'
-import DiskMonitor from '@/views/DiskMonitor.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -18,42 +10,42 @@ const router = createRouter({
     {
       path: '/rss-sources',
       name: 'rss-sources',
-      component: RSSSources
+      component: () => import('@/views/RSSSources.vue')
     },
     {
       path: '/subscriptions',
       name: 'subscriptions',
-      component: Subscriptions
+      component: () => import('@/views/Subscriptions.vue')
     },
     {
       path: '/downloads',
       name: 'downloads',
-      component: Downloads
+      component: () => import('@/views/Downloads.vue')
     },
     {
       path: '/calendar',
       name: 'calendar',
-      component: Calendar
+      component: () => import('@/views/Calendar.vue')
     },
     {
       path: '/notifications',
       name: 'notifications',
-      component: Notifications
+      component: () => import('@/views/Notifications.vue')
     },
     {
       path: '/disk-monitor',
       name: 'disk-monitor',
-      component: DiskMonitor
+      component: () => import('@/views/DiskMonitor.vue')
     },
     {
       path: '/config',
       name: 'config',
-      component: Config
+      component: () => import('@/views/Config.vue')
     },
     {
       path: '/logs',
       name: 'logs',
-      component: Logs
+      component: () => import('@/views/Logs.vue')
     }
   ]
 })

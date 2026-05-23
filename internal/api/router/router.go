@@ -38,7 +38,7 @@ var newScheduler = func(db *gorm.DB, subscriptionRepo repository.SubscriptionRep
 }
 
 // Setup 设置路由
-func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClient, appCtx *app.Context) (*gin.Engine, error) {
+func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClient, appCtx *app.Context, renameTemplate string) (*gin.Engine, error) {
 	r := gin.New()
 
 	// 应用中间件
@@ -66,6 +66,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	// 启动后台清理
 	cleanupManager := ratelimit.NewCleanupManager(rateLimitStore, 5*time.Minute)
 	cleanupManager.Start()
+	appCtx.RegisterShutdownHook(cleanupManager.Stop)
 
 	// 应用限流中间件（使用配置值）
 	r.Use(middleware.RateLimitWithConfig(middleware.RateLimitConfig{
@@ -108,11 +109,13 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	_ = diskMonitor.LoadConfig()
 	diskMonitor.SetNotificationService(notificationSvc)
 	diskMonitor.Start()
+	appCtx.RegisterShutdownHook(diskMonitor.Stop)
 
 	// 初始化下载监控服务（在 handler 之前，因为某些 handler 可能需要它）
-	downloadMonitor := downloader.NewDownloadMonitor(db, qbClient, downloadRepo, subscriptionRepo, configRepo, "")
+	downloadMonitor := downloader.NewDownloadMonitor(db, qbClient, downloadRepo, subscriptionRepo, configRepo, renameTemplate)
 	downloadMonitor.SetNotificationService(notificationSvc)
 	downloadMonitor.Start(30 * time.Second)
+	appCtx.RegisterShutdownHook(downloadMonitor.Stop)
 
 	// 初始化 JWT 服务
 	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
@@ -328,6 +331,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		}
 		logger.Error("Failed to start RSS scheduler, API continues without scheduler", "error", err)
 	}
+	appCtx.RegisterShutdownHook(rssScheduler.Stop)
 
 	// 初始化健康检查器
 	healthChecker := handler.NewHealthChecker(db, qbClient)

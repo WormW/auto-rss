@@ -155,7 +155,6 @@
       <n-space wrap>
         <n-button type="info" @click="handleManualRefresh">手动刷新 RSS</n-button>
         <n-button type="success" @click="handleTriggerFileOrganizer">手动整理文件</n-button>
-        <n-button type="warning" @click="handleClearCache">清理缓存</n-button>
       </n-space>
     </n-card>
   </div>
@@ -487,11 +486,6 @@ const handleTriggerFileOrganizer = async () => {
     const errorMsg = error?.response?.data?.message || '触发文件整理失败'
     message.error(errorMsg)
   }
-}
-
-const handleClearCache = () => {
-  // TODO: 实现缓存清理
-  message.info('缓存清理功能待实现')
 }
 
 onMounted(() => {
