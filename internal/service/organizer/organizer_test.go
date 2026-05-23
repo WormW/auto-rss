@@ -76,7 +76,7 @@ func TestFileOrganizer_organizeFile(t *testing.T) {
 			require.NoError(t, err)
 
 			// Setup in-memory database
-			db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+			db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 			require.NoError(t, err)
 			require.NoError(t, db.AutoMigrate(&model.Subscription{}, &model.Download{}))
 
@@ -128,7 +128,7 @@ func TestFileOrganizer_organizeFile_NonExistent(t *testing.T) {
 	watchDir := t.TempDir()
 	destDir := t.TempDir()
 
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 
 	subRepo := repository.NewSubscriptionRepository(db)
@@ -153,7 +153,7 @@ func TestFileOrganizer_Start(t *testing.T) {
 	err := os.WriteFile(testFile, []byte("test"), 0644)
 	require.NoError(t, err)
 
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 
 	subRepo := repository.NewSubscriptionRepository(db)
@@ -182,7 +182,7 @@ func TestFileOrganizer_organizeFile_UpdatesDownloadRecord(t *testing.T) {
 	require.NoError(t, err)
 
 	// Setup in-memory database
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&model.Subscription{}, &model.Download{}))
 
@@ -239,7 +239,7 @@ func TestFileOrganizer_organizeFile_NoMatchingSubscription(t *testing.T) {
 	require.NoError(t, err)
 
 	// Setup in-memory database
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&model.Subscription{}, &model.Download{}))
 
@@ -276,7 +276,7 @@ func TestFileOrganizer_organizeFile_PathTraversalPrevention(t *testing.T) {
 	destDir := t.TempDir()
 
 	// Setup in-memory database
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&model.Subscription{}, &model.Download{}))
 
@@ -299,7 +299,7 @@ func TestFileOrganizer_TriggerScan(t *testing.T) {
 	watchDir := t.TempDir()
 	destDir := t.TempDir()
 
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 
 	subRepo := repository.NewSubscriptionRepository(db)
@@ -321,7 +321,7 @@ func TestFileOrganizer_Stop(t *testing.T) {
 	watchDir := t.TempDir()
 	destDir := t.TempDir()
 
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 
 	subRepo := repository.NewSubscriptionRepository(db)

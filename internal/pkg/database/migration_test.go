@@ -11,7 +11,7 @@ import (
 
 func TestMigrateRSSTimeout(t *testing.T) {
 	// Create in-memory database for testing
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("Failed to connect to test database: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestMigrateRSSTimeout(t *testing.T) {
 
 func TestMigrateRSSTimeout_Idempotent(t *testing.T) {
 	// Create in-memory database for testing
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("Failed to connect to test database: %v", err)
 	}

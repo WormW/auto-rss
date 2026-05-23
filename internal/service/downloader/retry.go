@@ -7,7 +7,6 @@ import (
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
-	"github.com/WormW/auto-rss/internal/repository"
 )
 
 const (
@@ -21,11 +20,16 @@ const (
 
 // RetryService 下载重试服务
 type RetryService struct {
-	downloadRepo repository.DownloadRepository
+	downloadRepo retryDownloadRepository
+}
+
+type retryDownloadRepository interface {
+	Update(download *model.Download) error
+	GetFailedDownloadsReadyForRetry(limit int) ([]model.Download, error)
 }
 
 // NewRetryService 创建重试服务
-func NewRetryService(downloadRepo repository.DownloadRepository) *RetryService {
+func NewRetryService(downloadRepo retryDownloadRepository) *RetryService {
 	return &RetryService{
 		downloadRepo: downloadRepo,
 	}
@@ -212,9 +216,9 @@ func (s *RetryService) GetRetryStats() map[string]int {
 	// 返回重试统计信息
 	// 实际实现需要 repository 支持
 	return map[string]int{
-		"total_retries_today":    0,
-		"pending_retries":        0,
-		"max_retries_exceeded":   0,
+		"total_retries_today":  0,
+		"pending_retries":      0,
+		"max_retries_exceeded": 0,
 	}
 }
 

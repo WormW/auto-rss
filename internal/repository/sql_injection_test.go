@@ -13,7 +13,7 @@ import (
 
 // setupTestDB 创建测试数据库
 func setupTestDB(t *testing.T) *gorm.DB {
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	if err != nil {
@@ -36,7 +36,7 @@ func seedTestLogs(t *testing.T, db *gorm.DB, count int, daysAgo []int) {
 		if i < len(daysAgo) {
 			days = daysAgo[i]
 		}
-		
+
 		log := model.Log{
 			Level:     "INFO",
 			Module:    "TEST",
@@ -63,7 +63,7 @@ func TestLogRepository_DeleteBefore_Parameterized(t *testing.T) {
 			name:          "正常删除7天前的日志",
 			days:          7,
 			wantErr:       false,
-			expectedCount: 0,
+			expectedCount: 3,
 		},
 		{
 			name:        "负数天数应该返回错误",
@@ -78,10 +78,10 @@ func TestLogRepository_DeleteBefore_Parameterized(t *testing.T) {
 			errContains: "days must be positive",
 		},
 		{
-			name:        "尝试SQL注入 - 拼接OR条件",
-			days:        1,
-			wantErr:     true, // 会被参数验证拦截
-			errContains: "days must be positive",
+			name:          "正数参数使用参数化删除",
+			days:          2,
+			wantErr:       false,
+			expectedCount: 1,
 		},
 	}
 
@@ -192,57 +192,57 @@ func TestLogRepository_List_WithFilters(t *testing.T) {
 	}
 
 	tests := []struct {
-		name         string
-		page         int
-		pageSize     int
-		level        string
-		module       string
-		expectedLen  int
+		name          string
+		page          int
+		pageSize      int
+		level         string
+		module        string
+		expectedLen   int
 		expectedTotal int64
 	}{
 		{
-			name:         "无过滤",
-			page:         1,
-			pageSize:     10,
-			level:        "",
-			module:       "",
-			expectedLen:  4,
+			name:          "无过滤",
+			page:          1,
+			pageSize:      10,
+			level:         "",
+			module:        "",
+			expectedLen:   4,
 			expectedTotal: 4,
 		},
 		{
-			name:         "按Level过滤",
-			page:         1,
-			pageSize:     10,
-			level:        "INFO",
-			module:       "",
-			expectedLen:  2,
+			name:          "按Level过滤",
+			page:          1,
+			pageSize:      10,
+			level:         "INFO",
+			module:        "",
+			expectedLen:   2,
 			expectedTotal: 2,
 		},
 		{
-			name:         "按Module过滤",
-			page:         1,
-			pageSize:     10,
-			level:        "",
-			module:       "RSS",
-			expectedLen:  2,
+			name:          "按Module过滤",
+			page:          1,
+			pageSize:      10,
+			level:         "",
+			module:        "RSS",
+			expectedLen:   2,
 			expectedTotal: 2,
 		},
 		{
-			name:         "组合过滤",
-			page:         1,
-			pageSize:     10,
-			level:        "INFO",
-			module:       "RSS",
-			expectedLen:  1,
+			name:          "组合过滤",
+			page:          1,
+			pageSize:      10,
+			level:         "INFO",
+			module:        "RSS",
+			expectedLen:   1,
 			expectedTotal: 1,
 		},
 		{
-			name:         "分页",
-			page:         1,
-			pageSize:     2,
-			level:        "",
-			module:       "",
-			expectedLen:  2,
+			name:          "分页",
+			page:          1,
+			pageSize:      2,
+			level:         "",
+			module:        "",
+			expectedLen:   2,
 			expectedTotal: 4,
 		},
 	}

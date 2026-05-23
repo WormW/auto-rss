@@ -75,7 +75,7 @@ func (m *mockSubscriptionRepo) GetByRSSURLAndSeason(rssURL string, season int) (
 	if m.getByRSSURLSeasonFunc != nil {
 		return m.getByRSSURLSeasonFunc(rssURL, season)
 	}
-	return nil, errors.New("not found")
+	return nil, gorm.ErrRecordNotFound
 }
 
 func (m *mockSubscriptionRepo) List(offset, limit int) ([]model.Subscription, int64, error) {
@@ -229,12 +229,13 @@ func TestSubscriptionHandler_GetByID(t *testing.T) {
 
 func TestSubscriptionHandler_Create(t *testing.T) {
 	tests := []struct {
-		name         string
-		body         map[string]interface{}
-		mockGetByURL func(rssURL string) (*model.Subscription, error)
-		mockCreate   func(sub *model.Subscription) error
-		wantStatus   int
-		wantCreated  bool
+		name               string
+		body               map[string]interface{}
+		mockGetByURL       func(rssURL string) (*model.Subscription, error)
+		mockGetByURLSeason func(rssURL string, season int) (*model.Subscription, error)
+		mockCreate         func(sub *model.Subscription) error
+		wantStatus         int
+		wantCreated        bool
 	}{
 		{
 			name: "success",
@@ -259,7 +260,7 @@ func TestSubscriptionHandler_Create(t *testing.T) {
 				"name":    "New Anime",
 				"rss_url": "http://example.com/rss",
 			},
-			mockGetByURL: func(rssURL string) (*model.Subscription, error) {
+			mockGetByURLSeason: func(rssURL string, season int) (*model.Subscription, error) {
 				return &model.Subscription{ID: 1, RssURL: rssURL}, nil
 			},
 			mockCreate:  nil,
@@ -281,8 +282,9 @@ func TestSubscriptionHandler_Create(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mockRepo := &mockSubscriptionRepo{
-				getByRSSURLFunc: tt.mockGetByURL,
-				createFunc:      tt.mockCreate,
+				getByRSSURLFunc:       tt.mockGetByURL,
+				getByRSSURLSeasonFunc: tt.mockGetByURLSeason,
+				createFunc:            tt.mockCreate,
 			}
 			handler := NewSubscriptionHandler(mockRepo, nil, nil, nil, "")
 

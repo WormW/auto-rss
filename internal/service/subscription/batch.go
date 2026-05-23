@@ -37,14 +37,21 @@ type BatchImporter interface {
 type batchImporter struct {
 	mikanService     mikan.Service
 	bangumiEnricher  bangumi.Enricher
-	subscriptionRepo repository.SubscriptionRepository
+	subscriptionRepo subscriptionRepository
 	configRepo       repository.ConfigRepository
+}
+
+type subscriptionRepository interface {
+	List(offset, limit int) ([]model.Subscription, int64, error)
+	GetByRSSURLAndSeason(rssURL string, season int) (*model.Subscription, error)
+	Create(subscription *model.Subscription) error
+	Update(subscription *model.Subscription) error
 }
 
 func NewBatchImporter(
 	mikanService mikan.Service,
 	bangumiEnricher bangumi.Enricher,
-	subscriptionRepo repository.SubscriptionRepository,
+	subscriptionRepo subscriptionRepository,
 	configRepo repository.ConfigRepository,
 ) BatchImporter {
 	return &batchImporter{
@@ -65,7 +72,11 @@ func (b *batchImporter) Import(items []ImportItem) ([]ImportResult, error) {
 	}
 	existingKeys := make(map[string]bool)
 	for _, sub := range existingSubs {
-		key := fmt.Sprintf("%s|%s|%d", sub.Name, sub.RssURL, sub.Season)
+		season := sub.Season
+		if season <= 0 {
+			season = 1
+		}
+		key := fmt.Sprintf("%s|%s|%d", sub.Name, sub.RssURL, season)
 		existingKeys[key] = true
 	}
 

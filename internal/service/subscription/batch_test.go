@@ -58,6 +58,14 @@ func (m *mockSubscriptionRepo) GetByID(id uint) (*model.Subscription, error) {
 	return nil, errors.New("not found")
 }
 func (m *mockSubscriptionRepo) GetByRSSURL(url string) (*model.Subscription, error) { return nil, nil }
+func (m *mockSubscriptionRepo) GetByRSSURLAndSeason(url string, season int) (*model.Subscription, error) {
+	for _, sub := range m.subscriptions {
+		if sub.RssURL == url && sub.Season == season {
+			return sub, nil
+		}
+	}
+	return nil, gorm.ErrRecordNotFound
+}
 func (m *mockSubscriptionRepo) List(offset, limit int) ([]model.Subscription, int64, error) {
 	if m.listErr != nil {
 		return nil, 0, m.listErr
@@ -68,11 +76,15 @@ func (m *mockSubscriptionRepo) List(offset, limit int) ([]model.Subscription, in
 	}
 	return subs, int64(len(subs)), nil
 }
-func (m *mockSubscriptionRepo) GetActiveSubscriptions() ([]model.Subscription, error) { return nil, nil }
+func (m *mockSubscriptionRepo) GetActiveSubscriptions() ([]model.Subscription, error) {
+	return nil, nil
+}
 func (m *mockSubscriptionRepo) UpdateInTx(tx *gorm.DB, sub *model.Subscription) error {
 	return m.Update(sub)
 }
-func (m *mockSubscriptionRepo) GetSubscriptionsWithDownloadCount() ([]repository.SubscriptionWithStats, error) { return nil, nil }
+func (m *mockSubscriptionRepo) GetSubscriptionsWithDownloadCount() ([]repository.SubscriptionWithStats, error) {
+	return nil, nil
+}
 
 // MockMikanService mock实现
 type mockMikanService struct {
@@ -485,7 +497,6 @@ func TestBatchImporter_Import_HandlesRepositoryError(t *testing.T) {
 		t.Errorf("unexpected error message: %s", results[0].Message)
 	}
 }
-
 
 // 批量操作相关方法（mock实现）
 

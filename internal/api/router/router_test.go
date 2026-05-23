@@ -4,8 +4,10 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/WormW/auto-rss/internal/app"
 	"github.com/WormW/auto-rss/internal/config"
 	"github.com/WormW/auto-rss/internal/repository"
+	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/WormW/auto-rss/internal/service/scheduler"
@@ -43,7 +45,11 @@ func TestSetup_ReturnsErrorWhenSchedulerStartFailsAndBlockingEnabled(t *testing.
 	}
 	defer func() { newScheduler = original }()
 
-	_, err := Setup(db, cfg, qbClient, nil)
+	subscriptionRepo := repository.NewSubscriptionRepository(db)
+	downloadRepo := repository.NewDownloadRepository(db)
+	appCtx := app.NewContext(db, cfg, subscriptionRepo, downloadRepo, bangumi.NewBangumiService())
+
+	_, err := Setup(db, cfg, qbClient, appCtx, "")
 	if err == nil {
 		t.Fatalf("expected error when scheduler start fails")
 	}

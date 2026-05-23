@@ -8,14 +8,21 @@ import (
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
-	"github.com/WormW/auto-rss/internal/repository"
 )
 
 // Calendar 追番日历服务
 type Calendar struct {
-	subscriptionRepo repository.SubscriptionRepository
-	downloadRepo     repository.DownloadRepository
+	subscriptionRepo subscriptionRepository
+	downloadRepo     downloadRepository
 	notificationSvc  NotificationService
+}
+
+type subscriptionRepository interface {
+	GetActiveSubscriptions() ([]model.Subscription, error)
+}
+
+type downloadRepository interface {
+	GetBySubscriptionAndEpisode(subscriptionID uint, episode int) (*model.Download, error)
 }
 
 // NotificationService 通知服务接口
@@ -73,7 +80,7 @@ var dayNamesCN = map[string]string{
 }
 
 // NewCalendar 创建日历服务
-func NewCalendar(subscriptionRepo repository.SubscriptionRepository, downloadRepo repository.DownloadRepository) *Calendar {
+func NewCalendar(subscriptionRepo subscriptionRepository, downloadRepo downloadRepository) *Calendar {
 	return &Calendar{
 		subscriptionRepo: subscriptionRepo,
 		downloadRepo:     downloadRepo,

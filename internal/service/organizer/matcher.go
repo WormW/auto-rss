@@ -5,7 +5,6 @@ import (
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
-	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/bangumi"
 )
 
@@ -22,15 +21,19 @@ type SubscriptionMatcher interface {
 // subscriptionMatcher 订阅匹配服务实现
 type subscriptionMatcher struct {
 	parser           *FileNameParser
-	subscriptionRepo repository.SubscriptionRepository
+	subscriptionRepo subscriptionRepository
 	bangumiService   *bangumi.BangumiService // optional, can be nil
 	minMatchScore    float64
+}
+
+type subscriptionRepository interface {
+	List(offset, limit int) ([]model.Subscription, int64, error)
 }
 
 // NewSubscriptionMatcher 创建订阅匹配服务
 func NewSubscriptionMatcher(
 	parser *FileNameParser,
-	subscriptionRepo repository.SubscriptionRepository,
+	subscriptionRepo subscriptionRepository,
 	bangumiService *bangumi.BangumiService,
 ) SubscriptionMatcher {
 	return &subscriptionMatcher{

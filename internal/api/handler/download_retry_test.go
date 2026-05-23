@@ -51,7 +51,7 @@ func (m *mockQBittorrentClient) GetTorrentInfo(hash string) (*downloader.Torrent
 }
 
 // Additional methods to implement QBittorrentClient interface
-func (m *mockQBittorrentClient) Login(host, username, password string) error { return nil }
+func (m *mockQBittorrentClient) Login(host, username, password string) error          { return nil }
 func (m *mockQBittorrentClient) TestConnection(host, username, password string) error { return nil }
 func (m *mockQBittorrentClient) AddTorrentFile(filename string, fileContent []byte, savePath string, category string) (string, error) {
 	return "", nil
@@ -61,16 +61,18 @@ func (m *mockQBittorrentClient) GetTorrentsByCategory(category string) ([]*downl
 }
 func (m *mockQBittorrentClient) SetCategory(hash string, category string) error { return nil }
 func (m *mockQBittorrentClient) SetLocation(hash string, location string) error { return nil }
-func (m *mockQBittorrentClient) RenameTorrentFile(hash string, oldPath string, newPath string) error { return nil }
+func (m *mockQBittorrentClient) RenameTorrentFile(hash string, oldPath string, newPath string) error {
+	return nil
+}
 func (m *mockQBittorrentClient) GetTorrentFiles(hash string) ([]downloader.TorrentFile, error) {
 	return nil, nil
 }
-func (m *mockQBittorrentClient) GetVersion() (string, error) { return "", nil }
-func (m *mockQBittorrentClient) SetProxy(proxyURL string) error { return nil }
+func (m *mockQBittorrentClient) GetVersion() (string, error)                    { return "", nil }
+func (m *mockQBittorrentClient) SetProxy(proxyURL string) error                 { return nil }
 func (m *mockQBittorrentClient) DownloadTorrentFile(url string) ([]byte, error) { return nil, nil }
 
 func setupRetryTest(t *testing.T) (*gorm.DB, repository.DownloadRepository, repository.ConfigRepository) {
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("failed to open test DB: %v", err)
 	}

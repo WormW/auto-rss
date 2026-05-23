@@ -10,7 +10,7 @@ import (
 
 func TestDownloadRepository_List_PaginationLimits(t *testing.T) {
 	// Setup in-memory test DB
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("failed to open test DB: %v", err)
 	}

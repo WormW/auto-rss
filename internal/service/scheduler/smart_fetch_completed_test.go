@@ -14,7 +14,7 @@ import (
 )
 
 func setupTestDB(t *testing.T) *gorm.DB {
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	if err != nil {
@@ -60,11 +60,11 @@ func TestEvaluateSubscription_CompletedStopDays(t *testing.T) {
 		{
 			name: "完结超过30天 - 应停止检查",
 			sub: &model.Subscription{
-				ID:              1,
-				Name:            "完结动画-超30天",
-				TotalEpisodes:   12,
-				CurrentEpisode:  12,
-				CompletedAt:     &completed35DaysAgo,
+				ID:             1,
+				Name:           "完结动画-超30天",
+				TotalEpisodes:  12,
+				CurrentEpisode: 12,
+				CompletedAt:    &completed35DaysAgo,
 			},
 			expectFetch:  false,
 			expectReason: "completed_35_days_ago_stop_checking",
@@ -72,47 +72,47 @@ func TestEvaluateSubscription_CompletedStopDays(t *testing.T) {
 		{
 			name: "完结10天 - 应继续检查（补全v2等）",
 			sub: &model.Subscription{
-				ID:              2,
-				Name:            "完结动画-10天",
-				TotalEpisodes:   12,
-				CurrentEpisode:  12,
-				CompletedAt:     &completed10DaysAgo,
-				AirDay:          "1",
+				ID:             2,
+				Name:           "完结动画-10天",
+				TotalEpisodes:  12,
+				CurrentEpisode: 12,
+				CompletedAt:    &completed10DaysAgo,
+				AirDay:         "1",
 			},
 			expectFetch: true, // 完结但未满30天，可能还有v2版本
 		},
 		{
 			name: "刚完结（CompletedAt为nil）- 应设置CompletedAt",
 			sub: &model.Subscription{
-				ID:              3,
-				Name:            "刚完结动画",
-				TotalEpisodes:   12,
-				CurrentEpisode:  12,
-				CompletedAt:     nil,
-				AirDay:          "1",
+				ID:             3,
+				Name:           "刚完结动画",
+				TotalEpisodes:  12,
+				CurrentEpisode: 12,
+				CompletedAt:    nil,
+				AirDay:         "1",
 			},
 			expectFetch: true, // 刚完结，需要设置CompletedAt并继续检查
 		},
 		{
 			name: "未完结动画 - 正常检查",
 			sub: &model.Subscription{
-				ID:              4,
-				Name:            "连载中动画",
-				TotalEpisodes:   12,
-				CurrentEpisode:  5,
-				CompletedAt:     nil,
-				AirDay:          "1",
+				ID:             4,
+				Name:           "连载中动画",
+				TotalEpisodes:  12,
+				CurrentEpisode: 5,
+				CompletedAt:    nil,
+				AirDay:         "1",
 			},
 			expectFetch: true,
 		},
 		{
 			name: "完结30天整（临界值）- 应停止检查",
 			sub: &model.Subscription{
-				ID:              5,
-				Name:            "完结动画-刚好30天",
-				TotalEpisodes:   12,
-				CurrentEpisode:  12,
-				CompletedAt:     &completed10DaysAgo, // 实际10天前，但为了测试临界值我们需要一个刚好30天的
+				ID:             5,
+				Name:           "完结动画-刚好30天",
+				TotalEpisodes:  12,
+				CurrentEpisode: 12,
+				CompletedAt:    &completed10DaysAgo, // 实际10天前，但为了测试临界值我们需要一个刚好30天的
 			},
 			expectFetch: true, // 10天未满30天，继续检查
 		},
@@ -154,12 +154,12 @@ func TestEvaluateSubscription_CompletedStopDaysZero(t *testing.T) {
 	completed100DaysAgo := time.Now().Add(-100 * 24 * time.Hour)
 
 	sub := &model.Subscription{
-		ID:              1,
-		Name:            "完结100天动画",
-		TotalEpisodes:   12,
-		CurrentEpisode:  12,
-		CompletedAt:     &completed100DaysAgo,
-		AirDay:          "1",
+		ID:             1,
+		Name:           "完结100天动画",
+		TotalEpisodes:  12,
+		CurrentEpisode: 12,
+		CompletedAt:    &completed100DaysAgo,
+		AirDay:         "1",
 	}
 
 	status, _ := filter.EvaluateSubscription(sub)
@@ -173,9 +173,9 @@ func TestIsCompleted(t *testing.T) {
 	filter := NewSmartFetchFilter(nil)
 
 	tests := []struct {
-		name      string
-		sub       *model.Subscription
-		expect    bool
+		name   string
+		sub    *model.Subscription
+		expect bool
 	}{
 		{
 			name: "已完结",

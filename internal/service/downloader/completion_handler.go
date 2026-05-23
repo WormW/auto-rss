@@ -7,7 +7,6 @@ import (
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
-	"github.com/WormW/auto-rss/internal/repository"
 	"gorm.io/gorm"
 )
 
@@ -20,30 +19,32 @@ type CompletionHandler interface {
 
 // completionHandler 完成处理服务实现
 type completionHandler struct {
-	subscriptionRepo repository.SubscriptionRepository
-	downloadRepo     repository.DownloadRepository
-	notificationSvc  NotificationService
-	renamerSvc       *RenameService
-	qbClient         QBittorrentClient
-	db               *gorm.DB
+	downloadRepo    completionDownloadRepository
+	notificationSvc NotificationService
+	renamerSvc      *RenameService
+	qbClient        QBittorrentClient
+	db              *gorm.DB
+}
+
+type completionDownloadRepository interface {
+	Update(download *model.Download) error
 }
 
 // NewCompletionHandler 创建完成处理服务
 func NewCompletionHandler(
-	subscriptionRepo repository.SubscriptionRepository,
-	downloadRepo repository.DownloadRepository,
+	_ any,
+	downloadRepo completionDownloadRepository,
 	notificationSvc NotificationService,
 	renamerSvc *RenameService,
 	qbClient QBittorrentClient,
 	db *gorm.DB,
 ) CompletionHandler {
 	return &completionHandler{
-		subscriptionRepo: subscriptionRepo,
-		downloadRepo:     downloadRepo,
-		notificationSvc:  notificationSvc,
-		renamerSvc:       renamerSvc,
-		qbClient:         qbClient,
-		db:               db,
+		downloadRepo:    downloadRepo,
+		notificationSvc: notificationSvc,
+		renamerSvc:      renamerSvc,
+		qbClient:        qbClient,
+		db:              db,
 	}
 }
 

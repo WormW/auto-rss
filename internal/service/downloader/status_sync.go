@@ -6,7 +6,6 @@ import (
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
-	"github.com/WormW/auto-rss/internal/repository"
 )
 
 // StatusSync 下载状态同步服务
@@ -25,14 +24,19 @@ type StatusSync interface {
 
 // statusSync 状态同步服务实现
 type statusSync struct {
-	downloadRepo    repository.DownloadRepository
+	downloadRepo    statusSyncDownloadRepository
 	notificationSvc NotificationService
 	gracePeriod     time.Duration
 }
 
+type statusSyncDownloadRepository interface {
+	GetByHash(hash string) (*model.Download, error)
+	Update(download *model.Download) error
+}
+
 // NewStatusSync 创建状态同步服务
 func NewStatusSync(
-	downloadRepo repository.DownloadRepository,
+	downloadRepo statusSyncDownloadRepository,
 	notificationSvc NotificationService,
 ) StatusSync {
 	return &statusSync{
@@ -214,11 +218,11 @@ func (s *statusSync) sendFailedNotification(download *model.Download) {
 		Title:   "❌ 下载失败: " + download.Title,
 		Message: download.Title + " " + episodeInfo + "\n文件名: " + download.Title + "\n错误: " + errorMsg,
 		Data: map[string]any{
-			"download_id":  download.ID,
+			"download_id":     download.ID,
 			"subscription_id": download.SubscriptionID,
-			"episode":      download.Episode,
-			"title":        download.Title,
-			"error":        errorMsg,
+			"episode":         download.Episode,
+			"title":           download.Title,
+			"error":           errorMsg,
 		},
 		Timestamp: time.Now(),
 	})

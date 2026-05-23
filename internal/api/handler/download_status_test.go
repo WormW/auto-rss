@@ -15,7 +15,7 @@ import (
 
 func TestDownloadStatusAlignment(t *testing.T) {
 	// Setup test dependencies
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("failed to open test DB: %v", err)
 	}

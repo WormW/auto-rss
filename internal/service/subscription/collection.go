@@ -22,15 +22,20 @@ type CollectionDownloader interface {
 
 type collectionDownloader struct {
 	qbClient     downloader.QBittorrentClient
-	downloadRepo repository.DownloadRepository
+	downloadRepo collectionDownloadRepository
 	configRepo   repository.ConfigRepository
 	basePath     string
+}
+
+type collectionDownloadRepository interface {
+	Create(download *model.Download) error
+	GetByHash(hash string) (*model.Download, error)
 }
 
 // NewCollectionDownloader 创建合集下载服务实例
 func NewCollectionDownloader(
 	qbClient downloader.QBittorrentClient,
-	downloadRepo repository.DownloadRepository,
+	downloadRepo collectionDownloadRepository,
 	configRepo repository.ConfigRepository,
 	basePath string,
 ) CollectionDownloader {
