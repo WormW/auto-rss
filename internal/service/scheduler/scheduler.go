@@ -152,7 +152,7 @@ func (s *scheduler) checkRSSFeeds() {
 	}
 
 	summary := s.smartFetchFilter.GetFetchSummary(fetchStatuses)
-	logger.Info("Smart fetch evaluation completed", 
+	logger.Info("Smart fetch evaluation completed",
 		"total", summary["total"],
 		"should_fetch", summary["should_fetch"],
 		"should_skip", summary["should_skip"],
@@ -160,7 +160,7 @@ func (s *scheduler) checkRSSFeeds() {
 		"completed", summary["completed"])
 
 	if len(summary["with_missing"].([]string)) > 0 {
-		logger.Info("Subscriptions with missing episodes", 
+		logger.Info("Subscriptions with missing episodes",
 			"list", summary["with_missing"].([]string))
 	}
 
@@ -407,32 +407,82 @@ func (s *scheduler) checkRSSFeeds() {
 
 // matchesFilter 检查标题是否匹配过滤条件
 func (s *scheduler) matchesFilter(sub *model.Subscription, title string) bool {
+	titleLower := strings.ToLower(title)
+	var include []string
+	var exclude []string
+
 	// 检查包含关键词
 	if sub.FilterKeywords != "" {
-		keywords := strings.Split(sub.FilterKeywords, ",")
-		matched := false
-		for _, keyword := range keywords {
-			if strings.Contains(strings.ToLower(title), strings.ToLower(strings.TrimSpace(keyword))) {
-				matched = true
-				break
+		for _, keyword := range splitSchedulerRuleTokens(sub.FilterKeywords) {
+			if trimmed := strings.TrimSpace(keyword); trimmed != "" {
+				include = append(include, trimmed)
 			}
-		}
-		if !matched {
-			return false
 		}
 	}
 
 	// 检查排除关键词
 	if sub.ExcludeKeywords != "" {
-		keywords := strings.Split(sub.ExcludeKeywords, ",")
-		for _, keyword := range keywords {
-			if strings.Contains(strings.ToLower(title), strings.ToLower(strings.TrimSpace(keyword))) {
-				return false
+		for _, keyword := range splitSchedulerRuleTokens(sub.ExcludeKeywords) {
+			if trimmed := strings.TrimSpace(keyword); trimmed != "" {
+				exclude = append(exclude, trimmed)
 			}
 		}
 	}
 
-	return true
+	for _, token := range splitSchedulerRuleTokens(sub.FilterRules) {
+		keyword, excluded := parseSchedulerRuleToken(token)
+		if keyword == "" {
+			continue
+		}
+		if excluded {
+			exclude = append(exclude, keyword)
+		} else {
+			include = append(include, keyword)
+		}
+	}
+
+	for _, keyword := range exclude {
+		if strings.Contains(titleLower, strings.ToLower(keyword)) {
+			return false
+		}
+	}
+
+	if len(include) == 0 {
+		return true
+	}
+
+	for _, keyword := range include {
+		if strings.Contains(titleLower, strings.ToLower(keyword)) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func splitSchedulerRuleTokens(raw string) []string {
+	return strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == ';' || r == '，' || r == '；'
+	})
+}
+
+func parseSchedulerRuleToken(token string) (string, bool) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "", false
+	}
+	lower := strings.ToLower(token)
+	for _, prefix := range []string{"exclude:", "exclude=", "排除:", "排除=", "!", "-"} {
+		if strings.HasPrefix(lower, prefix) {
+			return strings.TrimSpace(token[len(prefix):]), true
+		}
+	}
+	for _, prefix := range []string{"include:", "include=", "包含:", "包含=", "+"} {
+		if strings.HasPrefix(lower, prefix) {
+			return strings.TrimSpace(token[len(prefix):]), false
+		}
+	}
+	return token, false
 }
 
 // processDownloadItem 处理单个下载条目（在事务中）
@@ -561,5 +611,3 @@ func (s *scheduler) Stop() {
 func (s *scheduler) AddJob(spec string, cmd func()) (cron.EntryID, error) {
 	return s.cron.AddFunc(spec, cmd)
 }
-
-

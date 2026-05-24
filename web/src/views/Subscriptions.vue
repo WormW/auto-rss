@@ -638,9 +638,9 @@
           </n-tabs>
 
           <n-space justify="end" style="margin-top: 16px;">
-            <n-button @click="showModal = false" :disabled="step2Loading">取消</n-button>
-            <n-button type="primary" @click="handleGetRssData" :loading="step2Loading">
-              下一步
+              <n-button @click="showModal = false" :disabled="step2Loading">取消</n-button>
+              <n-button type="primary" @click="handleGetRssData" :loading="step2Loading">
+              下一步并预览
             </n-button>
           </n-space>
         </div>
@@ -769,11 +769,52 @@
                 <n-switch v-model:value="formData.enabled" />
               </n-form-item>
             </n-form>
+
+            <div class="rule-preview" v-if="previewResult || previewLoading">
+              <div class="preview-header-line">
+                <div class="preview-title">RSS 预览</div>
+                <n-space size="small" v-if="previewResult">
+                  <n-tag size="small" type="success">新增 {{ previewResult.summary.download_items }}</n-tag>
+                  <n-tag size="small" type="warning">替换 {{ previewResult.summary.replace_items }}</n-tag>
+                  <n-tag size="small" type="default">跳过 {{ previewResult.summary.skipped_items + previewResult.summary.duplicate_items }}</n-tag>
+                </n-space>
+              </div>
+              <n-spin :show="previewLoading">
+                <n-empty v-if="previewResult && previewResult.items.length === 0" description="RSS 无条目" />
+                <div v-else class="preview-list">
+                  <div
+                    v-for="item in previewResult?.items || []"
+                    :key="`${item.torrent_hash || item.title}-${item.episode}`"
+                    class="preview-item"
+                    :class="`preview-${item.action}`"
+                  >
+                    <div class="preview-item-main">
+                      <div class="preview-item-title">{{ item.title }}</div>
+                      <div class="preview-item-meta">
+                        <n-tag size="tiny" :type="getPreviewActionConfig(item.action).type">
+                          {{ getPreviewActionConfig(item.action).label }}
+                        </n-tag>
+                        <n-tag size="tiny" v-if="item.episode">第 {{ item.episode }} 集</n-tag>
+                        <n-tag size="tiny" v-if="item.fansub">{{ item.fansub }}</n-tag>
+                        <n-tag size="tiny" v-if="item.language">{{ item.language }}</n-tag>
+                        <span>{{ item.reason }}</span>
+                      </div>
+                      <div class="preview-rename" v-if="item.rename_preview">
+                        {{ item.rename_preview }}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </n-spin>
+            </div>
           </div>
 
           <n-space justify="space-between" style="margin-top: 16px;">
             <n-button @click="showRssStep = true">上一步</n-button>
             <n-space>
+              <n-button @click="runSubscriptionPreview" :loading="previewLoading" :disabled="!formData.rss_url">
+                刷新预览
+              </n-button>
               <n-button @click="showModal = false">取消</n-button>
               <n-button type="primary" @click="handleSubmit" :loading="submitLoading">
                 {{ editingId ? '更新' : '创建' }}
@@ -815,7 +856,7 @@ import {
   useMessage,
   useDialog
 } from 'naive-ui'
-import { subscriptionApi, type Subscription } from '@/api'
+import { subscriptionApi, type Subscription, type SubscriptionPreview } from '@/api'
 import { api } from '@/api'
 import { useRoute } from 'vue-router'
 import {
@@ -847,6 +888,8 @@ const showModal = ref(false)
 const showRssStep = ref(true)
 const step2Loading = ref(false)
 const submitLoading = ref(false)
+const previewLoading = ref(false)
+const previewResult = ref<SubscriptionPreview | null>(null)
 const activeTab = ref('rss_source')
 const editingId = ref<number | undefined>()
 const animeSearchRef = ref<InstanceType<typeof AnimeSearch> | null>(null)
@@ -906,6 +949,17 @@ const statusOptions = [
   { label: '已完结', value: 'completed' },
   { label: '已禁用', value: 'disabled' }
 ]
+
+const previewActionConfig: Record<string, { label: string; type: 'success' | 'warning' | 'error' | 'info' | 'default' }> = {
+  download: { label: '新增', type: 'success' },
+  replace: { label: '替换', type: 'warning' },
+  duplicate: { label: '重复', type: 'default' },
+  skip: { label: '跳过', type: 'default' }
+}
+
+const getPreviewActionConfig = (action: string) => {
+  return previewActionConfig[action] || { label: action, type: 'default' as const }
+}
 
 // 统计计算
 const activeCount = computed(() => subscriptions.value.filter(s => !isCompleted(s) && s.enabled).length)
@@ -1417,6 +1471,36 @@ const showQuickPreview = (sub: Subscription) => {
   showPreviewModal.value = true
 }
 
+const resetRulePreview = () => {
+  previewResult.value = null
+  previewLoading.value = false
+}
+
+const runSubscriptionPreview = async () => {
+  if (!formData.value.rss_url) {
+    message.warning('请输入 RSS 地址')
+    return
+  }
+
+  previewLoading.value = true
+  try {
+    const response: any = await subscriptionApi.preview({
+      ...formData.value,
+      id: editingId.value,
+      limit: 50
+    })
+    if (!response?.data?.summary || !Array.isArray(response.data.items)) {
+      throw new Error('预览接口返回异常')
+    }
+    previewResult.value = response.data
+  } catch (error: any) {
+    previewResult.value = null
+    message.error(error.response?.data?.message || error.message || '预览失败')
+  } finally {
+    previewLoading.value = false
+  }
+}
+
 // 打开Bangumi页面
 const openBangumiPage = (bangumiId: number) => {
   if (bangumiId) {
@@ -1427,6 +1511,7 @@ const openBangumiPage = (bangumiId: number) => {
 // 对话框操作
 const showAddDialog = () => {
   editingId.value = undefined
+  resetRulePreview()
   formData.value = {
     name: '',
     rss_url: '',
@@ -1461,6 +1546,7 @@ const handleSearchSubscribe = (data: {
   language?: string
   rss_source_id?: number
 }) => {
+  resetRulePreview()
   formData.value = {
     ...formData.value,
     name: data.title,
@@ -1477,6 +1563,7 @@ const handleSearchSubscribe = (data: {
 
 const handleEdit = (sub: Subscription) => {
   editingId.value = sub.id
+  resetRulePreview()
   formData.value = {
     name: sub.name,
     rss_url: sub.rss_url,
@@ -1518,6 +1605,9 @@ const handleGetRssData = async () => {
   step2Loading.value = true
   try {
     showRssStep.value = false
+    if (formData.value.rss_url) {
+      await runSubscriptionPreview()
+    }
   } finally {
     step2Loading.value = false
   }
@@ -2170,6 +2260,78 @@ onMounted(() => {
 .preview-meta {
   display: flex;
   gap: 8px;
+}
+
+.rule-preview {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid #e0e0e6;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.preview-header-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.preview-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.preview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.preview-item {
+  padding: 10px;
+  border: 1px solid #e6e6eb;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.preview-download {
+  border-left: 3px solid #18a058;
+}
+
+.preview-replace {
+  border-left: 3px solid #f0a020;
+}
+
+.preview-duplicate,
+.preview-skip {
+  opacity: 0.78;
+}
+
+.preview-item-title {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.preview-item-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: #666;
+}
+
+.preview-rename {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #18a058;
+  word-break: break-all;
 }
 
 /* Modal 响应式 */

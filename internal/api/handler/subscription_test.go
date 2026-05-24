@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/repository"
+	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,6 +34,35 @@ type mockSubscriptionRepo struct {
 	listCalls    int
 	getByIDCalls int
 	createCalls  int
+}
+
+type mockRSSParser struct {
+	items []rss.RSSItem
+	err   error
+}
+
+func (m *mockRSSParser) FetchAndParse(rssURL string) ([]rss.RSSItem, error) {
+	return m.items, m.err
+}
+
+func (m *mockRSSParser) FetchAndParseWithTimeout(rssURL string, timeout time.Duration) ([]rss.RSSItem, error) {
+	return m.items, m.err
+}
+
+func (m *mockRSSParser) Parse(feed interface{}) ([]rss.RSSItem, error) {
+	return m.items, m.err
+}
+
+func (m *mockRSSParser) ExtractFansub(title string) string {
+	return ""
+}
+
+func (m *mockRSSParser) ExtractEpisode(title string) int {
+	return 0
+}
+
+func (m *mockRSSParser) SetProxy(proxyURL string) error {
+	return nil
 }
 
 func (m *mockSubscriptionRepo) Create(subscription *model.Subscription) error {
@@ -225,6 +256,73 @@ func TestSubscriptionHandler_GetByID(t *testing.T) {
 			assert.Equal(t, tt.wantStatus, w.Code)
 		})
 	}
+}
+
+func TestSubscriptionHandler_PreviewAppliesRules(t *testing.T) {
+	handler := NewSubscriptionHandler(&mockSubscriptionRepo{}, &mockDownloadRepo{}, nil, nil, "/downloads")
+	handler.rssParser = &mockRSSParser{items: []rss.RSSItem{
+		{
+			Title:       "[ANi] Test Anime - 01 [1080p][CHS]",
+			Episode:     1,
+			Fansub:      "ANi",
+			Language:    rss.LangCHS,
+			TorrentURL:  "magnet:?xt=urn:btih:1111111111111111111111111111111111111111",
+			TorrentHash: "1111111111111111111111111111111111111111",
+			PubDate:     "Sun, 24 May 2026 10:00:00 +0800",
+		},
+		{
+			Title:       "[ANi] Test Anime - 02 [720p][CHS]",
+			Episode:     2,
+			Fansub:      "ANi",
+			Language:    rss.LangCHS,
+			TorrentURL:  "magnet:?xt=urn:btih:2222222222222222222222222222222222222222",
+			TorrentHash: "2222222222222222222222222222222222222222",
+			PubDate:     "Sun, 24 May 2026 10:05:00 +0800",
+		},
+	}}
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/subscriptions/preview", handler.Preview)
+
+	body := map[string]interface{}{
+		"name":         "Test Anime",
+		"rss_url":      "http://example.com/feed.xml",
+		"season":       1,
+		"filter_rules": "+1080p\n-720p",
+	}
+	payload, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/subscriptions/preview", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			Summary struct {
+				TotalItems    int `json:"total_items"`
+				DownloadItems int `json:"download_items"`
+				SkippedItems  int `json:"skipped_items"`
+			} `json:"summary"`
+			Items []SubscriptionPreviewItem `json:"items"`
+		} `json:"data"`
+	}
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+
+	assert.Equal(t, 0, resp.Code)
+	assert.Equal(t, 2, resp.Data.Summary.TotalItems)
+	assert.Equal(t, 1, resp.Data.Summary.DownloadItems)
+	assert.Equal(t, 1, resp.Data.Summary.SkippedItems)
+	require.Len(t, resp.Data.Items, 2)
+	assert.Equal(t, "download", resp.Data.Items[0].Action)
+	assert.Equal(t, "skip", resp.Data.Items[1].Action)
+	assert.NotEmpty(t, resp.Data.Items[0].RenamePreview)
 }
 
 func TestSubscriptionHandler_Create(t *testing.T) {

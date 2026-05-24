@@ -174,6 +174,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		{
 			subscriptions.POST("", subscriptionHandler.Create)
 			subscriptions.GET("", subscriptionHandler.List)
+			subscriptions.POST("/preview", subscriptionHandler.Preview)
 			subscriptions.GET("/:id", subscriptionHandler.GetByID)
 			subscriptions.PUT("/:id", subscriptionHandler.Update)
 			subscriptions.DELETE("/:id", subscriptionHandler.Delete)

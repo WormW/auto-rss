@@ -45,6 +45,39 @@ type SubscriptionHandler struct {
 	collectionDownloader subscription.CollectionDownloader
 }
 
+type SubscriptionPreviewRequest struct {
+	ID                 uint   `json:"id"`
+	Name               string `json:"name"`
+	RssURL             string `json:"rss_url" binding:"required"`
+	Season             int    `json:"season"`
+	Fansub             string `json:"fansub"`
+	Language           string `json:"language"`
+	LanguagePreference string `json:"language_preference"`
+	TotalEpisodes      int    `json:"total_episodes"`
+	EpisodeOffset      int    `json:"episode_offset"`
+	FilterKeywords     string `json:"filter_keywords"`
+	ExcludeKeywords    string `json:"exclude_keywords"`
+	FilterRules        string `json:"filter_rules"`
+	Limit              int    `json:"limit"`
+}
+
+type SubscriptionPreviewItem struct {
+	Title              string `json:"title"`
+	Episode            int    `json:"episode"`
+	RelativeEpisode    int    `json:"relative_episode"`
+	Fansub             string `json:"fansub"`
+	Language           string `json:"language"`
+	LanguageKeyword    string `json:"language_keyword"`
+	PubDate            string `json:"pub_date"`
+	TorrentURL         string `json:"torrent_url"`
+	TorrentHash        string `json:"torrent_hash"`
+	Action             string `json:"action"`
+	Reason             string `json:"reason"`
+	ExistingDownloadID uint   `json:"existing_download_id,omitempty"`
+	DownloadPath       string `json:"download_path"`
+	RenamePreview      string `json:"rename_preview"`
+}
+
 // NewSubscriptionHandler 创建订阅处理器实例
 func NewSubscriptionHandler(
 	repo repository.SubscriptionRepository,
@@ -78,6 +111,26 @@ func NewSubscriptionHandler(
 		batchImporter:        batchImporter,
 		collectionDownloader: collectionDownloader,
 	}
+}
+
+func (h *SubscriptionHandler) resolveDownloadPath(subscriptionName string) string {
+	basePath := h.downloadPath
+	if h.configRepo != nil {
+		if pathConfig, err := h.configRepo.Get("download_path"); err == nil && pathConfig != nil && pathConfig.Value != "" {
+			basePath = pathConfig.Value
+		}
+	}
+	return utils.GenerateDownloadPath(basePath, subscriptionName)
+}
+
+func (h *SubscriptionHandler) resolveRenameTemplate() string {
+	if h.configRepo == nil {
+		return ""
+	}
+	if templateConfig, err := h.configRepo.Get("rename_template"); err == nil && templateConfig != nil && templateConfig.Value != "" {
+		return templateConfig.Value
+	}
+	return ""
 }
 
 // setProxy 设置代理
@@ -257,6 +310,83 @@ func chineseNumeralToInt(s string) int {
 	return 0
 }
 
+func splitRuleTokens(raw string) []string {
+	return strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == ';' || r == '，' || r == '；'
+	})
+}
+
+func parseRuleToken(token string) (string, bool) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "", false
+	}
+
+	lower := strings.ToLower(token)
+	excluded := false
+	for _, prefix := range []string{"exclude:", "exclude=", "排除:", "排除=", "!", "-"} {
+		if strings.HasPrefix(lower, prefix) {
+			token = strings.TrimSpace(token[len(prefix):])
+			excluded = true
+			return token, excluded
+		}
+	}
+	for _, prefix := range []string{"include:", "include=", "包含:", "包含=", "+"} {
+		if strings.HasPrefix(lower, prefix) {
+			token = strings.TrimSpace(token[len(prefix):])
+			return token, false
+		}
+	}
+
+	return token, false
+}
+
+func matchesSubscriptionFilters(sub *model.Subscription, title string) (bool, string) {
+	titleLower := strings.ToLower(title)
+	var include []string
+	var exclude []string
+
+	for _, token := range splitRuleTokens(sub.FilterKeywords) {
+		if keyword := strings.TrimSpace(token); keyword != "" {
+			include = append(include, keyword)
+		}
+	}
+	for _, token := range splitRuleTokens(sub.ExcludeKeywords) {
+		if keyword := strings.TrimSpace(token); keyword != "" {
+			exclude = append(exclude, keyword)
+		}
+	}
+	for _, token := range splitRuleTokens(sub.FilterRules) {
+		keyword, excluded := parseRuleToken(token)
+		if keyword == "" {
+			continue
+		}
+		if excluded {
+			exclude = append(exclude, keyword)
+		} else {
+			include = append(include, keyword)
+		}
+	}
+
+	for _, keyword := range exclude {
+		if strings.Contains(titleLower, strings.ToLower(keyword)) {
+			return false, "排除关键词: " + keyword
+		}
+	}
+
+	if len(include) == 0 {
+		return true, ""
+	}
+
+	for _, keyword := range include {
+		if strings.Contains(titleLower, strings.ToLower(keyword)) {
+			return true, ""
+		}
+	}
+
+	return false, "未命中过滤关键词"
+}
+
 // enrichWithBangumi 自动获取Bangumi数据
 func (h *SubscriptionHandler) enrichWithBangumi(subscription *model.Subscription) {
 	h.enrichWithBangumiInternal(subscription, false)
@@ -277,6 +407,232 @@ func (h *SubscriptionHandler) enrichWithBangumiInternal(subscription *model.Subs
 // downloadCollectionTorrent 下载合集种子
 func (h *SubscriptionHandler) downloadCollectionTorrent(subscription *model.Subscription) {
 	h.collectionDownloader.DownloadAsync(subscription)
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// Preview 预览订阅规则会匹配到的 RSS 条目
+func (h *SubscriptionHandler) Preview(c *gin.Context) {
+	var req SubscriptionPreviewRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Invalid request body",
+		})
+		return
+	}
+
+	req.RssURL = strings.TrimSpace(req.RssURL)
+	if req.RssURL == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "RSS URL is required",
+		})
+		return
+	}
+
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 30
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	sub := &model.Subscription{
+		ID:                 req.ID,
+		Name:               strings.TrimSpace(req.Name),
+		RssURL:             req.RssURL,
+		Season:             req.Season,
+		Fansub:             strings.TrimSpace(req.Fansub),
+		Language:           strings.TrimSpace(req.Language),
+		LanguagePreference: strings.TrimSpace(req.LanguagePreference),
+		TotalEpisodes:      req.TotalEpisodes,
+		EpisodeOffset:      req.EpisodeOffset,
+		FilterKeywords:     req.FilterKeywords,
+		ExcludeKeywords:    req.ExcludeKeywords,
+		FilterRules:        req.FilterRules,
+	}
+	if sub.Name == "" {
+		sub.Name = "未命名订阅"
+	}
+	sub.Name, sub.Season = normalizeSubscriptionNameAndSeason(sub.Name, sub.Season)
+
+	h.setProxy()
+	items, err := h.rssParser.FetchAndParseWithTimeout(req.RssURL, 15*time.Second)
+	if err != nil {
+		logger.Warn("Failed to preview RSS feed",
+			"rss_url", req.RssURL,
+			"error", err.Error(),
+			"client_ip", c.ClientIP())
+		c.JSON(http.StatusBadGateway, gin.H{
+			"code":    502,
+			"message": "Failed to fetch RSS feed: " + err.Error(),
+		})
+		return
+	}
+
+	downloadPath := h.resolveDownloadPath(sub.Name)
+	renameService := downloader.NewRenameService(h.resolveRenameTemplate())
+	existingByEpisode := map[int]model.Download{}
+	existingHashes := map[string]model.Download{}
+	if h.downloadRepo != nil && sub.ID > 0 {
+		if downloads, err := h.downloadRepo.ListBySubscriptionID(sub.ID); err == nil {
+			for _, download := range downloads {
+				if download.Episode > 0 {
+					existingByEpisode[download.Episode] = download
+				}
+				if download.TorrentHash != "" {
+					existingHashes[strings.ToLower(download.TorrentHash)] = download
+				}
+			}
+		}
+	}
+
+	previewItems := make([]SubscriptionPreviewItem, 0, minInt(len(items), limit))
+	processedEpisodes := map[int]bool{}
+	totalDownload := 0
+	totalReplace := 0
+	totalSkipped := 0
+	totalDuplicate := 0
+	latestEpisode := 0
+
+	for index, item := range items {
+		if item.Episode > latestEpisode {
+			latestEpisode = item.Episode
+		}
+
+		action := "download"
+		reason := "将创建下载任务"
+		var existingID uint
+
+		relativeEpisode := item.Episode
+		if sub.EpisodeOffset > 0 {
+			relativeEpisode = item.Episode - sub.EpisodeOffset
+			if relativeEpisode <= 0 {
+				action = "skip"
+				reason = "集数在偏移范围前"
+			}
+		}
+		if action == "download" && sub.TotalEpisodes > 0 && relativeEpisode > sub.TotalEpisodes {
+			action = "skip"
+			reason = "超过总集数"
+		}
+		if action == "download" {
+			if matched, filterReason := matchesSubscriptionFilters(sub, item.Title); !matched {
+				action = "skip"
+				reason = filterReason
+			}
+		}
+		if action == "download" && item.TorrentURL == "" {
+			action = "skip"
+			reason = "缺少种子链接"
+		}
+		if action == "download" && item.TorrentHash != "" {
+			hashKey := strings.ToLower(item.TorrentHash)
+			if existing, ok := existingHashes[hashKey]; ok {
+				action = "duplicate"
+				reason = "种子哈希已存在"
+				existingID = existing.ID
+			} else if h.downloadRepo != nil {
+				if existing, err := h.downloadRepo.GetByHash(item.TorrentHash); err == nil && existing != nil {
+					action = "duplicate"
+					reason = "种子哈希已存在"
+					existingID = existing.ID
+				}
+			}
+		}
+		if action == "download" && item.Episode > 0 {
+			if processedEpisodes[item.Episode] {
+				action = "skip"
+				reason = "同一集已有更靠前的 RSS 条目"
+			} else if existing, ok := existingByEpisode[item.Episode]; ok {
+				action = "replace"
+				reason = "会替换同集旧任务"
+				existingID = existing.ID
+			}
+		}
+		if action == "download" || action == "replace" {
+			processedEpisodes[item.Episode] = true
+		}
+
+		switch action {
+		case "download":
+			totalDownload++
+		case "replace":
+			totalReplace++
+		case "duplicate":
+			totalDuplicate++
+		default:
+			totalSkipped++
+		}
+
+		if index >= limit {
+			continue
+		}
+
+		download := &model.Download{
+			Title:       item.Title,
+			Episode:     item.Episode,
+			Fansub:      item.Fansub,
+			Language:    string(item.Language),
+			TorrentURL:  item.TorrentURL,
+			TorrentHash: item.TorrentHash,
+		}
+		extension := filepath.Ext(item.Title)
+		if extension == "" {
+			extension = ".mkv"
+		}
+		renamePreview := renameService.GenerateFileName(&downloader.RenameContext{
+			Subscription: sub,
+			Download:     download,
+			OriginalName: item.Title,
+			Extension:    extension,
+		})
+
+		previewItems = append(previewItems, SubscriptionPreviewItem{
+			Title:              item.Title,
+			Episode:            item.Episode,
+			RelativeEpisode:    relativeEpisode,
+			Fansub:             item.Fansub,
+			Language:           string(item.Language),
+			LanguageKeyword:    item.LangKeyword,
+			PubDate:            item.PubDate,
+			TorrentURL:         item.TorrentURL,
+			TorrentHash:        item.TorrentHash,
+			Action:             action,
+			Reason:             reason,
+			ExistingDownloadID: existingID,
+			DownloadPath:       downloadPath,
+			RenamePreview:      renamePreview,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Success",
+		"data": gin.H{
+			"summary": gin.H{
+				"total_items":       len(items),
+				"previewed_items":   len(previewItems),
+				"download_items":    totalDownload,
+				"replace_items":     totalReplace,
+				"skipped_items":     totalSkipped,
+				"duplicate_items":   totalDuplicate,
+				"latest_episode":    latestEpisode,
+				"download_path":     downloadPath,
+				"subscription_name": sub.Name,
+				"season":            sub.Season,
+				"limited":           len(items) > limit,
+			},
+			"items": previewItems,
+		},
+	})
 }
 
 // Create 创建订阅
@@ -929,6 +1285,14 @@ func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Tas
 			if subscription.LastRSSPubTime != nil && !item.PubTime.After(*subscription.LastRSSPubTime) {
 				continue
 			}
+		}
+
+		if matched, reason := matchesSubscriptionFilters(subscription, item.Title); !matched {
+			logger.Debug("Skipping RSS item based on subscription filters",
+				"subscription_id", id,
+				"title", item.Title,
+				"reason", reason)
+			continue
 		}
 
 		offset := subscription.EpisodeOffset

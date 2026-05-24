@@ -90,6 +90,55 @@ export interface Download {
   retry_reason?: string
 }
 
+export interface SubscriptionPreviewItem {
+  title: string
+  episode: number
+  relative_episode: number
+  fansub?: string
+  language?: string
+  language_keyword?: string
+  pub_date?: string
+  torrent_url?: string
+  torrent_hash?: string
+  action: 'download' | 'replace' | 'duplicate' | 'skip'
+  reason: string
+  existing_download_id?: number
+  download_path?: string
+  rename_preview?: string
+}
+
+export interface SubscriptionPreviewSummary {
+  total_items: number
+  previewed_items: number
+  download_items: number
+  replace_items: number
+  skipped_items: number
+  duplicate_items: number
+  latest_episode: number
+  download_path: string
+  subscription_name: string
+  season: number
+  limited: boolean
+}
+
+export interface SubscriptionPreview {
+  summary: SubscriptionPreviewSummary
+  items: SubscriptionPreviewItem[]
+}
+
+export interface DownloadDiagnostics {
+  id: number
+  status: string
+  severity: 'success' | 'info' | 'warning' | 'error'
+  category: string
+  title: string
+  detail: string
+  can_retry: boolean
+  retry_blocked?: string
+  checks: Record<string, boolean>
+  actions: Array<{ key: string; label: string; enabled: boolean }>
+}
+
 export const subscriptionApi = {
   list: (page = 1, pageSize = 20) =>
     api.get('/subscriptions', { params: { page, page_size: pageSize } }),
@@ -97,6 +146,8 @@ export const subscriptionApi = {
     api.get(`/subscriptions/${id}`),
   create: (data: Partial<Subscription>) =>
     api.post('/subscriptions', data),
+  preview: (data: Partial<Subscription> & { id?: number; limit?: number }) =>
+    api.post('/subscriptions/preview', data),
   update: (id: number, data: Partial<Subscription>) =>
     api.put(`/subscriptions/${id}`, data),
   delete: (id: number) =>
