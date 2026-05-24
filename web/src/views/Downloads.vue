@@ -50,6 +50,10 @@
               </n-space>
             </div>
             <div class="card-actions">
+              <n-button v-if="item.status === 'failed' || item.status === 'stalled'" text size="small" @click="openDiagnostics(item)">
+                <template #icon><n-icon><InformationCircleOutline /></n-icon></template>
+                诊断
+              </n-button>
               <n-button v-if="item.status === 'failed'" text size="small" type="warning" @click="handleRetry(item.id)">
                 <template #icon><n-icon><RefreshOutline /></n-icon></template>
                 重试
@@ -84,14 +88,59 @@
       :row-key="(row: Download) => row.id"
       v-model:checked-row-keys="selectedRowKeys"
     />
+
+    <n-modal v-model:show="showDiagnostics" preset="card" :title="diagnosticTitle" style="width: 640px; max-width: 95vw;">
+      <n-spin :show="diagnosticsLoading">
+        <div v-if="selectedDiagnostics" class="diagnostics-panel">
+          <div class="diagnostics-summary">
+            <n-tag :type="getDiagnosticTagType(selectedDiagnostics.severity)">
+              {{ selectedDiagnostics.title }}
+            </n-tag>
+            <n-tag size="small">{{ selectedDiagnostics.category }}</n-tag>
+            <n-tag v-if="selectedDiagnostics.retry_blocked" size="small" type="warning">
+              {{ selectedDiagnostics.retry_blocked }}
+            </n-tag>
+          </div>
+          <div class="diagnostics-detail">
+            {{ selectedDiagnostics.detail }}
+          </div>
+          <div class="diagnostics-checks">
+            <div
+              v-for="[key, passed] in Object.entries(selectedDiagnostics.checks)"
+              :key="key"
+              class="diagnostics-check"
+              :class="{ passed, failed: !passed }"
+            >
+              <span class="check-dot"></span>
+              <span>{{ getCheckLabel(key) }}</span>
+            </div>
+          </div>
+          <div class="diagnostics-actions">
+            <n-button
+              type="warning"
+              size="small"
+              :disabled="!selectedDiagnostics.can_retry"
+              @click="retryFromDiagnostics"
+            >
+              <template #icon><n-icon><RefreshOutline /></n-icon></template>
+              重试
+            </n-button>
+            <n-button size="small" type="error" @click="deleteFromDiagnostics">
+              <template #icon><n-icon><TrashOutline /></n-icon></template>
+              删除
+            </n-button>
+          </div>
+        </div>
+      </n-spin>
+    </n-modal>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, h, onUnmounted } from 'vue'
-import { NButton, NDataTable, NSelect, NSpace, NTag, NDropdown, NTooltip, NIcon, NCard, NCheckbox, NSpin, NEmpty, NPagination, useMessage, useDialog } from 'naive-ui'
-import { RefreshOutline, TrashOutline } from '@vicons/ionicons5'
-import { downloadApi, type Download } from '@/api'
+import { computed, ref, onMounted, h, onUnmounted } from 'vue'
+import { NButton, NDataTable, NSelect, NSpace, NTag, NDropdown, NTooltip, NIcon, NCard, NCheckbox, NSpin, NEmpty, NPagination, NModal, useMessage, useDialog } from 'naive-ui'
+import { InformationCircleOutline, RefreshOutline, TrashOutline } from '@vicons/ionicons5'
+import { downloadApi, type Download, type DownloadDiagnostics } from '@/api'
 
 const message = useMessage()
 const dialog = useDialog()
@@ -99,6 +148,14 @@ const loading = ref(false)
 const downloads = ref<Download[]>([])
 const statusFilter = ref('')
 const selectedRowKeys = ref<number[]>([])
+const showDiagnostics = ref(false)
+const diagnosticsLoading = ref(false)
+const selectedDiagnostics = ref<DownloadDiagnostics | null>(null)
+const selectedDiagnosticDownload = ref<Download | null>(null)
+const diagnosticTitle = computed(() => {
+  if (!selectedDiagnosticDownload.value) return '任务诊断'
+  return `任务诊断 #${selectedDiagnosticDownload.value.id}`
+})
 
 // Mobile detection
 const isMobile = ref(false)
@@ -136,6 +193,27 @@ const getStatusConfig = (status: string) => {
   }
   return statusMap[status] || { type: 'info', text: status }
 }
+
+const getDiagnosticTagType = (severity: DownloadDiagnostics['severity']) => {
+  const map: Record<DownloadDiagnostics['severity'], 'success' | 'info' | 'warning' | 'error'> = {
+    success: 'success',
+    info: 'info',
+    warning: 'warning',
+    error: 'error'
+  }
+  return map[severity] || 'info'
+}
+
+const checkLabels: Record<string, string> = {
+  has_torrent_url: '种子链接',
+  has_torrent_hash: '任务 Hash',
+  has_file_path: '文件路径',
+  has_error: '错误记录',
+  retry_available: '重试额度',
+  qbittorrent_task_found: '下载器任务'
+}
+
+const getCheckLabel = (key: string) => checkLabels[key] || key
 
 const statusOptions = [
   { label: '全部', value: '' },
@@ -191,9 +269,25 @@ const columns = [
   {
     title: '操作',
     key: 'actions',
-    width: 120,
+    width: 160,
     render: (row: Download) => {
       const buttons: Array<ReturnType<typeof h>> = []
+      if (row.status === 'failed' || row.status === 'stalled') {
+        buttons.push(
+          h(
+            NTooltip,
+            { trigger: 'hover' },
+            {
+              trigger: () => h(
+                NButton,
+                { size: 'small', circle: true, secondary: true, onClick: () => openDiagnostics(row) },
+                { icon: () => h(NIcon, null, { default: () => h(InformationCircleOutline) }) }
+              ),
+              default: () => '查看诊断'
+            }
+          )
+        )
+      }
       if (row.status === 'failed') {
         buttons.push(
           h(
@@ -253,6 +347,38 @@ const handleRetry = async (id: number) => {
   } catch (error) {
     message.error('重试失败')
   }
+}
+
+const openDiagnostics = async (download: Download) => {
+  selectedDiagnosticDownload.value = download
+  selectedDiagnostics.value = null
+  showDiagnostics.value = true
+  diagnosticsLoading.value = true
+  try {
+    const response: any = await downloadApi.diagnostics(download.id)
+    if (!response?.data?.checks) {
+      throw new Error('诊断接口返回异常')
+    }
+    selectedDiagnostics.value = response.data
+  } catch (error: any) {
+    message.error(error.response?.data?.message || error.message || '加载诊断失败')
+    showDiagnostics.value = false
+  } finally {
+    diagnosticsLoading.value = false
+  }
+}
+
+const retryFromDiagnostics = async () => {
+  if (!selectedDiagnosticDownload.value) return
+  await handleRetry(selectedDiagnosticDownload.value.id)
+  showDiagnostics.value = false
+}
+
+const deleteFromDiagnostics = () => {
+  if (!selectedDiagnosticDownload.value) return
+  const id = selectedDiagnosticDownload.value.id
+  showDiagnostics.value = false
+  handleDelete(id)
 }
 
 const handleDelete = async (id: number) => {
@@ -404,6 +530,67 @@ const handleClear = async (key: string) => {
   justify-content: center;
 }
 
+.diagnostics-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.diagnostics-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.diagnostics-detail {
+  padding: 12px;
+  border: 1px solid #e6e6eb;
+  border-radius: 8px;
+  background: #fafafa;
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.diagnostics-checks {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.diagnostics-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 1px solid #e6e6eb;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.check-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #d03050;
+}
+
+.diagnostics-check.passed .check-dot {
+  background: #18a058;
+}
+
+.diagnostics-check.failed {
+  color: #d03050;
+}
+
+.diagnostics-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 /* 移动端响应式 */
 @media (max-width: 768px) {
   .page-header {
@@ -434,6 +621,10 @@ const handleClear = async (key: string) => {
 
   .n-data-table {
     display: none;
+  }
+
+  .diagnostics-checks {
+    grid-template-columns: 1fr;
   }
 }
 

@@ -207,6 +207,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		downloads := v1.Group("/downloads")
 		{
 			downloads.GET("", downloadHandler.List)
+			downloads.GET("/:id/diagnostics", downloadHandler.Diagnostics)
 			downloads.GET("/:id", downloadHandler.GetByID)
 			downloads.DELETE("/:id", downloadHandler.Delete)
 			downloads.POST("/:id/retry", downloadHandler.Retry)

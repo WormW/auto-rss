@@ -165,6 +165,8 @@ export const downloadApi = {
     api.get('/downloads', { params: { page, page_size: pageSize, status } }),
   getById: (id: number) =>
     api.get(`/downloads/${id}`),
+  diagnostics: (id: number) =>
+    api.get(`/downloads/${id}/diagnostics`),
   delete: (id: number) =>
     api.delete(`/downloads/${id}`),
   retry: (id: number) =>

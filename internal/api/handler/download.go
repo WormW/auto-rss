@@ -3,7 +3,9 @@ package handler
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
+	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/constants"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/pkg/utils"
@@ -17,6 +19,25 @@ type DownloadHandler struct {
 	repo       repository.DownloadRepository
 	qbClient   downloader.QBittorrentClient
 	configRepo repository.ConfigRepository
+}
+
+type DownloadDiagnosticAction struct {
+	Key     string `json:"key"`
+	Label   string `json:"label"`
+	Enabled bool   `json:"enabled"`
+}
+
+type DownloadDiagnostics struct {
+	ID           uint                       `json:"id"`
+	Status       string                     `json:"status"`
+	Severity     string                     `json:"severity"`
+	Category     string                     `json:"category"`
+	Title        string                     `json:"title"`
+	Detail       string                     `json:"detail"`
+	CanRetry     bool                       `json:"can_retry"`
+	RetryBlocked string                     `json:"retry_blocked,omitempty"`
+	Checks       map[string]bool            `json:"checks"`
+	Actions      []DownloadDiagnosticAction `json:"actions"`
 }
 
 // NewDownloadHandler 创建下载处理器实例
@@ -49,6 +70,140 @@ func (h *DownloadHandler) GetByID(c *gin.Context) {
 		"message": "Success",
 		"data":    download,
 	})
+}
+
+// Diagnostics 获取下载任务失败诊断信息
+func (h *DownloadHandler) Diagnostics(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Invalid download ID",
+		})
+		return
+	}
+
+	download, err := h.repo.GetByID(uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"code":    404,
+			"message": "Download not found",
+		})
+		return
+	}
+
+	diagnostics := buildDownloadDiagnostics(download)
+	if h.qbClient != nil && download.TorrentHash != "" {
+		if _, err := h.qbClient.GetTorrentInfo(download.TorrentHash); err == nil {
+			diagnostics.Checks["qbittorrent_task_found"] = true
+		} else {
+			diagnostics.Checks["qbittorrent_task_found"] = false
+			if diagnostics.Category == "unknown" && download.Status != "completed" {
+				diagnostics.Category = "qbittorrent"
+				diagnostics.Title = "qBittorrent 中未找到任务"
+				diagnostics.Detail = "数据库记录存在，但 qBittorrent 当前没有这个 hash 对应的任务。"
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Success",
+		"data":    diagnostics,
+	})
+}
+
+func buildDownloadDiagnostics(download *model.Download) DownloadDiagnostics {
+	lastError := strings.TrimSpace(download.LastError)
+	if lastError == "" {
+		lastError = strings.TrimSpace(download.ErrorMessage)
+	}
+
+	checks := map[string]bool{
+		"has_torrent_url":  download.TorrentURL != "",
+		"has_torrent_hash": download.TorrentHash != "",
+		"has_file_path":    download.FilePath != "",
+		"has_error":        lastError != "",
+		"retry_available":  download.MaxRetries <= 0 || download.RetryCount < download.MaxRetries,
+	}
+
+	diagnostics := DownloadDiagnostics{
+		ID:       download.ID,
+		Status:   download.Status,
+		Severity: "info",
+		Category: "unknown",
+		Title:    "暂无异常信息",
+		Detail:   "这个任务目前没有记录明确的失败原因。",
+		Checks:   checks,
+	}
+
+	switch download.Status {
+	case "failed":
+		diagnostics.Severity = "error"
+		diagnostics.Title = "下载任务失败"
+	case "stalled":
+		diagnostics.Severity = "warning"
+		diagnostics.Category = "qbittorrent"
+		diagnostics.Title = "下载停滞"
+		diagnostics.Detail = "qBittorrent 任务处于停滞状态，通常和种子活跃度、网络或保存路径有关。"
+	case "pending":
+		diagnostics.Severity = "warning"
+		diagnostics.Category = "queue"
+		diagnostics.Title = "等待处理"
+		diagnostics.Detail = "任务仍在等待下载器接收或后台调度处理。"
+	case "completed":
+		diagnostics.Severity = "success"
+		diagnostics.Category = "completed"
+		diagnostics.Title = "任务已完成"
+		diagnostics.Detail = "下载已经完成。"
+	}
+
+	if lastError != "" {
+		diagnostics.Detail = lastError
+		diagnostics.Category, diagnostics.Title = classifyDownloadError(lastError)
+	}
+
+	if download.TorrentURL == "" {
+		diagnostics.Category = "rss"
+		diagnostics.Title = "缺少种子链接"
+		diagnostics.Detail = "RSS 条目没有解析到可用的种子链接。"
+	}
+
+	diagnostics.CanRetry = diagnostics.Severity != "success" && download.TorrentURL != ""
+	if download.MaxRetries > 0 && download.RetryCount >= download.MaxRetries {
+		diagnostics.CanRetry = true
+		diagnostics.RetryBlocked = "自动重试次数已用尽，仍可手动重试。"
+	}
+
+	diagnostics.Actions = []DownloadDiagnosticAction{
+		{Key: "retry", Label: "重试", Enabled: diagnostics.CanRetry},
+		{Key: "delete", Label: "删除", Enabled: true},
+		{Key: "check_config", Label: "检查配置", Enabled: diagnostics.Category == "qbittorrent" || diagnostics.Category == "disk" || diagnostics.Category == "file"},
+	}
+
+	return diagnostics
+}
+
+func classifyDownloadError(message string) (string, string) {
+	lower := strings.ToLower(message)
+	switch {
+	case strings.Contains(lower, "rss") || strings.Contains(message, "获取RSS") || strings.Contains(lower, "parse rss"):
+		return "rss", "RSS 获取或解析失败"
+	case strings.Contains(lower, "torrent file") || strings.Contains(message, "种子文件"):
+		return "torrent", "种子文件获取失败"
+	case strings.Contains(lower, "qbittorrent") || strings.Contains(lower, "add torrent") || strings.Contains(lower, "login") || strings.Contains(lower, "unauthorized"):
+		return "qbittorrent", "下载器连接或添加任务失败"
+	case strings.Contains(lower, "no space") || strings.Contains(message, "空间") || strings.Contains(lower, "disk"):
+		return "disk", "磁盘空间或路径异常"
+	case strings.Contains(lower, "rename") || strings.Contains(message, "重命名"):
+		return "file", "文件重命名失败"
+	case strings.Contains(lower, "permission") || strings.Contains(message, "权限") || strings.Contains(lower, "no such file"):
+		return "file", "文件访问失败"
+	case strings.Contains(lower, "timeout") || strings.Contains(message, "超时"):
+		return "network", "网络请求超时"
+	default:
+		return "unknown", "失败原因未归类"
+	}
 }
 
 // List 获取下载任务列表

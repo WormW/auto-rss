@@ -17,24 +17,24 @@ import (
 
 // mockDownloadRepo is a mock implementation of DownloadRepository for testing
 type mockDownloadRepo struct {
-	createFunc                  func(download *model.Download) error
-	updateFunc                  func(download *model.Download) error
-	deleteFunc                  func(id uint) error
-	getByIDFunc                 func(id uint) (*model.Download, error)
-	getByHashFunc               func(hash string) (*model.Download, error)
-	getBySubAndEpFunc           func(subscriptionID uint, episode int) (*model.Download, error)
-	getBySubAndEpWithLangFunc   func(subscriptionID uint, episode int) ([]model.Download, error)
-	getRecentBySubFunc          func(subscriptionID uint, limit int) ([]model.Download, error)
-	listFunc                    func(offset, limit int, status string) ([]model.Download, int64, error)
-	listBySubIDFunc             func(subscriptionID uint) ([]model.Download, error)
-	updateStatusFunc            func(id uint, status string) error
-	batchDeleteFunc             func(ids []uint) error
-	deleteByStatusFunc          func(status string) error
-	deleteAllFunc               func() error
-	getFailedReadyFunc          func(limit int) ([]model.Download, error)
-	getByRetryCountFunc         func(minRetries, maxRetries int) ([]model.Download, error)
-	createInTxFunc              func(tx *gorm.DB, download *model.Download) error
-	updateInTxFunc              func(tx *gorm.DB, download *model.Download) error
+	createFunc                func(download *model.Download) error
+	updateFunc                func(download *model.Download) error
+	deleteFunc                func(id uint) error
+	getByIDFunc               func(id uint) (*model.Download, error)
+	getByHashFunc             func(hash string) (*model.Download, error)
+	getBySubAndEpFunc         func(subscriptionID uint, episode int) (*model.Download, error)
+	getBySubAndEpWithLangFunc func(subscriptionID uint, episode int) ([]model.Download, error)
+	getRecentBySubFunc        func(subscriptionID uint, limit int) ([]model.Download, error)
+	listFunc                  func(offset, limit int, status string) ([]model.Download, int64, error)
+	listBySubIDFunc           func(subscriptionID uint) ([]model.Download, error)
+	updateStatusFunc          func(id uint, status string) error
+	batchDeleteFunc           func(ids []uint) error
+	deleteByStatusFunc        func(status string) error
+	deleteAllFunc             func() error
+	getFailedReadyFunc        func(limit int) ([]model.Download, error)
+	getByRetryCountFunc       func(minRetries, maxRetries int) ([]model.Download, error)
+	createInTxFunc            func(tx *gorm.DB, download *model.Download) error
+	updateInTxFunc            func(tx *gorm.DB, download *model.Download) error
 
 	// Tracking fields
 	listCalls    int
@@ -360,14 +360,52 @@ func TestDownloadHandler_GetByID(t *testing.T) {
 	}
 }
 
+func TestDownloadHandler_DiagnosticsClassifiesFailure(t *testing.T) {
+	mockRepo := &mockDownloadRepo{
+		getByIDFunc: func(id uint) (*model.Download, error) {
+			return &model.Download{
+				ID:         id,
+				Status:     "failed",
+				TorrentURL: "magnet:?xt=urn:btih:test",
+				LastError:  "failed to add torrent to qBittorrent: connection refused",
+			}, nil
+		},
+	}
+	handler := NewDownloadHandler(mockRepo, nil, nil)
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/downloads/:id/diagnostics", handler.Diagnostics)
+
+	req := httptest.NewRequest("GET", "/downloads/7/diagnostics", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var resp struct {
+		Code int                 `json:"code"`
+		Data DownloadDiagnostics `json:"data"`
+	}
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+
+	assert.Equal(t, 0, resp.Code)
+	assert.Equal(t, uint(7), resp.Data.ID)
+	assert.Equal(t, "qbittorrent", resp.Data.Category)
+	assert.Equal(t, "error", resp.Data.Severity)
+	assert.True(t, resp.Data.CanRetry)
+	assert.True(t, resp.Data.Checks["has_torrent_url"])
+}
+
 func TestDownloadHandler_Delete(t *testing.T) {
 	tests := []struct {
-		name         string
-		id           string
-		mockGet      func(id uint) (*model.Download, error)
-		mockDelete   func(id uint) error
-		wantStatus   int
-		wantDeleted  bool
+		name        string
+		id          string
+		mockGet     func(id uint) (*model.Download, error)
+		mockDelete  func(id uint) error
+		wantStatus  int
+		wantDeleted bool
 	}{
 		{
 			name: "success",
@@ -380,12 +418,12 @@ func TestDownloadHandler_Delete(t *testing.T) {
 			wantDeleted: true,
 		},
 		{
-			name:         "invalid id format",
-			id:           "abc",
-			mockGet:      nil,
-			mockDelete:   nil,
-			wantStatus:   http.StatusBadRequest,
-			wantDeleted:  false,
+			name:        "invalid id format",
+			id:          "abc",
+			mockGet:     nil,
+			mockDelete:  nil,
+			wantStatus:  http.StatusBadRequest,
+			wantDeleted: false,
 		},
 		{
 			name: "not found",
@@ -460,11 +498,11 @@ func TestDownloadHandler_Retry(t *testing.T) {
 			},
 		},
 		{
-			name:       "invalid id format",
-			id:         "abc",
-			mockGet:    nil,
-			mockUpdate: nil,
-			wantStatus: http.StatusBadRequest,
+			name:        "invalid id format",
+			id:          "abc",
+			mockGet:     nil,
+			mockUpdate:  nil,
+			wantStatus:  http.StatusBadRequest,
 			wantUpdated: false,
 		},
 		{
