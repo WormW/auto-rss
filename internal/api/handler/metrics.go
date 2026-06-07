@@ -2,6 +2,7 @@ package handler
 
 import (
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -12,9 +13,9 @@ import (
 // MetricsCollector Prometheus 指标收集器
 type MetricsCollector struct {
 	// RSS 相关指标
-	RSSFetchTotal      *prometheus.CounterVec
-	RSSFetchDuration   prometheus.Histogram
-	RSSEntryTotal      prometheus.Counter
+	RSSFetchTotal    *prometheus.CounterVec
+	RSSFetchDuration prometheus.Histogram
+	RSSEntryTotal    prometheus.Counter
 
 	// 下载相关指标
 	DownloadTotal      *prometheus.CounterVec
@@ -271,9 +272,9 @@ func MetricsHandler() gin.HandlerFunc {
 func MetricsMiddleware(mc *MetricsCollector) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
-		
+
 		c.Next()
-		
+
 		duration := time.Since(start)
 		mc.RecordHTTPRequest(
 			c.Request.Method,
@@ -285,11 +286,16 @@ func MetricsMiddleware(mc *MetricsCollector) gin.HandlerFunc {
 }
 
 // DefaultCollector 默认指标收集器实例
-var DefaultCollector *MetricsCollector
+var (
+	DefaultCollector *MetricsCollector
+	metricsOnce      sync.Once
+)
 
 // InitMetrics 初始化全局指标收集器
 func InitMetrics() {
-	DefaultCollector = NewMetricsCollector()
+	metricsOnce.Do(func() {
+		DefaultCollector = NewMetricsCollector()
+	})
 }
 
 // GetDefaultCollector 获取默认指标收集器

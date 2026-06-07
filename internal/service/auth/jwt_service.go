@@ -39,6 +39,8 @@ type JWTService interface {
 	RefreshToken(refreshToken string) (*TokenPair, error)
 	// Logout 登出（使所有token失效）
 	Logout(userID string) error
+	// LogoutRefreshToken 登出单个refresh token
+	LogoutRefreshToken(refreshToken string) error
 }
 
 // jwtService JWT服务实现
@@ -171,4 +173,22 @@ func (s *jwtService) RefreshToken(refreshToken string) (*TokenPair, error) {
 // Logout 登出，删除用户的所有refresh token
 func (s *jwtService) Logout(userID string) error {
 	return s.refreshTokenRepo.DeleteByUserID(userID)
+}
+
+// LogoutRefreshToken 验证并删除单个refresh token
+func (s *jwtService) LogoutRefreshToken(refreshToken string) error {
+	tokenHash := repository.HashToken(refreshToken)
+
+	tokenModel, err := s.refreshTokenRepo.FindByTokenHash(tokenHash)
+	if err != nil {
+		return errors.New("invalid refresh token")
+	}
+	if tokenModel.Used {
+		return errors.New("invalid refresh token")
+	}
+	if tokenModel.IsExpired() {
+		return errors.New("refresh token expired")
+	}
+
+	return s.refreshTokenRepo.DeleteByID(tokenModel.ID)
 }

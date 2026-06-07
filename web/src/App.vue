@@ -3,7 +3,13 @@
     <n-message-provider>
       <n-dialog-provider>
         <!-- 移动端布局 -->
-        <n-layout v-if="isMobile" style="height: 100vh">
+        <router-view v-if="hideShell" v-slot="{ Component }">
+          <transition name="fade" mode="out-in">
+            <component :is="Component" />
+          </transition>
+        </router-view>
+
+        <n-layout v-else-if="isMobile" style="height: 100vh">
           <!-- 移动端 Header -->
           <n-layout-header bordered class="mobile-header">
             <div class="mobile-header-left">
@@ -220,6 +226,7 @@ import {
   CloudDownloadOutline,
   SettingsOutline,
   DocumentTextOutline,
+  ArchiveOutline,
   CalendarOutline,
   NotificationsOutline,
   DiscOutline,
@@ -235,6 +242,8 @@ import {
 import TaskManager from './components/TaskManager.vue'
 import { useWebSocketStore } from './stores/websocket'
 import { createWebSocketService, WebSocketService } from './services/websocket'
+import { authApi } from './api'
+import { clearAuthTokens, getAccessToken } from './services/auth-state'
 
 const router = useRouter()
 const route = useRoute()
@@ -259,6 +268,7 @@ const connectionTagType = computed(() => {
       return 'default'
   }
 })
+const hideShell = computed(() => route.meta.hideShell === true)
 
 // Handle manual reconnect
 const handleReconnect = () => {
@@ -283,7 +293,7 @@ const handleReconnect = () => {
 // Initialize WebSocket connection
 const initWebSocket = () => {
   // Get token from localStorage (optional, for authenticated access)
-  const storedToken = localStorage.getItem('access_token')
+  const storedToken = getAccessToken()
   token.value = storedToken || ''
   
   // Always create WebSocket service, token is optional
@@ -312,12 +322,18 @@ const checkMobile = () => {
 onMounted(() => {
   checkMobile()
   window.addEventListener('resize', checkMobile)
+  window.addEventListener('auth:changed', handleAuthChanged)
+  window.addEventListener('auth:required', handleAuthRequired)
   // Initialize WebSocket after DOM is ready
-  initWebSocket()
+  if (!hideShell.value) {
+    initWebSocket()
+  }
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', checkMobile)
+  window.removeEventListener('auth:changed', handleAuthChanged)
+  window.removeEventListener('auth:required', handleAuthRequired)
   // Clean up WebSocket connection
   if (wsService.value) {
     wsService.value.disconnect()
@@ -370,6 +386,11 @@ const menuOptions: MenuOption[] = [
     icon: renderIcon(SettingsOutline)
   },
   {
+    label: '备份恢复',
+    key: 'backup',
+    icon: renderIcon(ArchiveOutline)
+  },
+  {
     label: '系统日志',
     key: 'logs',
     icon: renderIcon(DocumentTextOutline)
@@ -398,18 +419,43 @@ const handleMobileMenuSelect = (key: string) => {
   mobileDrawerVisible.value = false
 }
 
-const handleUserSelect = (key: string) => {
+const disconnectWebSocket = () => {
+  if (wsService.value) {
+    wsService.value.disconnect()
+    wsService.value = null
+  }
+}
+
+const handleAuthChanged = () => {
+  const nextToken = getAccessToken()
+  token.value = nextToken
+  disconnectWebSocket()
+  if (!hideShell.value) {
+    initWebSocket()
+  }
+}
+
+const handleAuthRequired = () => {
+  disconnectWebSocket()
+  if (route.name !== 'login') {
+    router.replace({ name: 'login', query: { redirect: route.fullPath } })
+  }
+}
+
+watch(hideShell, (isHidden) => {
+  if (isHidden) {
+    disconnectWebSocket()
+    return
+  }
+  initWebSocket()
+})
+
+const handleUserSelect = async (key: string) => {
   if (key === 'logout') {
-    // Disconnect WebSocket before logout
-    if (wsService.value) {
-      wsService.value.disconnect()
-    }
-    // Clear token from localStorage
-    localStorage.removeItem('access_token')
+    disconnectWebSocket()
+    await authApi.logout()
     token.value = ''
-    console.log('[App] Logout completed, WebSocket disconnected')
-    // Redirect to login page (if exists) or reload
-    // router.push({ name: 'login' })
+    await router.push({ name: 'login' })
   }
 }
 
@@ -417,10 +463,9 @@ const handleUserSelect = (key: string) => {
 watch(() => wsStore.status, (newStatus) => {
   if (newStatus === 'error' && wsStore.lastError?.toLowerCase().includes('token')) {
     console.log('[App] Token error detected, redirecting to login')
-    localStorage.removeItem('access_token')
+    clearAuthTokens()
     token.value = ''
-    // Redirect to login page (if exists)
-    // router.push({ name: 'login' })
+    handleAuthRequired()
   }
 })
 </script>

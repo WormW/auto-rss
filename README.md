@@ -1,410 +1,231 @@
 # Auto-RSS
 
 <p align="center">
-  <img src="docs/images/logo.png" alt="Auto-RSS Logo" width="200"/>
+  <strong>基于 Go + Vue 的番剧 RSS 自动订阅、下载、整理工具</strong>
 </p>
 
 <p align="center">
-  <strong>基于 Golang 的番剧自动订阅下载工具</strong>
-</p>
-
-<p align="center">
-  <a href="#特性">特性</a> •
+  <a href="#功能状态">功能状态</a> •
   <a href="#快速开始">快速开始</a> •
+  <a href="#配置说明">配置说明</a> •
   <a href="#文档">文档</a> •
-  <a href="#开发">开发</a> •
-  <a href="#贡献">贡献</a>
-</p>
-
-<p align="center">
-  <img alt="GitHub release" src="https://img.shields.io/github/v/release/WormW/auto-rss">
-  <img alt="Go version" src="https://img.shields.io/github/go-mod/go-version/WormW/auto-rss">
-  <img alt="License" src="https://img.shields.io/github/license/WormW/auto-rss">
+  <a href="#开发">开发</a>
 </p>
 
 ---
 
-## 📖 简介
+## 简介
 
-Auto-RSS 是一个基于 Golang 开发的番剧自动订阅下载工具，灵感来源于 [auto_bangumi](https://github.com/EstrellaXD/Auto_Bangumi) 和 [ani-rss](https://github.com/wushuo894/ani-rss)。通过 RSS 订阅，自动解析、下载、重命名番剧，并与 Plex/Jellyfin 等媒体库无缝集成。
-
-### 为什么选择 Auto-RSS？
-
-- 🚀 **高性能**: Golang 实现，低资源占用，快速响应
-- 🐳 **易部署**: Docker 一键启动，或使用单文件二进制
-- 🎯 **智能化**: 自动解析 RSS、去重、重命名，全流程自动化
-- 🎨 **现代化**: Vue 3 前端，清晰直观的 Web UI
-- 📦 **轻量级**: SQLite 数据库，零配置依赖
-- 🔧 **可扩展**: 预留接口，支持后续功能扩展
+Auto-RSS 面向 NAS、家庭服务器和个人媒体库场景，通过 RSS 订阅番剧更新，自动解析条目、推送到 qBittorrent、同步下载状态，并按媒体库友好的目录和文件名整理成片。项目当前使用 SQLite 持久化数据，后端提供 REST API，前端使用 Vue 3 管理订阅、下载、配置、通知、日历、磁盘和备份迁移。
 
 ---
 
-## ✨ 特性
+## 功能状态
 
-### 核心功能 (v0.1.0)
+### 已支持
 
-- ✅ **RSS 订阅管理**
-  - 创建、编辑、删除订阅
-  - 订阅状态管理 (启用/暂停)
-  - 手动/自动刷新 RSS
+- **订阅与下载**
+  - 创建、编辑、删除、启用/停用订阅。
+  - 订阅预览、手动采集缺失剧集、合集种子下载、批量导入、导入/导出订阅。
+  - RSS 定时刷新、手动全局刷新、增量水位线、种子 Hash 去重、同集替换。
+  - qBittorrent Web API 集成，下载状态同步，失败诊断、手动重试、批量删除和清空。
 
-- ✅ **智能解析引擎**
-  - Mikan Project RSS 解析
-  - 自动提取番剧信息 (标题、集数、字幕组)
-  - 智能去重 (种子 Hash + 标题相似度)
+- **番剧元数据与封面**
+  - Mikan 搜索、季度查询、字幕组列表。
+  - Bangumi 搜索、按名称匹配、条目详情、订阅元数据补全和后台更新。
+  - Bangumi 封面下载、本地封面访问和缺失封面 fallback。
 
-- ✅ **下载器集成**
-  - qBittorrent API 集成
-  - 自动添加下载任务
-  - 任务状态同步
+- **文件整理与恢复**
+  - 自定义重命名模板、模板预设、重命名预览。
+  - 下载完成后的目录整理和命名。
+  - 手动重新整理、批量重命名、文件夹扫描、恢复扫描。
+  - 订阅名称或季度变化后可触发相关文件重命名任务。
 
-- ✅ **文件重命名**
-  - 自动重命名为 `SxxExx` 格式
-  - Plex/Jellyfin 兼容目录结构
-  - 示例: `葬送的芙莉莲/Season 01/葬送的芙莉莲 S01E12.mp4`
+- **组织与筛选**
+  - 字幕组、语言、总集数、集数偏移、包含/排除关键词和过滤规则。
+  - 订阅分组、批量启用、批量删除、批量移动分组。
+  - 标签创建、更新、删除和订阅标签关联。
 
-- ✅ **Web UI**
-  - 订阅管理页 (增删改查)
-  - 下载监控页 (任务列表、进度)
-  - 系统配置页 (qBittorrent、重命名规则)
-  - 日志查看页 (错误追踪、调试)
+- **通知、日历与磁盘**
+  - 通知历史、Telegram、Email、Webhook、WebSocket 通知。
+  - Webhook 预设模板，支持默认、Nanobot、OpenClaw、Discord、Slack 等格式。
+  - 追番日历、本周/下周/今日排期。
+  - 磁盘状态、阈值配置、低空间通知、危险状态暂停新下载。
+  - 后台自动清理服务已实现。
 
-- ✅ **配置管理**
-  - 环境变量配置 (Docker 友好)
-  - Web UI 动态配置 (运行时修改)
-  - SQLite 数据持久化
+- **认证、运维与迁移**
+  - `AUTH_ENABLED=false` 默认兼容本地/NAS 部署。
+  - `AUTH_ENABLED=true` 时启用单用户 JWT 登录，保护主要 `/api/v1` 业务接口。
+  - 登录、刷新、退出登录和认证状态接口已挂载。
+  - 启用认证时会拒绝默认 JWT secret 和默认 `admin` 密码。
+  - WebSocket 通知会跟随认证开关校验 token。
+  - REST API、健康检查、ready/live、Prometheus metrics、请求限流。
+  - 配置备份导出、导入预览、导入迁移，支持敏感字段脱敏。
 
-### 计划功能
+### 实验性或受限
 
-- 🔜 **番剧信息刮削** (v0.2.0)
-  - TMDB / BGM 集成
-  - 封面、简介、评分展示
+- **磁盘手动清理**：后台自动清理逻辑可按年龄或空间删除已完成下载记录和文件；`POST /api/v1/disk/cleanup` 当前仍返回简化结果，清理历史接口返回空列表。
+- **观看保护**：磁盘清理中的“保护正在观看”是占位实现，尚未接入 Plex/Jellyfin 会话查询。
+- **RSS 源适配**：多 RSS 源管理已支持，但具体条目解析能力仍主要围绕 Mikan 风格标题和种子链接。
+- **备份导入**：支持 Auto-RSS 和 Auto-Bangumi 数据格式迁移；导入前建议先使用预览接口确认策略和差异。
 
-- 🔜 **通知系统** (v0.2.0)
-  - Telegram Bot 通知
-  - 邮件 (SMTP) 通知
+### 计划中
 
-- 🔜 **高级功能** (v0.3.0+)
-  - 字幕组搜索与匹配
-  - 自定义重命名规则
-  - 多 RSS 源支持 (dmhy, Nyaa)
-  - PostgreSQL 支持
+- 更完整的手动磁盘清理结果、清理历史和媒体服务器观看状态保护。
+- 更多 RSS 站点适配和源级解析规则。
+- PostgreSQL 或其他外部数据库支持。
+- 更细粒度的多用户权限和审计能力。
 
 ---
 
-## 🚀 快速开始
+## 快速开始
 
-### 使用 Docker (推荐)
+### Docker
 
 ```bash
-# 1. 拉取镜像
-docker pull auto-rss:latest
-
-# 2. 创建目录
 mkdir -p data downloads
 
-# 3. 运行容器
 docker run -d \
   --name auto-rss \
+  --restart unless-stopped \
   -p 7892:7892 \
+  -e DB_PATH=/data/auto-rss.db \
   -e QB_HOST=http://192.168.1.100:8080 \
   -e QB_USERNAME=admin \
-  -e QB_PASSWORD=yourpassword \
-  -v $(pwd)/data:/data \
-  -v $(pwd)/downloads:/downloads \
+  -e QB_PASSWORD=your-qbittorrent-password \
+  -e DOWNLOAD_PATH=/downloads \
+  -v "$(pwd)/data:/data" \
+  -v "$(pwd)/downloads:/downloads" \
   auto-rss:latest
-
-# 4. 访问 Web UI
-# 浏览器打开: http://localhost:7892
 ```
 
-### 使用 Docker Compose
+启动后访问 `http://localhost:7892`。
 
-创建 `docker-compose.yml`:
-
-```yaml
-version: '3.8'
-
-services:
-  auto-rss:
-    image: auto-rss:latest
-    container_name: auto-rss
-    restart: unless-stopped
-    ports:
-      - "7892:7892"
-    environment:
-      - QB_HOST=http://192.168.1.100:8080
-      - QB_USERNAME=admin
-      - QB_PASSWORD=yourpassword
-      - RSS_INTERVAL=30m
-      - LOG_LEVEL=info
-    volumes:
-      - ./data:/data
-      - ./downloads:/downloads
-```
-
-启动服务:
+### Docker Compose
 
 ```bash
-docker-compose up -d
+cp docker-compose.yml docker-compose.local.yml
+# 按需修改 qBittorrent 地址、账号、下载目录和 AUTH_ENABLED
+docker compose -f docker-compose.local.yml up -d
 ```
 
-### 使用二进制
+### 二进制
 
 ```bash
-# 1. 下载二进制
-wget https://github.com/WormW/auto-rss/releases/download/v0.1.0/auto-rss-linux-amd64
-
-# 2. 添加执行权限
-chmod +x auto-rss-linux-amd64
-
-# 3. 创建配置文件
-cat > .env <<EOF
-QB_HOST=http://localhost:8080
-QB_USERNAME=admin
-QB_PASSWORD=yourpassword
-EOF
-
-# 4. 运行
-./auto-rss-linux-amd64
+cp .env.example .env
+# 编辑 .env 中的 qBittorrent、下载路径和可选认证配置
+./auto-rss
 ```
 
 ---
 
-## 📚 文档
-
-完整文档请查看 [`docs/`](docs/) 目录：
-
-- [📋 产品需求文档 (PRD)](docs/PRD.md) - 完整的功能需求和技术架构
-- [📡 API 文档](docs/API.md) - RESTful API 接口说明
-- [🚢 部署文档](docs/DEPLOY.md) - Docker、二进制、源码部署指南
-- [👥 字幕组功能设计](docs/FANSUB_DESIGN.md) - 字幕组匹配功能详细设计
-
----
-
-## 📋 系统要求
-
-### 硬件要求
-
-- **CPU**: 1 核 (推荐 2 核+)
-- **内存**: 256 MB (推荐 512 MB+)
-- **磁盘**: 100 MB (程序) + 下载空间
-
-### 软件要求
-
-**运行环境**:
-- Docker 20.10+ (Docker 部署)
-- 或 Linux / macOS / Windows (二进制部署)
-
-**外部依赖**:
-- qBittorrent 3.0+ (必须)
-  - 需要开启 Web UI
-  - 推荐版本: 4.5+
-
----
-
-## 🛠️ 配置说明
-
-### 环境变量
+## 配置说明
 
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
 | `DB_PATH` | `./data/auto-rss.db` | SQLite 数据库路径 |
-| `QB_HOST` | `http://localhost:8080` | qBittorrent 地址 |
+| `QB_HOST` | `http://localhost:8080` | qBittorrent Web UI 地址 |
 | `QB_USERNAME` | `admin` | qBittorrent 用户名 |
-| `QB_PASSWORD` | `""` | qBittorrent 密码 |
-| `RSS_INTERVAL` | `30m` | RSS 更新间隔 |
-| `LOG_LEVEL` | `info` | 日志级别 (debug/info/warn/error) |
+| `QB_PASSWORD` | 空 | qBittorrent 密码 |
+| `RSS_INTERVAL` | `30m` | RSS 自动检查间隔 |
+| `LOG_LEVEL` | `info` | 日志级别：`debug`、`info`、`warn`、`error` |
 | `SERVER_PORT` | `7892` | Web 服务端口 |
 | `DOWNLOAD_PATH` | `/downloads` | 默认下载路径 |
+| `AUTH_ENABLED` | `false` | 是否启用单用户 JWT 访问保护 |
+| `JWT_SECRET` | 默认占位值 | JWT 签名密钥；启用认证时至少 32 字符且不能使用默认值 |
+| `JWT_USERNAME` | `admin` | 登录用户名 |
+| `JWT_PASSWORD` | `admin` | 登录密码；启用认证时不能使用默认值 |
+| `JWT_ACCESS_TOKEN_EXPIRY` | `30m` | access token 过期时间 |
+| `JWT_REFRESH_TOKEN_EXPIRY` | `168h` | refresh token 过期时间 |
+| `RATE_LIMIT_RPS` | `10` | 通用 API 每秒请求数 |
+| `RATE_LIMIT_BURST` | `20` | 通用 API 突发请求数 |
+| `RATE_LIMIT_AUTH_RPM` | `5` | 登录和刷新接口每分钟请求数 |
+| `RATE_LIMIT_MAX_ENTRIES` | `10000` | 限流客户端缓存上限 |
+| `RATE_LIMIT_TTL` | `1h` | 限流客户端不活跃清理时间 |
 
-详细配置说明请参考 [部署文档](docs/DEPLOY.md#配置说明)。
+运行时配置也可通过 Web UI 或 `/api/v1/config` 写入数据库，例如 qBittorrent 连接、下载路径、代理、重命名模板、磁盘阈值和通知渠道。
 
 ---
 
-## 💻 开发
+## 认证与部署安全
 
-### 环境准备
+默认 `AUTH_ENABLED=false`，用于兼容已有内网部署。启用认证后：
 
-```bash
-# Go 1.21+
-go version
+- `/api/v1/auth/status`、`/login`、`/refresh`、`/logout` 保持公开。
+- 健康检查、静态资源、封面和 metrics 不需要登录。
+- 主要 `/api/v1` 业务接口需要 `Authorization: Bearer <access_token>`。
+- `/ws/notifications` 需要携带有效 token。
+- refresh token 采用轮换机制；退出登录只撤销提交的 refresh token。
 
-# Node.js 18+
-node --version
+如果服务不只暴露在可信内网，即使启用了应用认证，也建议配合防火墙、VPN 或反向代理访问控制。
 
-# SQLite 3.40+
-sqlite3 --version
-```
+---
 
-### 克隆代码
+## 文档
 
-```bash
-git clone https://github.com/WormW/auto-rss.git
-cd auto-rss
-```
+- [API 文档](docs/API.md)
+- [部署文档](docs/DEPLOY.md)
+- [Webhook 通知](docs/WEBHOOK_NOTIFICATION.md)
+- [磁盘监控说明](docs/DISK_MONITOR_FEATURE.md)
+- [追番日历说明](docs/CALENDAR_FEATURE.md)
+- [字幕组功能设计](docs/FANSUB_DESIGN.md)
 
-### 构建前端
+---
+
+## 开发
+
+### 环境要求
+
+- Go 1.21+
+- Node.js 18+
+- SQLite
+
+### 构建
 
 ```bash
 cd web
 npm install
 npm run build
 cd ..
-```
 
-### 构建后端
-
-```bash
 go mod download
 go build -o auto-rss ./cmd/server
 ```
 
-### 构建单文件可执行 (包含前端)
+构建包含前端资源的单文件可执行：
 
 ```bash
 make build-embed
 ```
 
-### 运行开发环境
+### 测试
 
 ```bash
-# 后端 (需要安装 air 实现热重载)
-go install github.com/cosmtrek/air@latest
-air
-
-# 前端 (新终端)
-cd web
-npm run dev
-```
-
-### 运行测试
-
-```bash
-# 单元测试
 go test ./...
 
-# 带覆盖率
-go test -cover ./...
-
-# 生成覆盖率报告
-go test -coverprofile=coverage.out ./...
-go tool cover -html=coverage.out
-```
-
-### 代码规范
-
-```bash
-# 代码格式化
-gofmt -w .
-
-# 代码检查
-golangci-lint run
-
-# 前端检查
 cd web
-npm run lint
+npm run build
 ```
 
 ---
 
-## 🏗️ 技术栈
+## 技术栈
 
-### 后端
-
-- **语言**: Go 1.21+
-- **框架**: [Gin](https://gin-gonic.com/) - Web 框架
-- **ORM**: [GORM](https://gorm.io/) - 数据库 ORM
-- **RSS**: [gofeed](https://github.com/mmcdole/gofeed) - RSS 解析
-- **日志**: [zap](https://github.com/uber-go/zap) - 结构化日志
-- **任务**: [cron](https://github.com/robfig/cron) - 定时任务
-- **数据库**: SQLite
-
-### 前端
-
-- **框架**: [Vue 3](https://vuejs.org/)
-- **语言**: TypeScript
-- **构建**: [Vite](https://vitejs.dev/)
-- **UI**: [Naive UI](https://www.naiveui.com/)
-- **状态**: [Pinia](https://pinia.vuejs.org/)
-- **路由**: Vue Router
-
-### 部署
-
-- **容器**: Docker + Docker Compose
-- **多架构**: amd64, arm64
+- 后端：Go、Gin、GORM、SQLite、zap、cron、gofeed
+- 前端：Vue 3、TypeScript、Vite、Naive UI、Pinia、Vue Router
+- 部署：Docker、Docker Compose、多架构二进制
 
 ---
 
-## 📸 截图
+## 致谢
 
-### 订阅管理
-![订阅管理](docs/images/screenshot-subscription.png)
-
-### 下载监控
-![下载监控](docs/images/screenshot-download.png)
-
-### 系统配置
-![系统配置](docs/images/screenshot-config.png)
+- [auto_bangumi](https://github.com/EstrellaXD/Auto_Bangumi)
+- [ani-rss](https://github.com/wushuo894/ani-rss)
+- [Mikan Project](https://mikanani.me/)
+- [Bangumi](https://bangumi.tv/)
 
 ---
 
-## 🤝 贡献
+## 许可证
 
-欢迎提交 Issue 和 Pull Request！
-
-### 贡献指南
-
-1. Fork 本仓库
-2. 创建功能分支 (`git checkout -b feature/amazing-feature`)
-3. 提交更改 (`git commit -m 'feat: 添加某个功能'`)
-4. 推送到分支 (`git push origin feature/amazing-feature`)
-5. 提交 Pull Request
-
-### 提交规范
-
-使用 [Conventional Commits](https://www.conventionalcommits.org/) 格式：
-
-```
-feat: 添加新功能
-fix: 修复 bug
-docs: 更新文档
-style: 代码格式调整
-refactor: 重构代码
-test: 添加测试
-chore: 构建/工具链更新
-```
-
----
-
-## 📄 许可证
-
-本项目采用 [MIT License](LICENSE) 开源协议。
-
----
-
-## 🙏 致谢
-
-感谢以下优秀项目的启发和参考：
-
-- [auto_bangumi](https://github.com/EstrellaXD/Auto_Bangumi) - 业务逻辑参考
-- [ani-rss](https://github.com/wushuo894/ani-rss) - 架构设计参考
-- [Mikan Project](https://mikanani.me/) - RSS 数据源
-
----
-
-## 📞 联系方式
-
-- **GitHub Issues**: [提交问题](https://github.com/WormW/auto-rss/issues)
-
----
-
-## ⭐ Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=WormW/auto-rss&type=Date)](https://star-history.com/#WormW/auto-rss&Date)
-
----
-
-<p align="center">
-  Made with ❤️ by Auto-RSS Team
-</p>
+本项目采用 MIT License。

@@ -1,19 +1,121 @@
-import axios from 'axios'
+import axios, { type AxiosError, type InternalAxiosRequestConfig } from 'axios'
+import {
+  clearAuthTokens,
+  getAccessToken,
+  getRefreshToken,
+  setAuthTokens,
+  type TokenPair
+} from '@/services/auth-state'
+
+interface RetryableRequestConfig extends InternalAxiosRequestConfig {
+  _retry?: boolean
+}
 
 export const api = axios.create({
   baseURL: '/api/v1',
   timeout: 10000
 })
 
+const refreshApi = axios.create({
+  baseURL: '/api/v1',
+  timeout: 10000
+})
+
+api.interceptors.request.use((config) => {
+  const token = getAccessToken()
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
 api.interceptors.response.use(
   (response) => {
     return response.data
   },
-  (error) => {
+  async (error: AxiosError) => {
+    const originalRequest = error.config as RetryableRequestConfig | undefined
+    const requestPath = originalRequest?.url || ''
+    const isAuthEndpoint = requestPath.startsWith('/auth/')
+
+    if (error.response?.status === 401 && originalRequest && !originalRequest._retry && !isAuthEndpoint) {
+      const refreshToken = getRefreshToken()
+      if (refreshToken) {
+        originalRequest._retry = true
+        try {
+          const response = await refreshApi.post('/auth/refresh', { refresh_token: refreshToken })
+          const tokenPair = response.data.data as TokenPair
+          setAuthTokens(tokenPair)
+          originalRequest.headers.Authorization = `Bearer ${tokenPair.access_token}`
+          return api(originalRequest)
+        } catch (refreshError) {
+          clearAuthTokens()
+          window.dispatchEvent(new CustomEvent('auth:required'))
+          return Promise.reject(refreshError)
+        }
+      }
+
+      clearAuthTokens()
+      window.dispatchEvent(new CustomEvent('auth:required'))
+    }
+
     console.error('API Error:', error)
     return Promise.reject(error)
   }
 )
+
+export interface AuthStatus {
+  auth_enabled: boolean
+  username: string
+}
+
+let authStatusCache: AuthStatus | null = null
+let authStatusPromise: Promise<AuthStatus> | null = null
+
+const extractData = <T>(response: any): T => response.data as T
+
+export const authApi = {
+  status: async (force = false): Promise<AuthStatus> => {
+    if (!force && authStatusCache) {
+      return authStatusCache
+    }
+    if (!force && authStatusPromise) {
+      return authStatusPromise
+    }
+
+    authStatusPromise = api.get('/auth/status')
+      .then((response) => {
+        const status = extractData<AuthStatus>(response)
+        authStatusCache = status
+        return status
+      })
+      .finally(() => {
+        authStatusPromise = null
+      })
+
+    return authStatusPromise
+  },
+  login: async (username: string, password: string): Promise<TokenPair> => {
+    const response = await api.post('/auth/login', { username, password })
+    const tokens = extractData<TokenPair>(response)
+    setAuthTokens(tokens)
+    authStatusCache = null
+    return tokens
+  },
+  logout: async (): Promise<void> => {
+    const refreshToken = getRefreshToken()
+    try {
+      if (refreshToken) {
+        await api.post('/auth/logout', { refresh_token: refreshToken })
+      }
+    } finally {
+      clearAuthTokens()
+    }
+  },
+  clearStatusCache: () => {
+    authStatusCache = null
+  }
+}
 
 export interface Subscription {
   id: number
@@ -207,6 +309,75 @@ export const fileOrganizerApi = {
     api.post('/file-organizer/trigger'),
   reloadConfig: () =>
     api.post('/file-organizer/reload')
+}
+
+export interface BackupPackageSummary {
+  configs: number
+  rss_sources: number
+  groups: number
+  tags: number
+  subscriptions: number
+  subscription_tags: number
+  notification_settings: number
+}
+
+export interface BackupPackage {
+  schema_version: string
+  app: string
+  exported_at: string
+  includes_sensitive: boolean
+  sensitive_placeholder: string
+  summary: BackupPackageSummary
+  configs: any[]
+  rss_sources: any[]
+  groups: any[]
+  tags: any[]
+  subscriptions: any[]
+  subscription_tags: any[]
+  notification_settings: any[]
+}
+
+export interface BackupImportSummary {
+  total: number
+  create: number
+  overwrite: number
+  merge: number
+  skip: number
+  sensitive_skipped: number
+}
+
+export interface BackupImportItem {
+  resource: string
+  key: string
+  name: string
+  action: 'create' | 'overwrite' | 'merge' | 'skip'
+  reason: string
+  conflict: boolean
+  sensitive: boolean
+}
+
+export interface BackupImportPlan {
+  source_format: string
+  strategy: 'skip' | 'overwrite' | 'merge'
+  summary: BackupImportSummary
+  items: BackupImportItem[]
+}
+
+export const backupApi = {
+  export: (includeSensitive = false) =>
+    api.get('/backup/export', { params: { include_sensitive: includeSensitive } }),
+  preview: (data: unknown, sourceFormat = 'auto', strategy: 'skip' | 'overwrite' | 'merge' = 'skip') =>
+    api.post('/backup/preview', {
+      data,
+      source_format: sourceFormat,
+      strategy
+    }),
+  import: (data: unknown, sourceFormat = 'auto', strategy: 'skip' | 'overwrite' | 'merge' = 'skip') =>
+    api.post('/backup/import', {
+      data,
+      source_format: sourceFormat,
+      strategy
+    })
 }
 
 // 任务类型

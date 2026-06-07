@@ -1,960 +1,602 @@
 # Auto-RSS API 文档
 
-> **版本**: v0.1.0
-> **协议**: RESTful API over HTTP/HTTPS
-> **基础路径**: `/api/v1`
-> **数据格式**: JSON
+> 基础路径：`/api/v1`
+> 默认地址：`http://localhost:7892`
+> 数据格式：JSON
+
+本文档按当前路由注册整理，面向需要调用 Auto-RSS REST API、调试 Web UI 请求或编写自动化脚本的用户。
 
 ---
 
-## 📋 目录
+## 当前状态
 
-1. [API 概述](#api-概述)
-2. [通用规范](#通用规范)
-3. [认证机制](#认证机制)
-4. [错误处理](#错误处理)
-5. [API 端点](#api-端点)
-6. [数据模型](#数据模型)
-
----
-
-## API 概述
-
-Auto-RSS 提供完整的 RESTful API，用于管理番剧订阅、下载任务、系统配置和日志查询。
-
-### 基础信息
-
-- **服务地址**: `http://localhost:7892` (默认)
-- **API 版本**: `v1`
-- **Content-Type**: `application/json`
-- **字符编码**: UTF-8
-
-### 支持的操作
-
-- ✅ 订阅管理 (CRUD)
-- ✅ 下载任务管理
-- ✅ RSS 手动刷新
-- ✅ 系统配置管理
-- ✅ 日志查询
+- `AUTH_ENABLED=false` 默认兼容本地/NAS 部署，业务 API 不要求登录。
+- `AUTH_ENABLED=true` 时，除健康检查、静态资源、封面和 `/api/v1/auth/*` 外，主要 `/api/v1` 业务接口都需要 `Authorization: Bearer <access_token>`。
+- `/ws/notifications` 跟随认证开关：认证关闭时允许匿名连接；认证开启时必须带 `?token=<access_token>`。
+- `/metrics`、`/health`、`/ready`、`/live` 不走业务认证。
+- 请求限流已启用，登录和刷新接口使用独立的认证端点限流配置。
+- 部分旧 handler 仍返回 `{ "error": "..." }` 或 `{ "data": ... }`，多数新接口返回 `{ "code": 0, "message": "Success", "data": ... }`。调用方应同时按 HTTP 状态码和响应体判断结果。
 
 ---
 
-## 通用规范
+## 通用响应
 
-### 统一响应格式
-
-所有 API 响应遵循统一的 JSON 格式：
-
-#### 成功响应
-```json
-{
-  "code": 0,
-  "message": "success",
-  "data": {
-    // 实际数据
-  }
-}
-```
-
-#### 错误响应
-```json
-{
-  "code": 4001,
-  "message": "订阅不存在",
-  "data": null
-}
-```
-
-### 错误码定义
-
-| 错误码范围 | 说明 | 示例 |
-|-----------|------|------|
-| 0 | 成功 | - |
-| 1000-1999 | 通用错误 | 1001: 参数错误, 1002: 请求方法错误 |
-| 2000-2999 | 订阅相关错误 | 2001: 订阅不存在, 2002: RSS URL 无效 |
-| 3000-3999 | 下载相关错误 | 3001: 下载任务不存在, 3002: qBittorrent 连接失败 |
-| 4000-4999 | 配置相关错误 | 4001: 配置项不存在, 4002: 配置值无效 |
-| 5000-5999 | 系统错误 | 5001: 数据库错误, 5002: 内部服务错误 |
-
-### 常见错误码
-
-```yaml
-0:    成功
-1001: 参数错误
-1002: 请求方法错误
-1003: Content-Type 错误
-1004: 请求体解析失败
-2001: 订阅不存在
-2002: RSS URL 无效
-2003: 订阅名称重复
-2004: 订阅创建失败
-2005: 订阅更新失败
-2006: 订阅删除失败
-3001: 下载任务不存在
-3002: qBittorrent 连接失败
-3003: 种子添加失败
-4001: 配置项不存在
-4002: 配置值无效
-5001: 数据库错误
-5002: 内部服务错误
-```
-
-### 分页参数
-
-所有列表接口支持分页查询：
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| page | int | 1 | 页码 (从 1 开始) |
-| page_size | int | 20 | 每页数量 (最大 100) |
-
-分页响应格式：
-```json
-{
-  "code": 0,
-  "message": "success",
-  "data": {
-    "total": 100,
-    "page": 1,
-    "page_size": 20,
-    "items": [...]
-  }
-}
-```
-
-### 时间格式
-
-所有时间字段使用 **ISO 8601** 格式：
-
-```
-2025-10-19T12:00:00Z
-2025-10-19T12:00:00+08:00
-```
-
----
-
-## 认证机制
-
-**v0.1.0**: 暂不实现认证
-
-**v0.4.0+**: 将支持 JWT 认证
-
-```http
-Authorization: Bearer <token>
-```
-
----
-
-## 错误处理
-
-### 错误响应示例
-
-#### 参数错误 (1001)
-```json
-{
-  "code": 1001,
-  "message": "参数错误: name 不能为空",
-  "data": null
-}
-```
-
-#### 资源不存在 (2001)
-```json
-{
-  "code": 2001,
-  "message": "订阅不存在: ID=999",
-  "data": null
-}
-```
-
-#### 服务器错误 (5001)
-```json
-{
-  "code": 5001,
-  "message": "数据库错误: connection timeout",
-  "data": null
-}
-```
-
-### HTTP 状态码映射
-
-| HTTP 状态码 | 错误码范围 | 说明 |
-|------------|-----------|------|
-| 200 | 0 | 成功 |
-| 400 | 1000-1999 | 客户端请求错误 |
-| 404 | 2000-4999 | 资源不存在 |
-| 500 | 5000-5999 | 服务器内部错误 |
-
----
-
-## API 端点
-
-### 1. 订阅管理
-
-#### 1.1 获取订阅列表
-
-```http
-GET /api/v1/subscriptions
-```
-
-**Query Parameters**:
-
-| 参数 | 类型 | 必填 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| status | string | 否 | - | 订阅状态 (active, paused) |
-| page | int | 否 | 1 | 页码 |
-| page_size | int | 否 | 20 | 每页数量 |
-
-**Response**:
+成功响应通常为：
 
 ```json
 {
   "code": 0,
-  "message": "success",
-  "data": {
-    "total": 10,
-    "page": 1,
-    "page_size": 20,
-    "items": [
-      {
-        "id": 1,
-        "name": "葬送的芙莉莲",
-        "rss_url": "https://mikanani.me/RSS/Bangumi?bangumiId=3080",
-        "season": 1,
-        "status": "active",
-        "filter_keywords": ["1080p", "简体"],
-        "exclude_keywords": ["720p"],
-        "subgroup_id": 615,
-        "download_path": "/downloads/anime",
-        "rename_enabled": true,
-        "last_check_time": "2025-10-19T12:00:00Z",
-        "created_at": "2025-10-01T10:00:00Z",
-        "updated_at": "2025-10-19T12:00:00Z"
-      }
-    ]
-  }
+  "message": "Success",
+  "data": {}
 }
 ```
 
-#### 1.2 获取订阅详情
+错误响应通常为：
 
-```http
-GET /api/v1/subscriptions/:id
+```json
+{
+  "code": 400,
+  "message": "Invalid request body"
+}
 ```
 
-**Path Parameters**:
+列表接口常用 `page`、`page_size` 查询参数。时间字段通常使用 RFC3339 格式，例如 `2026-06-07T12:00:00Z`。
 
-| 参数 | 类型 | 说明 |
+---
+
+## 认证
+
+### 配置
+
+启用认证：
+
+```env
+AUTH_ENABLED=true
+JWT_SECRET=change-this-to-a-long-random-secret-at-least-32-chars
+JWT_USERNAME=admin
+JWT_PASSWORD=change-this-password
+JWT_ACCESS_TOKEN_EXPIRY=30m
+JWT_REFRESH_TOKEN_EXPIRY=168h
+```
+
+启用认证时，服务启动会拒绝默认 `JWT_SECRET`、长度不足 32 字符的 secret、空用户名、空密码和默认 `admin` 密码。
+
+### 端点
+
+| 方法 | 路径 | 说明 |
 |------|------|------|
-| id | int | 订阅 ID |
+| `GET` | `/auth/status` | 获取认证开关和当前用户名 |
+| `POST` | `/auth/login` | 登录并获取 token pair |
+| `POST` | `/auth/refresh` | 用 refresh token 换取新的 token pair |
+| `POST` | `/auth/logout` | 撤销提交的 refresh token |
 
-**Response**:
+登录请求：
 
 ```json
 {
-  "code": 0,
-  "message": "success",
-  "data": {
-    "id": 1,
-    "name": "葬送的芙莉莲",
-    "rss_url": "https://mikanani.me/RSS/Bangumi?bangumiId=3080",
-    "season": 1,
-    "status": "active",
-    "filter_keywords": ["1080p", "简体"],
-    "exclude_keywords": ["720p"],
-    "subgroup_id": 615,
-    "download_path": "/downloads/anime",
-    "rename_enabled": true,
-    "last_check_time": "2025-10-19T12:00:00Z",
-    "created_at": "2025-10-01T10:00:00Z",
-    "updated_at": "2025-10-19T12:00:00Z",
-    "downloads": [
-      {
-        "id": 1,
-        "title": "[ANi] 葬送的芙莉莲 - 12 [1080P][Baha][WEB-DL][AAC AVC][CHT]",
-        "episode": 12,
-        "fansub": "ANi",
-        "status": "completed",
-        "downloaded_at": "2025-10-19T14:00:00Z"
-      }
-    ]
-  }
+  "username": "admin",
+  "password": "change-this-password"
 }
 ```
 
-#### 1.3 创建订阅
+登录响应中的 `token_type` 为 `Bearer`。后续业务请求：
 
 ```http
-POST /api/v1/subscriptions
+Authorization: Bearer <access_token>
 ```
 
-**Request Body**:
+刷新请求：
+
+```json
+{
+  "refresh_token": "<refresh_token>"
+}
+```
+
+refresh token 采用轮换机制。已使用过的 refresh token 再次刷新会触发重用检测，并清理该用户已有 refresh token。
+
+退出登录请求：
+
+```json
+{
+  "refresh_token": "<refresh_token>"
+}
+```
+
+---
+
+## 健康检查、指标与静态资源
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/health` | 服务健康检查 |
+| `GET` | `/ready` | 就绪检查 |
+| `GET` | `/live` | 存活检查 |
+| `GET` | `/api/v1/health` | API 路径下的健康检查 |
+| `GET` | `/metrics` | Prometheus 指标 |
+| `GET` | `/covers/*filepath` | 本地封面访问；本地缺失时按 Bangumi 原图 fallback |
+| `GET` | `/ws/notifications` | 通知 WebSocket |
+| `GET` | `/` | Web UI 入口 |
+| `GET` | `/assets/*filepath` | Web UI 静态资源 |
+
+WebSocket 连接：
+
+```text
+ws://localhost:7892/ws/notifications
+ws://localhost:7892/ws/notifications?token=<access_token>
+```
+
+`AUTH_ENABLED=true` 时必须使用第二种形式。
+
+---
+
+## 路由总览
+
+### Mikan 与 Bangumi
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/mikan/search` | 搜索 Mikan 番剧 |
+| `GET` | `/mikan/season` | 按季度查询 Mikan 番剧 |
+| `GET` | `/mikan/fansub-groups` | 查询番剧页面中的字幕组 RSS |
+| `GET` | `/bangumi/search?keyword=...` | 搜索 Bangumi 动画条目 |
+| `GET` | `/bangumi/search-by-name?name=...` | 按名称返回最佳匹配 |
+| `GET` | `/bangumi/subjects/:id` | 获取 Bangumi 条目详情 |
+
+这些接口会读取 `system_proxy` 配置并应用到外部请求。
+
+### RSS 源
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/rss-sources` | 创建 RSS 源 |
+| `GET` | `/rss-sources` | 获取 RSS 源列表 |
+| `GET` | `/rss-sources/:id` | 获取单个 RSS 源 |
+| `PUT` | `/rss-sources/:id` | 更新 RSS 源 |
+| `DELETE` | `/rss-sources/:id` | 删除 RSS 源 |
+| `GET` | `/rss-sources/:id/animes` | 拉取源内容并按番剧名聚合 |
+
+创建请求：
+
+```json
+{
+  "name": "Mikan",
+  "base_url": "https://mikanani.me/RSS/Classic",
+  "description": "Mikan RSS",
+  "enabled": true
+}
+```
+
+列表支持 `page`、`page_size`、`enabled` 查询参数。
+
+### 订阅
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/subscriptions` | 创建订阅；会尝试自动补全 Bangumi 数据 |
+| `GET` | `/subscriptions` | 获取订阅列表和下载统计 |
+| `POST` | `/subscriptions/preview` | 预览 RSS 条目匹配、去重和命名结果 |
+| `GET` | `/subscriptions/:id` | 获取订阅详情 |
+| `PUT` | `/subscriptions/:id` | 更新订阅 |
+| `DELETE` | `/subscriptions/:id` | 删除订阅 |
+| `POST` | `/subscriptions/:id/toggle` | 切换订阅启用状态 |
+| `POST` | `/subscriptions/:id/enrich-bangumi` | 强制补全 Bangumi 数据 |
+| `POST` | `/subscriptions/:id/download-collection` | 手动触发合集种子下载 |
+| `POST` | `/subscriptions/:id/collect-episodes` | 手动采集缺失剧集 |
+| `POST` | `/subscriptions/:id/reorganize-files` | 重新整理订阅文件 |
+| `POST` | `/subscriptions/:id/rename-files` | 批量重命名订阅文件 |
+| `POST` | `/subscriptions/:id/scan-folder` | 扫描指定订阅文件夹并更新记录 |
+| `POST` | `/subscriptions/batch-import-from-rss` | 从 RSS 批量导入订阅 |
+| `POST` | `/subscriptions/batch/enable` | 批量启用或停用 |
+| `POST` | `/subscriptions/batch/delete` | 批量删除 |
+| `POST` | `/subscriptions/batch/group` | 批量设置分组 |
+| `GET` | `/subscriptions/export` | 导出订阅 |
+| `POST` | `/subscriptions/import` | 导入订阅 |
+| `GET` | `/subscriptions/statistics` | 获取订阅统计 |
+
+常用字段：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `name` | string | 番剧名称 |
+| `rss_url` | string | RSS 地址 |
+| `season` | int | 季度 |
+| `enabled` | bool | 是否启用自动检查 |
+| `rename_enabled` | bool | 是否启用重命名 |
+| `fansub` | string | 字幕组 |
+| `language` | string | 字幕语言 |
+| `language_preference` | string | `auto`、`chs`、`cht`、`both` |
+| `filter_keywords` | string | 包含关键词 |
+| `exclude_keywords` | string | 排除关键词 |
+| `filter_rules` | string | 支持 `include:`、`exclude:`、`+`、`-` 等规则前缀 |
+| `total_episodes` | int | 总集数，0 表示未知 |
+| `episode_offset` | int | RSS 集数偏移 |
+| `collection_torrent` | string | 合集种子地址 |
+| `bangumi_id` | int | Bangumi 条目 ID |
+| `air_day` | string | 更新星期，`0` 表示周日 |
+| `air_time` | string | 更新时间 |
+| `notify_enabled` | bool | 是否开启排期通知 |
+
+预览请求：
 
 ```json
 {
   "name": "葬送的芙莉莲",
   "rss_url": "https://mikanani.me/RSS/Bangumi?bangumiId=3080",
   "season": 1,
-  "filter_keywords": ["1080p", "简体"],
-  "exclude_keywords": ["720p"],
-  "subgroup_id": 615,
-  "download_path": "/downloads/anime",
-  "rename_enabled": true
+  "filter_rules": "include:1080p\nexclude:720p",
+  "language_preference": "auto",
+  "limit": 30
 }
 ```
 
-**字段说明**:
-
-| 字段 | 类型 | 必填 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| name | string | 是 | - | 番剧名称 |
-| rss_url | string | 是 | - | RSS 订阅地址 |
-| season | int | 否 | 1 | 季度 |
-| filter_keywords | array | 否 | [] | 过滤关键词 (包含) |
-| exclude_keywords | array | 否 | [] | 排除关键词 |
-| subgroup_id | int | 否 | null | 字幕组 ID (Mikan) |
-| download_path | string | 否 | - | 下载路径 |
-| rename_enabled | bool | 否 | true | 是否启用重命名 |
-
-**Response**:
+文件夹扫描请求：
 
 ```json
 {
-  "code": 0,
-  "message": "订阅创建成功",
-  "data": {
-    "id": 1,
-    "name": "葬送的芙莉莲",
-    "rss_url": "https://mikanani.me/RSS/Bangumi?bangumiId=3080",
-    "season": 1,
-    "status": "active",
-    "created_at": "2025-10-19T15:00:00Z"
-  }
+  "folder_path": "/downloads/葬送的芙莉莲",
+  "dry_run": true,
+  "rename_files": false
 }
 ```
 
-#### 1.4 更新订阅
+### 分组与标签
 
-```http
-PUT /api/v1/subscriptions/:id
-```
-
-**Path Parameters**:
-
-| 参数 | 类型 | 说明 |
+| 方法 | 路径 | 说明 |
 |------|------|------|
-| id | int | 订阅 ID |
+| `GET` | `/subscriptions/groups` | 获取订阅分组 |
+| `POST` | `/subscriptions/groups` | 创建分组 |
+| `GET` | `/subscriptions/groups/:id` | 获取分组 |
+| `PUT` | `/subscriptions/groups/:id` | 更新分组 |
+| `DELETE` | `/subscriptions/groups/:id` | 删除分组 |
+| `GET` | `/tags` | 获取标签列表 |
+| `POST` | `/tags` | 创建标签 |
+| `PUT` | `/tags/:id` | 更新标签 |
+| `DELETE` | `/tags/:id` | 删除标签 |
+| `GET` | `/subscriptions/:id/tags` | 获取订阅标签 |
+| `POST` | `/subscriptions/:id/tags` | 为订阅添加标签 |
+| `DELETE` | `/subscriptions/:id/tags/:tag_id` | 从订阅移除标签 |
 
-**Request Body**:
+创建标签：
 
 ```json
 {
-  "name": "葬送的芙莉莲 第一季",
-  "status": "paused",
-  "season": 1,
-  "filter_keywords": ["1080p", "简繁"],
-  "subgroup_id": 615
+  "name": "追更",
+  "color": "#18a058",
+  "description": "正在追的新番"
 }
 ```
 
-**Response**:
+为订阅添加标签：
 
 ```json
 {
-  "code": 0,
-  "message": "订阅更新成功",
-  "data": {
-    "id": 1,
-    "name": "葬送的芙莉莲 第一季",
-    "status": "paused",
-    "updated_at": "2025-10-19T15:30:00Z"
-  }
+  "tag_ids": [1, 2]
 }
 ```
 
-#### 1.5 删除订阅
+### 下载
 
-```http
-DELETE /api/v1/subscriptions/:id
-```
-
-**Path Parameters**:
-
-| 参数 | 类型 | 说明 |
+| 方法 | 路径 | 说明 |
 |------|------|------|
-| id | int | 订阅 ID |
+| `GET` | `/downloads` | 获取下载列表 |
+| `GET` | `/downloads/:id/diagnostics` | 获取失败诊断 |
+| `GET` | `/downloads/:id` | 获取下载详情 |
+| `DELETE` | `/downloads/:id` | 删除单个下载，并尽量删除 qBittorrent 种子 |
+| `POST` | `/downloads/:id/retry` | 手动重试下载 |
+| `POST` | `/downloads/batch-delete` | 批量删除下载 |
+| `DELETE` | `/downloads/clear` | 清空下载记录，可按状态筛选 |
+| `GET` | `/downloads/history` | 下载历史 |
+| `GET` | `/downloads/statistics` | 下载统计 |
 
-**Response**:
+列表支持 `page`、`page_size`、`status` 查询参数。当前没有 `POST /api/v1/downloads` 手动创建下载任务路由；新增下载主要由 RSS 刷新、订阅采集和合集种子流程产生。
+
+批量删除请求：
 
 ```json
 {
-  "code": 0,
-  "message": "订阅删除成功",
-  "data": null
+  "ids": [1, 2, 3]
 }
 ```
 
-#### 1.6 批量重命名订阅文件
+清空失败下载：
 
 ```http
-POST /api/v1/subscriptions/:id/rename-files
+DELETE /api/v1/downloads/clear?status=failed
 ```
 
-**功能说明**:
-当订阅信息（如番剧名称、季度等）被修改后，批量重命名该订阅的所有已下载文件，并移动到新的目录结构。
+### RSS 刷新与健康
 
-**Path Parameters**:
-
-| 参数 | 类型 | 说明 |
+| 方法 | 路径 | 说明 |
 |------|------|------|
-| id | int | 订阅 ID |
+| `POST` | `/rss/refresh` | 立即触发一次全局 RSS 检查 |
+| `GET` | `/rss/health` | 检查全部订阅 RSS 健康 |
+| `GET` | `/rss/health/:subscription_id` | 检查单个订阅 RSS 健康 |
+| `GET` | `/rss/dead` | 获取疑似失效 RSS |
+| `POST` | `/rss/health-check` | 手动触发 RSS 健康检查 |
 
-**处理流程**:
-1. 查询订阅的所有已完成下载记录
-2. 对每个下载记录：
-   - 获取种子信息和文件列表
-   - 根据新的订阅信息生成新文件名和目录
-   - 调用qBittorrent API进行重命名和移动
-   - 更新数据库中的下载记录
+当前没有单个订阅的 `/rss/refresh/:subscription_id` 路由。单订阅补剧请使用 `/subscriptions/:id/collect-episodes`。
 
-**Response**:
+### 配置
 
-```json
-{
-  "code": 0,
-  "message": "重命名任务已启动",
-  "data": {
-    "task_id": "task_123456"
-  }
-}
-```
-
-**任务结果查询**:
-通过任务管理接口查询任务进度和结果：
-
-```http
-GET /api/v1/tasks/current
-```
-
-任务完成后的结果示例：
-
-```json
-{
-  "moved": 12,      // 移动的文件数
-  "renamed": 10,    // 重命名的文件数
-  "errors": 1       // 错误数
-}
-```
-
-**注意事项**:
-- 只处理 status='completed' 的下载记录
-- 如果种子不存在或已删除，会跳过并记录警告
-- 重命名失败不会影响其他文件的处理
-- 使用与系统配置相同的重命名模板
-
-**使用场景**:
-- 修改番剧名称后，需要更新所有已下载文件的命名
-- 修改季度信息后，需要重新组织文件目录结构
-- 手工补全订阅信息后，统一文件命名规范
-
-**自动触发**:
-- 当使用 `POST /api/v1/subscriptions/:id/enrich-bangumi` 补全Bangumi数据时，如果番剧名称发生变化，会自动触发文件重命名任务
-- 自动触发的重命名任务会在后台异步执行，不会阻塞补全接口的响应
-
----
-
-### 2. 下载管理
-
-#### 2.1 获取下载任务列表
-
-```http
-GET /api/v1/downloads
-```
-
-**Query Parameters**:
-
-| 参数 | 类型 | 必填 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| subscription_id | int | 否 | - | 订阅 ID |
-| status | string | 否 | - | 任务状态 (pending, downloading, completed, failed) |
-| page | int | 否 | 1 | 页码 |
-| page_size | int | 否 | 20 | 每页数量 |
-
-**Response**:
-
-```json
-{
-  "code": 0,
-  "message": "success",
-  "data": {
-    "total": 50,
-    "page": 1,
-    "page_size": 20,
-    "items": [
-      {
-        "id": 1,
-        "subscription_id": 1,
-        "title": "[ANi] 葬送的芙莉莲 - 12 [1080P][Baha][WEB-DL][AAC AVC][CHT]",
-        "episode": 12,
-        "fansub": "ANi",
-        "torrent_url": "https://...",
-        "torrent_hash": "abc123...",
-        "file_path": "/downloads/temp/...",
-        "renamed_path": "/downloads/anime/葬送的芙莉莲/Season 01/葬送的芙莉莲 S01E12.mp4",
-        "status": "completed",
-        "qb_task_id": "task123",
-        "downloaded_at": "2025-10-19T14:00:00Z",
-        "created_at": "2025-10-19T12:00:00Z",
-        "updated_at": "2025-10-19T14:00:00Z"
-      }
-    ]
-  }
-}
-```
-
-#### 2.2 获取下载任务详情
-
-```http
-GET /api/v1/downloads/:id
-```
-
-**Path Parameters**:
-
-| 参数 | 类型 | 说明 |
+| 方法 | 路径 | 说明 |
 |------|------|------|
-| id | int | 下载任务 ID |
+| `GET` | `/config` | 获取数据库中的运行时配置 |
+| `PUT` | `/config` | 写入单个配置项 |
+| `POST` | `/config/qbittorrent/test` | 测试 qBittorrent 连接 |
+| `POST` | `/config/qbittorrent/save` | 保存 qBittorrent 配置 |
+| `GET` | `/config/rename/presets` | 获取重命名模板预设和变量 |
+| `GET` | `/config/rename/template` | 获取当前重命名模板 |
+| `POST` | `/config/rename/template` | 保存重命名模板 |
+| `POST` | `/config/rename/preview` | 预览重命名模板 |
 
-**Response**:
-
-```json
-{
-  "code": 0,
-  "message": "success",
-  "data": {
-    "id": 1,
-    "subscription_id": 1,
-    "title": "[ANi] 葬送的芙莉莲 - 12 [1080P][Baha][WEB-DL][AAC AVC][CHT]",
-    "episode": 12,
-    "fansub": "ANi",
-    "torrent_url": "https://...",
-    "torrent_hash": "abc123...",
-    "file_path": "/downloads/temp/...",
-    "renamed_path": "/downloads/anime/葬送的芙莉莲/Season 01/葬送的芙莉莲 S01E12.mp4",
-    "status": "completed",
-    "qb_task_id": "task123",
-    "error_message": null,
-    "downloaded_at": "2025-10-19T14:00:00Z",
-    "created_at": "2025-10-19T12:00:00Z",
-    "updated_at": "2025-10-19T14:00:00Z",
-    "subscription": {
-      "id": 1,
-      "name": "葬送的芙莉莲"
-    }
-  }
-}
-```
-
-#### 2.3 手动添加下载任务
-
-```http
-POST /api/v1/downloads
-```
-
-**Request Body**:
+写入配置：
 
 ```json
 {
-  "subscription_id": 1,
-  "torrent_url": "https://...",
-  "title": "[ANi] 葬送的芙莉莲 - 13 [1080P]...",
-  "episode": 13
+  "key": "download_path",
+  "value": "/downloads"
 }
 ```
 
-**字段说明**:
+常见配置键：
 
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| subscription_id | int | 是 | 订阅 ID |
-| torrent_url | string | 是 | 种子 URL |
-| title | string | 是 | 种子标题 |
-| episode | int | 否 | 集数 (可自动提取) |
+| 配置键 | 说明 |
+|--------|------|
+| `qbittorrent_host` | qBittorrent 地址 |
+| `qbittorrent_username` | qBittorrent 用户名 |
+| `qbittorrent_password` | qBittorrent 密码 |
+| `download_path` | 下载根目录 |
+| `system_proxy` | 外部请求代理 |
+| `rename_template` | 重命名模板 |
+| `disk.warning_threshold_gb` | 磁盘警告阈值 |
+| `disk.critical_threshold_gb` | 磁盘危险阈值 |
+| `disk.auto_cleanup_enabled` | 自动清理开关 |
+| `disk.cleanup_strategy` | `age`、`space`、`hybrid` |
+| `disk.cleanup_keep_days` | 按年龄清理的保留天数 |
+| `disk.cleanup_keep_gb` | 按空间清理的目标剩余空间 |
 
-**Response**:
+### 日志与文件整理
 
-```json
-{
-  "code": 0,
-  "message": "下载任务添加成功",
-  "data": {
-    "id": 2,
-    "subscription_id": 1,
-    "title": "[ANi] 葬送的芙莉莲 - 13 [1080P]...",
-    "episode": 13,
-    "status": "pending",
-    "created_at": "2025-10-19T15:00:00Z"
-  }
-}
-```
-
----
-
-### 3. RSS 刷新
-
-#### 3.1 手动刷新所有订阅
-
-```http
-POST /api/v1/rss/refresh
-```
-
-**Request Body**: 无
-
-**Response**:
-
-```json
-{
-  "code": 0,
-  "message": "RSS 刷新任务已启动",
-  "data": {
-    "task_id": "refresh_20251019_120000",
-    "subscriptions_count": 10
-  }
-}
-```
-
-#### 3.2 手动刷新单个订阅
-
-```http
-POST /api/v1/rss/refresh/:subscription_id
-```
-
-**Path Parameters**:
-
-| 参数 | 类型 | 说明 |
+| 方法 | 路径 | 说明 |
 |------|------|------|
-| subscription_id | int | 订阅 ID |
+| `GET` | `/logs` | 查询日志 |
+| `POST` | `/logs/clear` | 清空日志 |
+| `POST` | `/file-organizer/trigger` | 手动触发文件整理扫描 |
+| `POST` | `/file-organizer/reload` | 重新加载文件整理配置 |
 
-**Response**:
+日志查询支持 `level`、`start_time`、`end_time`、`keyword`、`page`、`page_size`。
+
+### 恢复扫描与任务
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/recovery/scan` | 扫描下载目录并生成或应用修复计划 |
+| `GET` | `/tasks/current` | 获取当前后台任务 |
+| `GET` | `/tasks/history` | 获取任务历史 |
+| `POST` | `/tasks/cancel` | 取消当前任务 |
+
+恢复扫描请求：
 
 ```json
 {
-  "code": 0,
-  "message": "订阅刷新成功",
-  "data": {
-    "subscription_id": 1,
-    "new_downloads": 2,
-    "items": [
-      {
-        "title": "[ANi] 葬送的芙莉莲 - 14 [1080P]...",
-        "episode": 14
-      },
-      {
-        "title": "[ANi] 葬送的芙莉莲 - 15 [1080P]...",
-        "episode": 15
-      }
-    ]
-  }
+  "dry_run": true,
+  "subscription_id": 1
 }
 ```
 
----
+`subscription_id` 可省略，省略时扫描全部订阅。`dry_run=false` 会尝试写入修复结果。
 
-### 4. 配置管理
+### 通知
 
-#### 4.1 获取系统配置
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/notifications` | 获取通知历史 |
+| `GET` | `/notifications/settings` | 获取全部通知渠道配置 |
+| `GET` | `/notifications/settings/:channel` | 获取单个渠道配置 |
+| `PUT` | `/notifications/settings` | 新增或更新渠道配置 |
+| `DELETE` | `/notifications/settings/:channel` | 删除渠道配置 |
+| `POST` | `/notifications/test` | 测试通知渠道 |
+| `GET` | `/notifications/websocket/status` | 获取 WebSocket 连接状态 |
+| `GET` | `/notifications/webhook/templates` | 获取 Webhook 预设模板 |
 
-```http
-GET /api/v1/config
-```
+支持渠道：`telegram`、`email`、`webhook` 和 `webhook.{name}`。
 
-**Response**:
+保存配置：
 
 ```json
 {
-  "code": 0,
-  "message": "success",
-  "data": {
-    "qbittorrent": {
-      "host": "http://localhost:8080",
-      "username": "admin",
-      "password": "******"
+  "channel": "webhook.openclaw",
+  "enabled": true,
+  "config": {
+    "url": "https://example.com/webhook",
+    "method": "POST",
+    "headers": {
+      "Content-Type": "application/json"
     },
-    "rss": {
-      "interval": "30m"
-    },
-    "rename": {
-      "enabled": true,
-      "template": "{title}/Season {season}/{title} S{season}E{episode}.{ext}"
-    },
-    "download": {
-      "path": "/downloads"
-    }
+    "body_template": "{\"title\":\"{{.Title}}\",\"message\":\"{{.Message}}\"}"
   }
 }
 ```
 
-#### 4.2 更新系统配置
+通知事件包括下载完成、下载失败、RSS 更新、系统错误、磁盘警告、磁盘危险、磁盘恢复、自动清理、即将播出和新集发布。
 
-```http
-PUT /api/v1/config
-```
+### 日历
 
-**Request Body**:
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/calendar` | 获取周排期 |
+| `GET` | `/calendar/today` | 获取今日排期 |
+
+`/calendar` 支持 `week` 查询参数，`0` 为本周，`1` 为下周，`-1` 为上周。
+
+### 磁盘
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/disk/status` | 获取下载路径所在磁盘状态 |
+| `GET` | `/disk/info` | 等同于 `/disk/status` |
+| `GET` | `/disk/settings` | 获取磁盘清理和阈值设置 |
+| `PUT` | `/disk/settings` | 更新磁盘设置 |
+| `POST` | `/disk/cleanup` | 手动触发清理接口；当前返回简化结果 |
+| `GET` | `/disk/history` | 清理历史；当前返回空列表 |
+
+更新设置：
 
 ```json
 {
-  "qbittorrent": {
-    "host": "http://192.168.1.100:8080",
-    "username": "admin",
-    "password": "newpassword"
-  },
-  "rss": {
-    "interval": "15m"
-  },
-  "rename": {
-    "enabled": true
-  }
+  "enabled": false,
+  "strategy": "hybrid",
+  "retention_days": 30,
+  "min_free_gb": 50,
+  "warning_threshold_gb": 10,
+  "critical_threshold_gb": 5
 }
 ```
 
-**Response**:
+后台磁盘监控每 5 分钟检查一次下载路径。低于警告阈值会发送通知；低于危险阈值会发送通知并暂停新下载。自动清理服务会在危险状态且 `disk.auto_cleanup_enabled=true` 时执行。
 
-```json
-{
-  "code": 0,
-  "message": "配置更新成功",
-  "data": null
-}
-```
+### 配置备份与迁移
 
-**配置项说明**:
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/backup/export` | 导出完整备份包 |
+| `POST` | `/backup/preview` | 预览导入差异 |
+| `POST` | `/backup/import` | 执行导入 |
 
-| 配置项 | 类型 | 说明 | 示例 |
-|--------|------|------|------|
-| qbittorrent.host | string | qBittorrent 地址 | `http://localhost:8080` |
-| qbittorrent.username | string | qBittorrent 用户名 | `admin` |
-| qbittorrent.password | string | qBittorrent 密码 | `password` |
-| rss.interval | string | RSS 更新间隔 | `30m`, `1h`, `15m` |
-| rename.enabled | bool | 是否启用重命名 | `true`, `false` |
-| rename.template | string | 重命名模板 | `{title} S{season}E{episode}` |
-| download.path | string | 下载路径 | `/downloads` |
-
----
-
-### 5. 日志查询
-
-#### 5.1 获取日志列表
+导出：
 
 ```http
-GET /api/v1/logs
+GET /api/v1/backup/export?include_sensitive=false
 ```
 
-**Query Parameters**:
+默认导出订阅、RSS 源、分组、标签、重命名模板、系统配置和通知配置；密码、Token、通知密钥等敏感字段默认替换为 `__AUTO_RSS_REDACTED__`。
 
-| 参数 | 类型 | 必填 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| level | string | 否 | - | 日志级别 (DEBUG, INFO, WARN, ERROR) |
-| start_time | string | 否 | - | 开始时间 (ISO8601) |
-| end_time | string | 否 | - | 结束时间 (ISO8601) |
-| keyword | string | 否 | - | 关键词搜索 |
-| page | int | 否 | 1 | 页码 |
-| page_size | int | 否 | 100 | 每页数量 (最大 1000) |
-
-**Response**:
+导入预览或执行导入：
 
 ```json
 {
-  "code": 0,
-  "message": "success",
+  "source_format": "auto-rss",
+  "strategy": "skip",
   "data": {
-    "total": 500,
-    "page": 1,
-    "page_size": 100,
-    "items": [
-      {
-        "id": 1,
-        "level": "INFO",
-        "message": "RSS 刷新成功",
-        "context": {
-          "subscription_id": 1,
-          "new_items": 2
-        },
-        "created_at": "2025-10-19T12:00:00Z"
-      },
-      {
-        "id": 2,
-        "level": "ERROR",
-        "message": "qBittorrent 连接失败",
-        "context": {
-          "host": "http://localhost:8080",
-          "error": "connection refused"
-        },
-        "created_at": "2025-10-19T12:05:00Z"
-      }
-    ]
+    "app": "auto-rss",
+    "schema_version": "1.0",
+    "subscriptions": []
   }
 }
 ```
 
+`source_format` 支持 `auto`、`auto-rss`、`auto-bangumi`。`strategy` 支持 `skip`、`merge`、`overwrite`。脱敏字段在导入时始终跳过。
+
 ---
 
-## 数据模型
+## 数据模型摘要
 
-### Subscription (订阅)
+### Subscription
 
 ```typescript
 interface Subscription {
-  id: number;
-  name: string;
-  rss_url: string;
-  season: number;
-  status: 'active' | 'paused';
-  filter_keywords: string[];
-  exclude_keywords: string[];
-  subgroup_id?: number;          // 字幕组 ID (可选)
-  download_path: string;
-  rename_enabled: boolean;
-  last_check_time?: string;      // ISO8601
-  created_at: string;            // ISO8601
-  updated_at: string;            // ISO8601
-  downloads?: Download[];        // 关联的下载记录
+  id: number
+  name: string
+  rss_url: string
+  season: number
+  enabled: boolean
+  rename_enabled: boolean
+  fansub: string
+  language: string
+  language_preference: string
+  filter_keywords: string
+  exclude_keywords: string
+  filter_rules: string
+  total_episodes: number
+  current_episode: number
+  latest_episode: number
+  episode_offset: number
+  bangumi_id: number
+  bangumi_score: number
+  bangumi_summary: string
+  bangumi_cover: string
+  bangumi_cover_local: string
+  collection_torrent: string
+  group_id?: number
+  created_at: string
+  updated_at: string
 }
 ```
 
-### Download (下载任务)
+### Download
 
 ```typescript
 interface Download {
-  id: number;
-  subscription_id: number;
-  title: string;
-  episode: number;
-  fansub: string;                // 字幕组名称
-  torrent_url: string;
-  torrent_hash: string;
-  file_path: string;
-  renamed_path: string;
-  status: 'pending' | 'downloading' | 'completed' | 'failed';
-  qb_task_id: string;
-  error_message?: string;
-  downloaded_at?: string;        // ISO8601
-  created_at: string;            // ISO8601
-  updated_at: string;            // ISO8601
-  subscription?: Subscription;   // 关联的订阅
+  id: number
+  subscription_id: number
+  title: string
+  episode: number
+  fansub: string
+  language: string
+  torrent_url: string
+  torrent_hash: string
+  file_path: string
+  renamed_path: string
+  status: 'pending' | 'downloading' | 'stalled' | 'completed' | 'failed' | 'organizing'
+  retry_count: number
+  max_retries: number
+  last_error: string
+  created_at: string
+  updated_at: string
 }
 ```
 
-### Config (配置)
+### NotificationSetting
 
 ```typescript
-interface Config {
-  qbittorrent: {
-    host: string;
-    username: string;
-    password: string;
-  };
-  rss: {
-    interval: string;            // 如: "30m", "1h"
-  };
-  rename: {
-    enabled: boolean;
-    template: string;
-  };
-  download: {
-    path: string;
-  };
-}
-```
-
-### Log (日志)
-
-```typescript
-interface Log {
-  id: number;
-  level: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
-  message: string;
-  context: Record<string, any>;  // JSON object
-  created_at: string;            // ISO8601
+interface NotificationSetting {
+  id: number
+  channel: string
+  enabled: boolean
+  config: string
+  created_at: string
+  updated_at: string
 }
 ```
 
 ---
 
-## 使用示例
+## 调用示例
 
-### 示例 1: 创建订阅并刷新
+创建订阅并预览：
 
 ```bash
-# 1. 创建订阅
-curl -X POST http://localhost:7892/api/v1/subscriptions \
+curl -X POST http://localhost:7892/api/v1/subscriptions/preview \
   -H "Content-Type: application/json" \
   -d '{
     "name": "葬送的芙莉莲",
     "rss_url": "https://mikanani.me/RSS/Bangumi?bangumiId=3080",
     "season": 1,
-    "filter_keywords": ["1080p", "简体"],
-    "subgroup_id": 615
+    "filter_rules": "include:1080p\nexclude:720p"
   }'
-
-# 2. 手动刷新订阅
-curl -X POST http://localhost:7892/api/v1/rss/refresh/1
-
-# 3. 查看下载任务
-curl http://localhost:7892/api/v1/downloads?subscription_id=1
 ```
 
-### 示例 2: 更新配置
+触发全局 RSS 刷新：
 
 ```bash
-# 更新 qBittorrent 连接配置
-curl -X PUT http://localhost:7892/api/v1/config \
+curl -X POST http://localhost:7892/api/v1/rss/refresh
+```
+
+查询失败下载并重试：
+
+```bash
+curl "http://localhost:7892/api/v1/downloads?status=failed"
+curl -X POST http://localhost:7892/api/v1/downloads/12/retry
+```
+
+认证开启时登录并调用接口：
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:7892/api/v1/auth/login \
   -H "Content-Type: application/json" \
-  -d '{
-    "qbittorrent": {
-      "host": "http://192.168.1.100:8080",
-      "username": "admin",
-      "password": "yourpassword"
-    },
-    "rss": {
-      "interval": "15m"
-    }
-  }'
+  -d '{"username":"admin","password":"change-this-password"}' \
+  | jq -r '.data.access_token')
+
+curl -H "Authorization: Bearer ${TOKEN}" http://localhost:7892/api/v1/subscriptions
 ```
-
-### 示例 3: 查询日志
-
-```bash
-# 查询错误日志
-curl "http://localhost:7892/api/v1/logs?level=ERROR&page=1&page_size=50"
-
-# 查询包含关键词的日志
-curl "http://localhost:7892/api/v1/logs?keyword=qBittorrent"
-```
-
----
-
-## 速率限制
-
-**v0.1.0**: 暂无速率限制
-
-**v0.4.0+**: 将实施以下限制：
-- 普通接口: 60 次/分钟
-- RSS 刷新: 10 次/分钟
-
----
-
-## 更新日志
-
-### v0.1.0 (2025-10-19)
-- ✅ 初始版本
-- ✅ 订阅管理 API
-- ✅ 下载管理 API
-- ✅ RSS 刷新 API
-- ✅ 配置管理 API
-- ✅ 日志查询 API
-
----
-
-**文档版本**: v1.0
-**最后更新**: 2025-10-19
-**维护者**: Auto-RSS Team

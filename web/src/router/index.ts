@@ -1,4 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { authApi } from '@/api'
+import { hasAuthTokens } from '@/services/auth-state'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -6,6 +8,12 @@ const router = createRouter({
     {
       path: '/',
       redirect: '/rss-sources'
+    },
+    {
+      path: '/login',
+      name: 'login',
+      component: () => import('@/views/Login.vue'),
+      meta: { public: true, hideShell: true }
     },
     {
       path: '/rss-sources',
@@ -43,11 +51,45 @@ const router = createRouter({
       component: () => import('@/views/Config.vue')
     },
     {
+      path: '/backup',
+      name: 'backup',
+      component: () => import('@/views/BackupRestore.vue')
+    },
+    {
       path: '/logs',
       name: 'logs',
       component: () => import('@/views/Logs.vue')
     }
   ]
+})
+
+router.beforeEach(async (to) => {
+  const redirectTarget = typeof to.query.redirect === 'string' ? to.query.redirect : '/rss-sources'
+
+  try {
+    const status = await authApi.status()
+    if (!status.auth_enabled) {
+      if (to.name === 'login') {
+        return { name: 'rss-sources' }
+      }
+      return true
+    }
+
+    if (to.name === 'login') {
+      return hasAuthTokens() ? redirectTarget : true
+    }
+
+    if (!hasAuthTokens()) {
+      return { name: 'login', query: { redirect: to.fullPath } }
+    }
+
+    return true
+  } catch {
+    if (to.name === 'login') {
+      return true
+    }
+    return hasAuthTokens() ? true : { name: 'login', query: { redirect: to.fullPath } }
+  }
 })
 
 export default router

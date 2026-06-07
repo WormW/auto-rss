@@ -21,6 +21,7 @@ import (
 	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/auth"
+	"github.com/WormW/auto-rss/internal/service/backup"
 	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/calendar"
 	"github.com/WormW/auto-rss/internal/service/disk"
@@ -132,18 +133,33 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	bangumiHandler := handler.NewBangumiHandler(configRepo)
 	logHandler := handler.NewLogHandler(logRepo)
 	fileOrganizerHandler := handler.NewFileOrganizerHandler(appCtx)
-	notificationHandler := handler.NewNotificationHandler(db, notificationSvc, wsHub, jwtService)
 	recoveryHandler := handler.NewRecoveryHandler(db, subscriptionRepo, downloadRepo, configRepo, nil)
 	calendarHandler := handler.NewCalendarHandler(subscriptionRepo, downloadRepo)
 	diskHandler := handler.NewDiskHandler(db, downloadRepo, subscriptionRepo, configRepo)
 	tagHandler := handler.NewTagHandler(subscriptionRepo)
 	scannerHandler := handler.NewScannerHandler(db, subscriptionRepo, downloadRepo, configRepo)
+	authHandler := handler.NewAuthHandler(cfg, jwtService)
+	notificationHandler := handler.NewNotificationHandler(db, notificationSvc, wsHub, jwtService, cfg.AuthEnabled)
+	backupHandler := handler.NewBackupHandler(backup.NewService(db))
 
 	// API v1 路由组
 	v1 := r.Group("/api/v1")
 	{
+		authGroup := v1.Group("/auth")
+		{
+			authGroup.GET("/status", authHandler.Status)
+			authGroup.POST("/login", authHandler.Login)
+			authGroup.POST("/refresh", authHandler.Refresh)
+			authGroup.POST("/logout", authHandler.Logout)
+		}
+
+		protected := v1.Group("")
+		if cfg.AuthEnabled {
+			protected.Use(middleware.AuthMiddleware(jwtService))
+		}
+
 		// Mikan 搜索
-		mikan := v1.Group("/mikan")
+		mikan := protected.Group("/mikan")
 		{
 			mikan.GET("/search", mikanHandler.Search)
 			mikan.GET("/season", mikanHandler.GetBySeason)
@@ -151,7 +167,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		}
 
 		// Bangumi 搜索
-		bangumi := v1.Group("/bangumi")
+		bangumi := protected.Group("/bangumi")
 		{
 			bangumi.GET("/search", bangumiHandler.Search)
 			bangumi.GET("/search-by-name", bangumiHandler.SearchByName)
@@ -159,7 +175,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		}
 
 		// RSS 源管理
-		rssSources := v1.Group("/rss-sources")
+		rssSources := protected.Group("/rss-sources")
 		{
 			rssSources.POST("", rssSourceHandler.Create)
 			rssSources.GET("", rssSourceHandler.List)
@@ -170,7 +186,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		}
 
 		// 订阅管理
-		subscriptions := v1.Group("/subscriptions")
+		subscriptions := protected.Group("/subscriptions")
 		{
 			subscriptions.POST("", subscriptionHandler.Create)
 			subscriptions.GET("", subscriptionHandler.List)
@@ -204,7 +220,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		}
 
 		// 下载管理
-		downloads := v1.Group("/downloads")
+		downloads := protected.Group("/downloads")
 		{
 			downloads.GET("", downloadHandler.List)
 			downloads.GET("/:id/diagnostics", downloadHandler.Diagnostics)
@@ -219,7 +235,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		}
 
 		// RSS 管理
-		rssGroup := v1.Group("/rss")
+		rssGroup := protected.Group("/rss")
 		{
 			rssGroup.POST("/refresh", rssHandler.Refresh)
 
@@ -234,7 +250,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		}
 
 		// 配置管理
-		configs := v1.Group("/config")
+		configs := protected.Group("/config")
 		{
 			configs.GET("", configHandler.GetAll)
 			configs.PUT("", configHandler.Update)
@@ -249,28 +265,28 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		}
 
 		// 日志管理
-		logs := v1.Group("/logs")
+		logs := protected.Group("/logs")
 		{
 			logs.GET("", logHandler.List)
 			logs.POST("/clear", logHandler.Clear)
 		}
 
 		// 文件整理
-		fileOrganizer := v1.Group("/file-organizer")
+		fileOrganizer := protected.Group("/file-organizer")
 		{
 			fileOrganizer.POST("/trigger", fileOrganizerHandler.TriggerScan)
 			fileOrganizer.POST("/reload", fileOrganizerHandler.ReloadConfig)
 		}
 
 		// 扫描恢复
-		recovery := v1.Group("/recovery")
+		recovery := protected.Group("/recovery")
 		{
 			recovery.POST("/scan", recoveryHandler.Scan)
 		}
 
 		// 任务管理
 		taskHandler := handler.NewTaskHandler()
-		tasks := v1.Group("/tasks")
+		tasks := protected.Group("/tasks")
 		{
 			tasks.GET("/current", taskHandler.GetCurrent)
 			tasks.GET("/history", taskHandler.GetHistory)
@@ -278,7 +294,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		}
 
 		// 通知管理
-		notifications := v1.Group("/notifications")
+		notifications := protected.Group("/notifications")
 		{
 			notifications.GET("", notificationHandler.ListNotifications)
 			notifications.GET("/settings", notificationHandler.GetSettings)
@@ -291,14 +307,14 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		}
 
 		// 日历管理
-		calendars := v1.Group("/calendar")
+		calendars := protected.Group("/calendar")
 		{
 			calendars.GET("", calendarHandler.GetWeekSchedule)
 			calendars.GET("/today", calendarHandler.GetTodaySchedule)
 		}
 
 		// 磁盘监控
-		disks := v1.Group("/disk")
+		disks := protected.Group("/disk")
 		{
 			disks.GET("/status", diskHandler.GetStatus)
 			disks.GET("/info", diskHandler.GetInfo)
@@ -309,12 +325,20 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		}
 
 		// 标签管理
-		tags := v1.Group("/tags")
+		tags := protected.Group("/tags")
 		{
 			tags.GET("", tagHandler.List)
 			tags.POST("", tagHandler.Create)
 			tags.PUT("/:id", tagHandler.Update)
 			tags.DELETE("/:id", tagHandler.Delete)
+		}
+
+		// 配置备份与迁移
+		backups := protected.Group("/backup")
+		{
+			backups.GET("/export", backupHandler.Export)
+			backups.POST("/preview", backupHandler.Preview)
+			backups.POST("/import", backupHandler.Import)
 		}
 
 		// 订阅标签关联 (在订阅路由组内)

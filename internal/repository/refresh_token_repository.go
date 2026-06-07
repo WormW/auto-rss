@@ -14,6 +14,7 @@ type RefreshTokenRepository interface {
 	Create(token *model.RefreshToken) error
 	FindByTokenHash(hash string) (*model.RefreshToken, error)
 	MarkAsUsed(id uint) error
+	DeleteByID(id uint) error
 	DeleteExpired() error
 	DeleteByUserID(userID string) error
 }
@@ -49,9 +50,14 @@ func (r *refreshTokenRepository) MarkAsUsed(id uint) error {
 	return r.db.Model(&model.RefreshToken{}).
 		Where("id = ?", id).
 		Updates(map[string]interface{}{
-			"used":     true,
-			"used_at":  &now,
+			"used":    true,
+			"used_at": &now,
 		}).Error
+}
+
+// DeleteByID 删除指定refresh token
+func (r *refreshTokenRepository) DeleteByID(id uint) error {
+	return r.db.Delete(&model.RefreshToken{}, id).Error
 }
 
 // DeleteExpired 删除过期的token

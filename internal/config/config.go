@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
@@ -52,6 +53,7 @@ type Config struct {
 	FileOrganizerDir     string // 整理目录（监控和目标是同一目录）
 
 	// JWT配置
+	AuthEnabled           bool
 	JWTSecret             string
 	JWTAccessTokenExpiry  time.Duration
 	JWTRefreshTokenExpiry time.Duration
@@ -92,6 +94,7 @@ func Load() (*Config, error) {
 		FileOrganizerDir:     getEnv("FILE_ORGANIZER_DIR", ""),
 
 		// JWT配置
+		AuthEnabled:           getEnv("AUTH_ENABLED", "false") == "true",
 		JWTSecret:             getEnv("JWT_SECRET", "your-secret-key-change-in-production"),
 		JWTAccessTokenExpiry:  getEnvAsDuration("JWT_ACCESS_TOKEN_EXPIRY", 30*time.Minute),
 		JWTRefreshTokenExpiry: getEnvAsDuration("JWT_REFRESH_TOKEN_EXPIRY", 7*24*time.Hour),
@@ -126,6 +129,26 @@ func (c *Config) Validate() error {
 	}
 	if c.ServerPort <= 0 || c.ServerPort > 65535 {
 		return fmt.Errorf("invalid SERVER_PORT: %d", c.ServerPort)
+	}
+	if c.AuthEnabled {
+		if strings.TrimSpace(c.JWTSecret) == "" {
+			return fmt.Errorf("JWT_SECRET is required when AUTH_ENABLED=true")
+		}
+		if c.JWTSecret == "your-secret-key-change-in-production" {
+			return fmt.Errorf("JWT_SECRET must be changed from the default when AUTH_ENABLED=true")
+		}
+		if len(c.JWTSecret) < 32 {
+			return fmt.Errorf("JWT_SECRET must be at least 32 characters when AUTH_ENABLED=true")
+		}
+		if strings.TrimSpace(c.JWTUsername) == "" {
+			return fmt.Errorf("JWT_USERNAME is required when AUTH_ENABLED=true")
+		}
+		if strings.TrimSpace(c.JWTPassword) == "" {
+			return fmt.Errorf("JWT_PASSWORD is required when AUTH_ENABLED=true")
+		}
+		if c.JWTPassword == "admin" {
+			return fmt.Errorf("JWT_PASSWORD must be changed from the default when AUTH_ENABLED=true")
+		}
 	}
 	return nil
 }

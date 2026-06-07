@@ -23,6 +23,19 @@ func NewAuthHandler(cfg *config.Config, jwtService auth.JWTService) *AuthHandler
 	}
 }
 
+// Status 返回当前认证模式
+// GET /api/v1/auth/status
+func (h *AuthHandler) Status(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Success",
+		"data": gin.H{
+			"auth_enabled": h.cfg.AuthEnabled,
+			"username":     h.cfg.JWTUsername,
+		},
+	})
+}
+
 // LoginRequest 登录请求
 type LoginRequest struct {
 	Username string `json:"username" binding:"required"`
@@ -137,13 +150,11 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 		return
 	}
 
-	// 从refresh token获取userID并删除该用户的所有token
-	// 这里简化处理：直接使用配置中的用户名
-	if err := h.jwtService.Logout(h.cfg.JWTUsername); err != nil {
-		logger.Error("Logout failed", "error", err, "client_ip", c.ClientIP())
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "Logout failed",
+	if err := h.jwtService.LogoutRefreshToken(req.RefreshToken); err != nil {
+		logger.Warn("Logout failed", "error", err, "client_ip", c.ClientIP())
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"code":    401,
+			"message": "Invalid or expired refresh token",
 		})
 		return
 	}

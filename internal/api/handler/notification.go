@@ -20,15 +20,17 @@ type NotificationHandler struct {
 	notificationSvc notification.Service
 	wsHub           *notification.WebSocketHub
 	jwtService      middleware.JWTService
+	authRequired    bool
 }
 
 // NewNotificationHandler 创建通知处理器实例
-func NewNotificationHandler(db *gorm.DB, svc notification.Service, wsHub *notification.WebSocketHub, jwtService middleware.JWTService) *NotificationHandler {
+func NewNotificationHandler(db *gorm.DB, svc notification.Service, wsHub *notification.WebSocketHub, jwtService middleware.JWTService, authRequired bool) *NotificationHandler {
 	return &NotificationHandler{
 		db:              db,
 		notificationSvc: svc,
 		wsHub:           wsHub,
 		jwtService:      jwtService,
+		authRequired:    authRequired,
 	}
 }
 
@@ -301,7 +303,7 @@ func (h *NotificationHandler) WebSocketHandler(c *gin.Context) {
 		})
 		return
 	}
-	notification.HandleWebSocket(h.wsHub, h.jwtService)(c)
+	notification.HandleWebSocket(h.wsHub, h.jwtService, h.authRequired)(c)
 }
 
 // GetWebSocketStatus 获取 WebSocket 连接状态

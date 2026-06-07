@@ -175,6 +175,13 @@ services:
       - SERVER_PORT=7892
       - DOWNLOAD_PATH=/downloads
 
+      # 访问保护（可选）
+      # 启用前必须修改 JWT_SECRET 和 JWT_PASSWORD，不能使用默认值。
+      - AUTH_ENABLED=false
+      - JWT_SECRET=change-this-to-a-long-random-secret-at-least-32-chars
+      - JWT_USERNAME=admin
+      - JWT_PASSWORD=change-this-password
+
       # 时区配置
       - TZ=Asia/Shanghai
 
@@ -482,6 +489,19 @@ npm run dev
 ---
 
 ## 配置说明
+
+### 访问保护
+
+Auto-RSS 默认保持本地单用户/NAS 兼容模式：`AUTH_ENABLED=false` 时不要求登录。将服务暴露到家庭局域网以外，或希望限制同网段访问时，可以启用认证：
+
+```env
+AUTH_ENABLED=true
+JWT_SECRET=change-this-to-a-long-random-secret-at-least-32-chars
+JWT_USERNAME=admin
+JWT_PASSWORD=change-this-password
+```
+
+启用认证时程序会拒绝默认 `JWT_SECRET=your-secret-key-change-in-production` 和默认 `JWT_PASSWORD=admin`，`JWT_SECRET` 至少需要 32 个字符。
 
 ### 环境变量
 
