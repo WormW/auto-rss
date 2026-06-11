@@ -298,6 +298,14 @@
                         </n-tooltip>
                         <n-tooltip trigger="hover">
                           <template #trigger>
+                            <n-button text size="small" @click="handleDiagnostics(sub)">
+                              <template #icon><n-icon size="16"><ToolOutlined /></n-icon></template>
+                            </n-button>
+                          </template>
+                          健康诊断
+                        </n-tooltip>
+                        <n-tooltip trigger="hover">
+                          <template #trigger>
                             <n-button text size="small" @click="$router.push({ path: '/downloads', query: { sub_id: sub.id } })">
                               <template #icon><n-icon size="16"><FileSearchOutlined /></n-icon></template>
                             </n-button>
@@ -393,6 +401,14 @@
                   <div class="action-row">
                     <span v-if="sub.last_download_at" class="last-time">{{ formatTime(sub.last_download_at) }}</span>
                     <div class="action-buttons">
+                      <n-tooltip trigger="hover">
+                        <template #trigger>
+                          <n-button text size="small" @click="handleDiagnostics(sub)">
+                            <template #icon><n-icon size="16"><ToolOutlined /></n-icon></template>
+                          </n-button>
+                        </template>
+                        健康诊断
+                      </n-tooltip>
                       <n-button text size="small" @click="$router.push({ path: '/downloads', query: { sub_id: sub.id } })">
                         <template #icon><n-icon size="16"><FileSearchOutlined /></n-icon></template>
                       </n-button>
@@ -574,6 +590,118 @@
           </div>
         </div>
       </div>
+    </n-modal>
+
+    <!-- 健康诊断面板 -->
+    <n-modal v-model:show="showDiagnosticsModal" preset="card" :title="`健康诊断 - ${diagnosticsSub?.name || ''}`" style="width: 900px; max-width: 96vw;">
+      <n-spin :show="diagnosticsLoading">
+        <div v-if="diagnosticsData" class="diagnostics-panel">
+          <div class="diagnostics-header">
+            <div>
+              <div class="diagnostics-title-row">
+                <n-tag :type="getDiagnosticTagType(diagnosticsData.summary.overall)">
+                  {{ getDiagnosticStatusLabel(diagnosticsData.summary.overall) }}
+                </n-tag>
+                <span class="diagnostics-checked">检查于 {{ formatTime(diagnosticsData.checked_at) }}</span>
+              </div>
+              <div class="diagnostics-counters">
+                <span>正常 {{ diagnosticsData.summary.healthy }}</span>
+                <span>警告 {{ diagnosticsData.summary.warning }}</span>
+                <span>异常 {{ diagnosticsData.summary.error }}</span>
+                <span>未知 {{ diagnosticsData.summary.unknown }}</span>
+              </div>
+            </div>
+            <n-button size="small" @click="refreshDiagnostics" :loading="diagnosticsLoading">
+              刷新
+            </n-button>
+          </div>
+
+          <div class="diagnostics-grid">
+            <div
+              v-for="check in diagnosticsData.checks"
+              :key="check.key"
+              class="diagnostic-check"
+              :class="`diagnostic-${check.status}`"
+            >
+              <div class="diagnostic-check-head">
+                <span>{{ check.label }}</span>
+                <n-tag size="tiny" :type="getDiagnosticTagType(check.status)">
+                  {{ getDiagnosticStatusLabel(check.status) }}
+                </n-tag>
+              </div>
+              <div class="diagnostic-summary">{{ check.summary }}</div>
+              <div class="diagnostic-detail">{{ check.detail }}</div>
+            </div>
+          </div>
+
+          <div class="diagnostics-metrics">
+            <div class="diagnostic-metric">
+              <span>下载任务</span>
+              <strong>{{ diagnosticsData.downloads.total }}</strong>
+              <small>失败 {{ diagnosticsData.downloads.failed }} / 停滞 {{ diagnosticsData.downloads.stalled }}</small>
+            </div>
+            <div class="diagnostic-metric">
+              <span>本地文件</span>
+              <strong>{{ diagnosticsData.files.completed_with_file }}</strong>
+              <small>缺路径 {{ diagnosticsData.files.completed_missing_file }}</small>
+            </div>
+            <div class="diagnostic-metric">
+              <span>磁盘剩余</span>
+              <strong>{{ formatBytes(diagnosticsData.disk.free_bytes) }}</strong>
+              <small>{{ diagnosticsData.disk.path }}</small>
+            </div>
+            <div class="diagnostic-metric">
+              <span>缺失集数</span>
+              <strong>{{ diagnosticsData.files.missing_episodes.length }}</strong>
+              <small>{{ diagnosticsData.files.missing_episodes.length ? diagnosticsData.files.missing_episodes.join(', ') : '无' }}</small>
+            </div>
+          </div>
+
+          <div v-if="diagnosticsData.downloads.failed_items.length" class="diagnostic-failures">
+            <div class="diagnostic-section-title">异常下载</div>
+            <div
+              v-for="item in diagnosticsData.downloads.failed_items"
+              :key="item.id"
+              class="diagnostic-failure-item"
+            >
+              <div class="diagnostic-failure-main">
+                <div class="diagnostic-failure-title">{{ item.title || `下载 #${item.id}` }}</div>
+                <div class="diagnostic-failure-meta">
+                  <n-tag size="tiny" type="default">第 {{ item.episode || '?' }} 集</n-tag>
+                  <n-tag size="tiny" :type="item.status === 'failed' ? 'error' : 'warning'">{{ item.status }}</n-tag>
+                  <n-tag size="tiny" type="info">{{ item.category }}</n-tag>
+                </div>
+              </div>
+              <div class="diagnostic-failure-reason">{{ item.reason }}</div>
+            </div>
+          </div>
+
+          <div class="diagnostic-actions">
+            <n-button
+              v-for="action in diagnosticsData.actions"
+              :key="action.key"
+              size="small"
+              :type="getDiagnosticActionType(action.key)"
+              :disabled="!action.enabled || diagnosticsActionLoading === action.key"
+              :loading="diagnosticsActionLoading === action.key"
+              @click="runDiagnosticAction(action)"
+            >
+              {{ action.label }}
+            </n-button>
+          </div>
+          <div v-if="diagnosticsData.actions.some(action => !action.enabled && action.reason)" class="diagnostic-action-reasons">
+            <span v-for="action in diagnosticsData.actions.filter(action => !action.enabled && action.reason)" :key="action.key">
+              {{ action.label }}：{{ action.reason }}
+            </span>
+          </div>
+
+          <div v-if="diagnosticsActionResult" class="diagnostic-action-result">
+            {{ diagnosticsActionResult }}
+          </div>
+        </div>
+
+        <n-empty v-else-if="!diagnosticsLoading" description="暂无诊断数据" />
+      </n-spin>
     </n-modal>
 
     <!-- 添加/编辑订阅对话框 -->
@@ -856,7 +984,15 @@ import {
   useMessage,
   useDialog
 } from 'naive-ui'
-import { subscriptionApi, type Subscription, type SubscriptionPreview } from '@/api'
+import {
+  subscriptionApi,
+  type DiagnosticStatus,
+  type Subscription,
+  type SubscriptionDiagnosticAction,
+  type SubscriptionDiagnostics,
+  type SubscriptionPreview,
+  type SubscriptionRetryFailedResponse
+} from '@/api'
 import { api } from '@/api'
 import { useRoute } from 'vue-router'
 import {
@@ -873,7 +1009,8 @@ import {
   FileSearchOutlined,
   PlayCircleOutlined,
   PauseCircleOutlined,
-  FolderOpenOutlined
+  FolderOpenOutlined,
+  ToolOutlined
 } from '@vicons/antd'
 import AnimeSearch from '@/components/AnimeSearch.vue'
 
@@ -919,6 +1056,14 @@ const scanDryRun = ref(true)
 const scanRenameFiles = ref(true)
 const scanLoading = ref(false)
 const scanResult = ref<any>(null)
+
+// 健康诊断面板
+const showDiagnosticsModal = ref(false)
+const diagnosticsSub = ref<Subscription | null>(null)
+const diagnosticsData = ref<SubscriptionDiagnostics | null>(null)
+const diagnosticsLoading = ref(false)
+const diagnosticsActionLoading = ref('')
+const diagnosticsActionResult = ref('')
 
 // 星期列表
 const weekList = [
@@ -1157,6 +1302,9 @@ const listColumns = computed<DataTableColumns<Subscription>>(() => [
     width: 180,
     render: (row) => (
       <NSpace>
+        <NButton text size="small" onClick={() => handleDiagnostics(row)}>
+          <NIcon size={16}><ToolOutlined /></NIcon>
+        </NButton>
         <NButton text size="small" onClick={() => handleCollectEpisodes(row.id)}>
           <NIcon size={16}><DownloadOutlined /></NIcon>
         </NButton>
@@ -1728,6 +1876,129 @@ const handleScanFolder = (sub: Subscription) => {
   scanResult.value = null
   scanLoading.value = false
   showScanModal.value = true
+}
+
+const handleDiagnostics = async (sub: Subscription) => {
+  diagnosticsSub.value = sub
+  diagnosticsData.value = null
+  diagnosticsActionResult.value = ''
+  showDiagnosticsModal.value = true
+  await refreshDiagnostics()
+}
+
+const refreshDiagnostics = async () => {
+  if (!diagnosticsSub.value) return
+  diagnosticsLoading.value = true
+  try {
+    const response: any = await subscriptionApi.diagnostics(diagnosticsSub.value.id)
+    diagnosticsData.value = response.data as SubscriptionDiagnostics
+  } catch (error: any) {
+    diagnosticsData.value = null
+    message.error(error.response?.data?.message || error.message || '诊断失败')
+  } finally {
+    diagnosticsLoading.value = false
+  }
+}
+
+const runDiagnosticAction = async (action: SubscriptionDiagnosticAction) => {
+  if (!diagnosticsSub.value || !action.enabled) return
+
+  if (action.key === 'scan_files') {
+    showDiagnosticsModal.value = false
+    handleScanFolder(diagnosticsSub.value)
+    return
+  }
+
+  diagnosticsActionLoading.value = action.key
+  diagnosticsActionResult.value = ''
+  try {
+    let response: any
+    switch (action.key) {
+      case 'refresh_rss':
+        response = await api.post(`/subscriptions/${diagnosticsSub.value.id}/collect-episodes`)
+        diagnosticsActionResult.value = response.message || 'RSS 采集任务已启动'
+        break
+      case 'retry_failed':
+        response = await subscriptionApi.retryFailed(diagnosticsSub.value.id)
+        diagnosticsActionResult.value = formatRetryFailedResult(response.data as SubscriptionRetryFailedResponse)
+        break
+      case 'reorganize_files':
+        response = await api.post(`/subscriptions/${diagnosticsSub.value.id}/reorganize-files`)
+        diagnosticsActionResult.value = response.message || '文件整理任务已启动'
+        break
+      case 'rename_files':
+        response = await api.post(`/subscriptions/${diagnosticsSub.value.id}/rename-files`)
+        diagnosticsActionResult.value = response.message || '重命名任务已启动'
+        break
+      case 'toggle_subscription':
+        response = await api.post(`/subscriptions/${diagnosticsSub.value.id}/toggle`)
+        diagnosticsActionResult.value = response.data?.enabled ? '订阅已启用' : '订阅已暂停'
+        await loadSubscriptions()
+        if (response.data) {
+          diagnosticsSub.value = response.data as Subscription
+        }
+        break
+      default:
+        response = await api.request({ method: action.method || 'POST', url: action.endpoint.replace('/api/v1', '') })
+        diagnosticsActionResult.value = response.message || '操作已执行'
+    }
+    message.success(diagnosticsActionResult.value)
+    await refreshDiagnostics()
+  } catch (error: any) {
+    const msg = error.response?.data?.message || error.message || '操作失败'
+    diagnosticsActionResult.value = msg
+    message.error(msg)
+  } finally {
+    diagnosticsActionLoading.value = ''
+  }
+}
+
+const formatRetryFailedResult = (result: SubscriptionRetryFailedResponse) => {
+  return `已重试 ${result.retried} 个，跳过 ${result.skipped} 个，失败 ${result.failed} 个`
+}
+
+const getDiagnosticTagType = (status: DiagnosticStatus): 'success' | 'warning' | 'error' | 'info' | 'default' => {
+  switch (status) {
+    case 'healthy':
+      return 'success'
+    case 'warning':
+      return 'warning'
+    case 'error':
+      return 'error'
+    case 'unknown':
+      return 'default'
+    default:
+      return 'default'
+  }
+}
+
+const getDiagnosticStatusLabel = (status: DiagnosticStatus) => {
+  const labels: Record<DiagnosticStatus, string> = {
+    healthy: '正常',
+    warning: '警告',
+    error: '异常',
+    unknown: '未知'
+  }
+  return labels[status] || status
+}
+
+const getDiagnosticActionType = (key: string): 'primary' | 'default' | 'tertiary' | 'info' | 'success' | 'warning' | 'error' => {
+  if (key === 'retry_failed') return 'warning'
+  if (key === 'toggle_subscription') return 'default'
+  if (key === 'refresh_rss') return 'primary'
+  return 'default'
+}
+
+const formatBytes = (bytes?: number) => {
+  if (!bytes || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex++
+  }
+  return `${value.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`
 }
 
 const doScanFolder = async () => {
@@ -2334,6 +2605,188 @@ onMounted(() => {
   word-break: break-all;
 }
 
+.diagnostics-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.diagnostics-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.diagnostics-title-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.diagnostics-checked {
+  font-size: 12px;
+  color: #666;
+}
+
+.diagnostics-counters {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  font-size: 12px;
+  color: #666;
+}
+
+.diagnostics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.diagnostic-check {
+  min-height: 128px;
+  padding: 12px;
+  border: 1px solid #e6e8ee;
+  border-left-width: 3px;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.diagnostic-check-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.diagnostic-summary {
+  margin-top: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #20242c;
+  word-break: break-word;
+}
+
+.diagnostic-detail {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #666;
+  word-break: break-word;
+}
+
+.diagnostic-healthy {
+  border-left-color: #18a058;
+}
+
+.diagnostic-warning {
+  border-left-color: #f0a020;
+}
+
+.diagnostic-error {
+  border-left-color: #d03050;
+}
+
+.diagnostic-unknown {
+  border-left-color: #909399;
+}
+
+.diagnostics-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.diagnostic-metric {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #e6e8ee;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.diagnostic-metric span,
+.diagnostic-metric small {
+  display: block;
+  color: #666;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.diagnostic-metric strong {
+  display: block;
+  margin: 6px 0;
+  font-size: 20px;
+  line-height: 1.1;
+  color: #20242c;
+  font-variant-numeric: tabular-nums;
+}
+
+.diagnostic-section-title {
+  margin-bottom: 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.diagnostic-failures {
+  padding-top: 2px;
+}
+
+.diagnostic-failure-item {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(0, 1.2fr);
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid #edf0f5;
+}
+
+.diagnostic-failure-title {
+  font-weight: 600;
+  font-size: 13px;
+  word-break: break-word;
+}
+
+.diagnostic-failure-meta {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.diagnostic-failure-reason {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #666;
+  word-break: break-word;
+}
+
+.diagnostic-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 4px;
+}
+
+.diagnostic-action-reasons {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #888;
+}
+
+.diagnostic-action-result {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f6f8fa;
+  color: #333;
+  font-size: 13px;
+}
+
 /* Modal 响应式 */
 .modal-card {
   width: 600px;
@@ -2400,6 +2853,16 @@ onMounted(() => {
   .preview-content {
     flex-direction: column;
     align-items: center;
+  }
+
+  .diagnostics-header,
+  .diagnostic-failure-item {
+    grid-template-columns: 1fr;
+    flex-direction: column;
+  }
+
+  .diagnostics-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 </style>

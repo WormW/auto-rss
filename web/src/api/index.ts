@@ -241,11 +241,111 @@ export interface DownloadDiagnostics {
   actions: Array<{ key: string; label: string; enabled: boolean }>
 }
 
+export type DiagnosticStatus = 'healthy' | 'warning' | 'error' | 'unknown'
+
+export interface SubscriptionDiagnosticCheck {
+  key: string
+  label: string
+  status: DiagnosticStatus
+  summary: string
+  detail: string
+}
+
+export interface SubscriptionDiagnosticAction {
+  key: string
+  label: string
+  method: string
+  endpoint: string
+  enabled: boolean
+  reason?: string
+}
+
+export interface SubscriptionDownloadDiagnosticItem {
+  id: number
+  title: string
+  episode: number
+  status: string
+  severity: string
+  category: string
+  reason: string
+  can_retry: boolean
+  retry_blocked?: string
+}
+
+export interface SubscriptionDiagnostics {
+  subscription_id: number
+  name: string
+  enabled: boolean
+  checked_at: string
+  summary: {
+    overall: DiagnosticStatus
+    healthy: number
+    warning: number
+    error: number
+    unknown: number
+  }
+  checks: SubscriptionDiagnosticCheck[]
+  downloads: {
+    total: number
+    pending: number
+    downloading: number
+    stalled: number
+    failed: number
+    completed: number
+    organizing: number
+    retryable: number
+    missing_torrent_tasks: number
+    failed_items: SubscriptionDownloadDiagnosticItem[]
+  }
+  files: {
+    expected_path: string
+    folder_exists: boolean
+    rename_enabled: boolean
+    completed_with_file: number
+    completed_missing_file: number
+    missing_renamed: number
+    missing_episodes: number[]
+  }
+  disk: {
+    path: string
+    exists: boolean
+    status: string
+    total_bytes: number
+    free_bytes: number
+    used_bytes: number
+    usage_percent: number
+    warning_threshold_gb: number
+    critical_threshold_gb: number
+    error?: string
+  }
+  actions: SubscriptionDiagnosticAction[]
+}
+
+export interface SubscriptionRetryFailedResult {
+  id: number
+  title: string
+  status: string
+  success: boolean
+  message: string
+}
+
+export interface SubscriptionRetryFailedResponse {
+  subscription_id: number
+  retried: number
+  failed: number
+  skipped: number
+  results: SubscriptionRetryFailedResult[]
+}
+
 export const subscriptionApi = {
   list: (page = 1, pageSize = 20) =>
     api.get('/subscriptions', { params: { page, page_size: pageSize } }),
   getById: (id: number) =>
     api.get(`/subscriptions/${id}`),
+  diagnostics: (id: number) =>
+    api.get(`/subscriptions/${id}/diagnostics`),
+  retryFailed: (id: number) =>
+    api.post(`/subscriptions/${id}/diagnostics/retry-failed`),
   create: (data: Partial<Subscription>) =>
     api.post('/subscriptions', data),
   preview: (data: Partial<Subscription> & { id?: number; limit?: number }) =>

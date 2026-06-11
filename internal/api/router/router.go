@@ -124,6 +124,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 
 	// 初始化处理器
 	subscriptionHandler := handler.NewSubscriptionHandler(subscriptionRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath)
+	subscriptionDiagnosticsHandler := handler.NewSubscriptionDiagnosticsHandler(subscriptionRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath)
 	downloadHandler := handler.NewDownloadHandler(downloadRepo, qbClient, configRepo)
 	downloadHistoryHandler := handler.NewDownloadHistoryHandler(downloadRepo)
 	rssHandler := handler.NewRSSHandler(rssScheduler)
@@ -194,6 +195,8 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			subscriptions.GET("/:id", subscriptionHandler.GetByID)
 			subscriptions.PUT("/:id", subscriptionHandler.Update)
 			subscriptions.DELETE("/:id", subscriptionHandler.Delete)
+			subscriptions.GET("/:id/diagnostics", subscriptionDiagnosticsHandler.Get)
+			subscriptions.POST("/:id/diagnostics/retry-failed", subscriptionDiagnosticsHandler.RetryFailed)
 			subscriptions.POST("/:id/toggle", subscriptionHandler.Toggle)
 			subscriptions.POST("/:id/enrich-bangumi", subscriptionHandler.EnrichBangumi)
 			subscriptions.POST("/:id/download-collection", subscriptionHandler.DownloadCollection)
