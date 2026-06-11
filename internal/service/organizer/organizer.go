@@ -14,6 +14,7 @@ import (
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/downloader"
+	"github.com/WormW/auto-rss/internal/service/medialibrary"
 	"github.com/fsnotify/fsnotify"
 	"gorm.io/gorm"
 )
@@ -36,6 +37,7 @@ type FileOrganizer struct {
 	matcher       SubscriptionMatcher
 	mover         FileMover
 	renameService *downloader.RenameService
+	mediaLibrary  *medialibrary.Service
 }
 
 // NewFileOrganizer 创建文件整理服务
@@ -47,6 +49,7 @@ func NewFileOrganizer(
 	db *gorm.DB,
 	bangumiService *bangumi.BangumiService,
 	renameTemplate string,
+	mediaLibrarySvc ...*medialibrary.Service,
 ) (*FileOrganizer, error) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -56,6 +59,11 @@ func NewFileOrganizer(
 	parser := NewFileNameParser()
 	matcher := NewSubscriptionMatcher(parser, subscriptionRepo, bangumiService)
 	mover := NewFileMover()
+
+	var mediaSvc *medialibrary.Service
+	if len(mediaLibrarySvc) > 0 {
+		mediaSvc = mediaLibrarySvc[0]
+	}
 
 	return &FileOrganizer{
 		watchDir:         watchDir,
@@ -72,6 +80,7 @@ func NewFileOrganizer(
 		matcher:          matcher,
 		mover:            mover,
 		renameService:    downloader.NewRenameService(renameTemplate),
+		mediaLibrary:     mediaSvc,
 	}, nil
 }
 
@@ -343,6 +352,7 @@ func (f *FileOrganizer) organizeFile(filePath string) error {
 	if download != nil && f.downloadRepo != nil {
 		download.Status = model.DownloadStatusCompleted
 		download.FilePath = newPath
+		download.RenamedPath = newPath
 		if err := f.downloadRepo.Update(download); err != nil {
 			logger.Error("File moved but failed to update database",
 				"download_id", download.ID,
@@ -352,6 +362,15 @@ func (f *FileOrganizer) organizeFile(filePath string) error {
 			logger.Debug("Updated download status to completed",
 				"download_id", download.ID,
 				"file_path", newPath)
+		}
+
+		if f.mediaLibrary != nil {
+			result := f.mediaLibrary.RefreshDownloadAfterImport(download)
+			logger.Info("Media library refresh after file organization",
+				"download_id", download.ID,
+				"status", result.Status,
+				"path", result.Path,
+				"message", result.Message)
 		}
 	}
 

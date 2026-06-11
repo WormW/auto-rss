@@ -355,6 +355,36 @@ DELETE /api/v1/downloads/clear?status=failed
 | `disk.cleanup_strategy` | `age`、`space`、`hybrid` |
 | `disk.cleanup_keep_days` | 按年龄清理的保留天数 |
 | `disk.cleanup_keep_gb` | 按空间清理的目标剩余空间 |
+| `media_library_config` | 媒体库联动 JSON 配置 |
+
+### 媒体库联动
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/media-library/config` | 获取媒体库配置（不会返回 token 明文） |
+| `PUT` | `/media-library/config` | 保存 Jellyfin/Emby/Plex 连接、路径映射和自动刷新设置 |
+| `POST` | `/media-library/test` | 测试媒体库连接 |
+| `POST` | `/media-library/downloads/:id/refresh` | 手动刷新某个下载对应的媒体库路径 |
+| `GET` | `/media-library/subscriptions/:id/status` | 获取订阅最近下载的入库路径和刷新状态 |
+
+配置请求：
+
+```json
+{
+  "enabled": true,
+  "provider": "jellyfin",
+  "base_url": "http://jellyfin:8096",
+  "token": "api-token",
+  "library_id": "",
+  "section_id": "",
+  "refresh_on_import": true,
+  "path_mappings": [
+    { "from": "/downloads", "to": "/media/anime" }
+  ]
+}
+```
+
+`provider` 支持 `jellyfin`、`emby`、`plex`。Plex 需要 `section_id`；Jellyfin/Emby 当前触发 `/Library/Refresh`，`library_id` 可留空。路径映射按最长前缀匹配，未命中时手动/自动刷新会返回明确错误并记录到下载的 `media_library_refresh_error`。
 
 ### 日志与文件整理
 
@@ -538,6 +568,10 @@ interface Download {
   torrent_hash: string
   file_path: string
   renamed_path: string
+  media_library_path: string
+  media_library_refresh_status: 'pending' | 'disabled' | 'success' | 'failed'
+  media_library_refresh_error: string
+  media_library_refreshed_at?: string
   status: 'pending' | 'downloading' | 'stalled' | 'completed' | 'failed' | 'organizing'
   retry_count: number
   max_retries: number
