@@ -22,6 +22,7 @@ import (
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/mikan"
 	"github.com/WormW/auto-rss/internal/service/rss"
+	"github.com/WormW/auto-rss/internal/service/scheduler"
 	"github.com/WormW/auto-rss/internal/service/subscription"
 	"github.com/WormW/auto-rss/internal/service/task"
 	"github.com/gin-gonic/gin"
@@ -76,6 +77,21 @@ type SubscriptionPreviewItem struct {
 	ExistingDownloadID uint   `json:"existing_download_id,omitempty"`
 	DownloadPath       string `json:"download_path"`
 	RenamePreview      string `json:"rename_preview"`
+}
+
+type SubscriptionSmartFetchStatus struct {
+	SubscriptionID     uint      `json:"subscription_id"`
+	ShouldFetch        bool      `json:"should_fetch"`
+	Reason             string    `json:"reason"`
+	Explanation        string    `json:"explanation"`
+	NextFetchIn        string    `json:"next_fetch_in"`
+	NextFetchSeconds   int64     `json:"next_fetch_seconds"`
+	NextFetchAt        time.Time `json:"next_fetch_at"`
+	MissingEpisodes    []int     `json:"missing_episodes"`
+	IsInActiveWindow   bool      `json:"is_in_active_window"`
+	IsCompleted        bool      `json:"is_completed"`
+	SmartFetchEnabled  bool      `json:"smart_fetch_enabled"`
+	SmartFetchOverride string    `json:"smart_fetch_override"`
 }
 
 // NewSubscriptionHandler 创建订阅处理器实例
@@ -794,6 +810,26 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 	if renameEnabled, ok := updates["rename_enabled"].(bool); ok {
 		existing.RenameEnabled = renameEnabled
 	}
+	if _, exists := updates["smart_fetch_enabled"]; exists {
+		if updates["smart_fetch_enabled"] == nil {
+			existing.SmartFetchEnabled = nil
+		} else if enabled, ok := updates["smart_fetch_enabled"].(bool); ok {
+			existing.SmartFetchEnabled = &enabled
+		}
+	}
+	if override, ok := updates["smart_fetch_override"].(string); ok {
+		switch override {
+		case "", "follow", "always", "never":
+			existing.SmartFetchOverride = override
+			existing.SmartFetchEnabled = nil
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{
+				"code":    400,
+				"message": "Invalid smart_fetch_override",
+			})
+			return
+		}
+	}
 
 	existing.Name, existing.Season = normalizeSubscriptionNameAndSeason(existing.Name, existing.Season)
 
@@ -1121,6 +1157,69 @@ func (h *SubscriptionHandler) List(c *gin.Context) {
 			"list": subscriptionsWithStats,
 		},
 	})
+}
+
+// ListSmartFetchStatus 返回每个订阅的智能拉取决策摘要
+func (h *SubscriptionHandler) ListSmartFetchStatus(c *gin.Context) {
+	subscriptionsWithStats, err := h.repo.GetSubscriptionsWithDownloadCount()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Failed to get subscription list",
+		})
+		return
+	}
+
+	filter := scheduler.NewSmartFetchFilter(h.downloadRepo)
+	filter.LoadConfigFromDB(h.configRepo)
+	now := time.Now()
+	items := make([]SubscriptionSmartFetchStatus, 0, len(subscriptionsWithStats))
+
+	for i := range subscriptionsWithStats {
+		status, _ := filter.EvaluateSubscription(&subscriptionsWithStats[i].Subscription)
+		items = append(items, smartFetchStatusResponse(status, now))
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Success",
+		"data": gin.H{
+			"evaluated_at": now,
+			"list":         items,
+		},
+	})
+}
+
+func smartFetchStatusResponse(status scheduler.SubscriptionFetchStatus, now time.Time) SubscriptionSmartFetchStatus {
+	missingEpisodes := status.MissingEpisodes
+	if missingEpisodes == nil {
+		missingEpisodes = []int{}
+	}
+
+	nextFetch := status.NextFetchInterval
+	if nextFetch < 0 {
+		nextFetch = 0
+	}
+
+	override := ""
+	if status.Subscription != nil {
+		override = status.Subscription.SmartFetchOverride
+	}
+
+	return SubscriptionSmartFetchStatus{
+		SubscriptionID:     status.Subscription.ID,
+		ShouldFetch:        status.ShouldFetch,
+		Reason:             status.FetchReason,
+		Explanation:        status.Explanation,
+		NextFetchIn:        nextFetch.Round(time.Second).String(),
+		NextFetchSeconds:   int64(nextFetch.Round(time.Second).Seconds()),
+		NextFetchAt:        now.Add(nextFetch),
+		MissingEpisodes:    missingEpisodes,
+		IsInActiveWindow:   status.IsInActiveWindow,
+		IsCompleted:        status.IsCompleted,
+		SmartFetchEnabled:  status.SmartFetchEnabled,
+		SmartFetchOverride: override,
+	}
 }
 
 // repairMissingCovers 检查并补下载磁盘上缺失的封面

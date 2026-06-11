@@ -192,6 +192,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			subscriptions.POST("", subscriptionHandler.Create)
 			subscriptions.GET("", subscriptionHandler.List)
 			subscriptions.POST("/preview", subscriptionHandler.Preview)
+			subscriptions.GET("/smart-fetch/status", subscriptionHandler.ListSmartFetchStatus)
 			subscriptions.GET("/:id", subscriptionHandler.GetByID)
 			subscriptions.PUT("/:id", subscriptionHandler.Update)
 			subscriptions.DELETE("/:id", subscriptionHandler.Delete)
@@ -257,6 +258,8 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		{
 			configs.GET("", configHandler.GetAll)
 			configs.PUT("", configHandler.Update)
+			configs.GET("/smart-fetch", configHandler.GetSmartFetch)
+			configs.PUT("/smart-fetch", configHandler.UpdateSmartFetch)
 			configs.POST("/qbittorrent/test", configHandler.TestQBittorrent)
 			configs.POST("/qbittorrent/save", configHandler.SaveQBittorrentConfig)
 

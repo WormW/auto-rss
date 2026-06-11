@@ -2,18 +2,20 @@ package handler
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/downloader"
+	"github.com/WormW/auto-rss/internal/service/scheduler"
 	"github.com/gin-gonic/gin"
 )
 
 // ConfigHandler 配置处理器
 type ConfigHandler struct {
-	repo      repository.ConfigRepository
-	qbClient  downloader.QBittorrentClient
+	repo     repository.ConfigRepository
+	qbClient downloader.QBittorrentClient
 }
 
 // NewConfigHandler 创建配置处理器实例
@@ -80,6 +82,153 @@ func (h *ConfigHandler) Update(c *gin.Context) {
 		"code":    0,
 		"message": "Success",
 	})
+}
+
+type SmartFetchConfigResponse struct {
+	Enabled            bool `json:"enabled"`
+	BeforeAirDay       int  `json:"before_air_day"`
+	AfterAirDay        int  `json:"after_air_day"`
+	SkipCompleted      bool `json:"skip_completed"`
+	CompletedStopDays  int  `json:"completed_stop_days"`
+	CheckLocalComplete bool `json:"check_local_complete"`
+}
+
+// GetSmartFetch 获取智能拉取配置
+func (h *ConfigHandler) GetSmartFetch(c *gin.Context) {
+	config := defaultSmartFetchConfigResponse()
+	applySmartFetchConfigValue := func(key, value string) {
+		switch key {
+		case "smart_fetch.enabled":
+			config.Enabled = parseConfigBool(value, config.Enabled)
+		case "smart_fetch.before_air_day":
+			if val, err := strconv.Atoi(value); err == nil && val >= 0 {
+				config.BeforeAirDay = val
+			}
+		case "smart_fetch.after_air_day":
+			if val, err := strconv.Atoi(value); err == nil && val >= 0 {
+				config.AfterAirDay = val
+			}
+		case "smart_fetch.skip_completed":
+			config.SkipCompleted = parseConfigBool(value, config.SkipCompleted)
+		case "smart_fetch.completed_stop_days":
+			if val, err := strconv.Atoi(value); err == nil && val >= 0 {
+				config.CompletedStopDays = val
+			}
+		case "smart_fetch.check_local_complete":
+			config.CheckLocalComplete = parseConfigBool(value, config.CheckLocalComplete)
+		}
+	}
+
+	configs, err := h.repo.GetAll()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Failed to get smart fetch config",
+		})
+		return
+	}
+	for _, cfg := range configs {
+		applySmartFetchConfigValue(cfg.Key, cfg.Value)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Success",
+		"data":    config,
+	})
+}
+
+// UpdateSmartFetch 批量更新智能拉取配置
+func (h *ConfigHandler) UpdateSmartFetch(c *gin.Context) {
+	var req struct {
+		Enabled            *bool `json:"enabled"`
+		BeforeAirDay       *int  `json:"before_air_day"`
+		AfterAirDay        *int  `json:"after_air_day"`
+		SkipCompleted      *bool `json:"skip_completed"`
+		CompletedStopDays  *int  `json:"completed_stop_days"`
+		CheckLocalComplete *bool `json:"check_local_complete"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Invalid request body",
+		})
+		return
+	}
+
+	updates := make(map[string]string)
+	if req.Enabled != nil {
+		updates["smart_fetch.enabled"] = strconv.FormatBool(*req.Enabled)
+	}
+	if req.BeforeAirDay != nil {
+		if *req.BeforeAirDay < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "before_air_day must be >= 0"})
+			return
+		}
+		updates["smart_fetch.before_air_day"] = strconv.Itoa(*req.BeforeAirDay)
+	}
+	if req.AfterAirDay != nil {
+		if *req.AfterAirDay < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "after_air_day must be >= 0"})
+			return
+		}
+		updates["smart_fetch.after_air_day"] = strconv.Itoa(*req.AfterAirDay)
+	}
+	if req.SkipCompleted != nil {
+		updates["smart_fetch.skip_completed"] = strconv.FormatBool(*req.SkipCompleted)
+	}
+	if req.CompletedStopDays != nil {
+		if *req.CompletedStopDays < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "completed_stop_days must be >= 0"})
+			return
+		}
+		updates["smart_fetch.completed_stop_days"] = strconv.Itoa(*req.CompletedStopDays)
+	}
+	if req.CheckLocalComplete != nil {
+		updates["smart_fetch.check_local_complete"] = strconv.FormatBool(*req.CheckLocalComplete)
+	}
+
+	for key, value := range updates {
+		if err := h.repo.Set(key, value); err != nil {
+			logger.Error("Failed to update smart fetch config",
+				"key", key,
+				"error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"code":    500,
+				"message": "Failed to update smart fetch config",
+			})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Success",
+	})
+}
+
+func defaultSmartFetchConfigResponse() SmartFetchConfigResponse {
+	strategy := scheduler.DefaultSmartFetchStrategy()
+	return SmartFetchConfigResponse{
+		Enabled:            strategy.Enabled,
+		BeforeAirDay:       strategy.BeforeAirDay,
+		AfterAirDay:        strategy.AfterAirDay,
+		SkipCompleted:      strategy.SkipCompleted,
+		CompletedStopDays:  strategy.CompletedStopDays,
+		CheckLocalComplete: strategy.CheckLocalComplete,
+	}
+}
+
+func parseConfigBool(value string, fallback bool) bool {
+	switch value {
+	case "true", "1", "yes", "on":
+		return true
+	case "false", "0", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 // TestQBittorrent 测试qBittorrent连接
@@ -321,4 +470,3 @@ func (h *ConfigHandler) PreviewRenameTemplate(c *gin.Context) {
 		},
 	})
 }
-
