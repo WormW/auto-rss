@@ -645,7 +645,7 @@ func (m *Monitor) checkMediaLibrary() mediaLibraryState {
 	recentHours := m.getConfigInt("media_library.recent_play_hours", 24)
 
 	if serverType == "" && baseURL == "" && token == "" {
-		return mediaLibraryState{Status: MediaLibraryStatusUnconfigured, Message: "media library is not configured"}
+		return mediaLibraryState{Status: MediaLibraryStatusUnconfigured, Message: "media library is not configured", ConservativeSkipAll: true}
 	}
 	if serverType == "" || baseURL == "" || token == "" {
 		return mediaLibraryState{Status: MediaLibraryStatusFailed, Message: "media library configuration is incomplete", ConservativeSkipAll: true}

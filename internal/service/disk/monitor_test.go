@@ -189,6 +189,36 @@ func TestRunCleanupSkipsConservativelyWhenMediaLibraryFails(t *testing.T) {
 	}
 }
 
+func TestRunCleanupSkipsConservativelyWhenMediaLibraryUnconfigured(t *testing.T) {
+	monitor, db, downloadRepo, _ := newDiskTestMonitor(t)
+	root := t.TempDir()
+	oldTime := time.Now().AddDate(0, 0, -40)
+	path := filepath.Join(root, "protected-when-unconfigured.mkv")
+	if err := os.WriteFile(path, []byte("data"), 0600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	download := model.Download{Title: "unconfigured", TorrentURL: "https://example.test/unconfigured.torrent", TorrentHash: "hash-unconfigured", Status: model.DownloadStatusCompleted, FilePath: path, DownloadedAt: &oldTime}
+	if err := downloadRepo.Create(&download); err != nil {
+		t.Fatalf("create download: %v", err)
+	}
+
+	result, err := monitor.RunCleanup(CleanupOptions{Trigger: CleanupTriggerManual, Strategy: CleanupByAge, KeepDays: 30, DownloadPath: root, ProtectWatching: true})
+	if err != nil {
+		t.Fatalf("run cleanup: %v", err)
+	}
+	if result.DeletedCount != 0 || result.SkippedCount != 1 || result.MediaLibraryStatus != MediaLibraryStatusUnconfigured {
+		t.Fatalf("expected conservative unconfigured media skip, got %#v", result)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected file retained: %v", err)
+	}
+	var count int64
+	db.Model(&model.Download{}).Count(&count)
+	if count != 1 {
+		t.Fatalf("expected DB record retained, count=%d", count)
+	}
+}
+
 func TestRunCleanupRejectsPathBoundaryDeletion(t *testing.T) {
 	cases := []struct {
 		name      string
