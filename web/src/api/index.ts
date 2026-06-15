@@ -584,11 +584,56 @@ export interface DiskStatus {
   status: 'healthy' | 'warning' | 'critical'
 }
 
+export interface DiskSample extends DiskStatus {
+  created_at: string
+}
+
+export interface DiskCleanupRecord {
+  id: number
+  trigger: 'manual' | 'auto' | string
+  strategy: string
+  download_path: string
+  deleted_count: number
+  skipped_count: number
+  freed_bytes: number
+  before_free_bytes: number
+  after_free_bytes: number
+  media_library_status: 'unconfigured' | 'connected' | 'failed' | string
+  message: string
+  created_at: string
+}
+
+export interface DiskHistory {
+  samples: DiskSample[]
+  cleanup: DiskCleanupRecord[]
+  list: DiskCleanupRecord[]
+  total: number
+  page: number
+}
+
+export interface DiskSettings {
+  enabled: boolean
+  strategy: string
+  retention_days: number
+  min_free_gb: number
+  warning_threshold_gb: number
+  critical_threshold_gb: number
+  protect_watching: boolean
+  media_library_status: 'unconfigured' | 'connected' | 'failed' | string
+  media_library_message: string
+}
+
 export const diskApi = {
   getStatus: () =>
     api.get('/disk/status'),
   getInfo: () =>
-    api.get('/disk/info')
+    api.get('/disk/info'),
+  getSettings: () =>
+    api.get('/disk/settings'),
+  getHistory: (page = 1, pageSize = 20) =>
+    api.get('/disk/history', { params: { page, page_size: pageSize } }),
+  cleanup: (payload: { strategy?: string; keep_days?: number; keep_gb?: number }) =>
+    api.post('/disk/cleanup', payload)
 }
 
 export * from './rss-source'

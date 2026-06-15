@@ -31,6 +31,8 @@ func RunMigrations(db *gorm.DB) error {
 					&model.Subscription{},
 					&model.Download{},
 					&model.Config{},
+					&model.DiskSample{},
+					&model.DiskCleanupRecord{},
 					&model.RSSSource{},
 					&model.Log{},
 					&model.RefreshToken{},
@@ -42,6 +44,8 @@ func RunMigrations(db *gorm.DB) error {
 					"subscriptions",
 					"downloads",
 					"configs",
+					"disk_samples",
+					"disk_cleanup_records",
 					"rss_sources",
 					"logs",
 					"refresh_tokens",
@@ -82,6 +86,15 @@ func RunMigrations(db *gorm.DB) error {
 			Rollback: func(tx *gorm.DB) error {
 				// 回滚无意义，无法区分原有值和回填值
 				return nil
+			},
+		},
+		{
+			ID: "202606150001", // persist disk samples and cleanup summaries
+			Migrate: func(tx *gorm.DB) error {
+				return tx.AutoMigrate(&model.DiskSample{}, &model.DiskCleanupRecord{})
+			},
+			Rollback: func(tx *gorm.DB) error {
+				return tx.Migrator().DropTable("disk_cleanup_records", "disk_samples")
 			},
 		},
 	})
@@ -127,6 +140,8 @@ func ResetMigrations(db *gorm.DB) error {
 					&model.Subscription{},
 					&model.Download{},
 					&model.Config{},
+					&model.DiskSample{},
+					&model.DiskCleanupRecord{},
 					&model.RSSSource{},
 					&model.Log{},
 					&model.RefreshToken{},

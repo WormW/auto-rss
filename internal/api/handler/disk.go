@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/repository"
@@ -26,7 +27,7 @@ func NewDiskHandler(
 	subscriptionRepo repository.SubscriptionRepository,
 	configRepo repository.ConfigRepository,
 ) *DiskHandler {
-	monitor := disk.NewMonitor(downloadRepo, subscriptionRepo, configRepo)
+	monitor := disk.NewMonitor(db, downloadRepo, subscriptionRepo, configRepo)
 
 	return &DiskHandler{
 		db:           db,
@@ -47,6 +48,40 @@ type DiskStatusResponse struct {
 	Status       string  `json:"status"`
 }
 
+type DiskHistoryResponse struct {
+	Samples []DiskSampleResponse        `json:"samples"`
+	Cleanup []modelDiskCleanupRecordDTO `json:"cleanup"`
+	List    []modelDiskCleanupRecordDTO `json:"list"`
+	Total   int64                       `json:"total"`
+	Page    int                         `json:"page"`
+}
+
+type DiskSampleResponse struct {
+	Path         string  `json:"path"`
+	DownloadPath string  `json:"download_path"`
+	Total        int64   `json:"total"`
+	Used         int64   `json:"used"`
+	Free         int64   `json:"free"`
+	UsagePercent float64 `json:"usage_percent"`
+	Status       string  `json:"status"`
+	CreatedAt    string  `json:"created_at"`
+}
+
+type modelDiskCleanupRecordDTO struct {
+	ID                 uint   `json:"id"`
+	Trigger            string `json:"trigger"`
+	Strategy           string `json:"strategy"`
+	DownloadPath       string `json:"download_path"`
+	DeletedCount       int    `json:"deleted_count"`
+	SkippedCount       int    `json:"skipped_count"`
+	FreedBytes         int64  `json:"freed_bytes"`
+	BeforeFreeBytes    int64  `json:"before_free_bytes"`
+	AfterFreeBytes     int64  `json:"after_free_bytes"`
+	MediaLibraryStatus string `json:"media_library_status"`
+	Message            string `json:"message"`
+	CreatedAt          string `json:"created_at"`
+}
+
 // GetStatus 获取磁盘状态
 func (h *DiskHandler) GetStatus(c *gin.Context) {
 	downloadPath := h.getDownloadPath()
@@ -62,9 +97,12 @@ func (h *DiskHandler) GetStatus(c *gin.Context) {
 	}
 
 	// 转换为字节
-	totalBytes := int64(info.TotalGB * 1024 * 1024 * 1024)
-	freeBytes := int64(info.FreeGB * 1024 * 1024 * 1024)
-	usedBytes := int64(info.UsedGB * 1024 * 1024 * 1024)
+	totalBytes := info.TotalBytes
+	freeBytes := info.FreeBytes
+	usedBytes := info.UsedBytes
+	if err := h.monitor.RecordDiskSample(downloadPath, info); err != nil {
+		logger.Warn("Failed to persist disk sample from status request", "error", err.Error())
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
@@ -90,12 +128,13 @@ func (h *DiskHandler) GetInfo(c *gin.Context) {
 
 // CleanupSettingsRequest 清理设置请求
 type CleanupSettingsRequest struct {
-	Enabled              bool   `json:"enabled"`
-	Strategy             string `json:"strategy"`
-	RetentionDays        int    `json:"retention_days"`
-	MinFreeGB            int64  `json:"min_free_gb"`
-	WarningThresholdGB   int64  `json:"warning_threshold_gb"`
-	CriticalThresholdGB  int64  `json:"critical_threshold_gb"`
+	Enabled             bool   `json:"enabled"`
+	Strategy            string `json:"strategy"`
+	RetentionDays       int    `json:"retention_days"`
+	MinFreeGB           int64  `json:"min_free_gb"`
+	WarningThresholdGB  int64  `json:"warning_threshold_gb"`
+	CriticalThresholdGB int64  `json:"critical_threshold_gb"`
+	ProtectWatching     bool   `json:"protect_watching"`
 }
 
 // GetSettings 获取清理设置
@@ -107,17 +146,22 @@ func (h *DiskHandler) GetSettings(c *gin.Context) {
 	minFreeGB := h.getConfigInt64("disk.cleanup_keep_gb", 50)
 	warningThreshold := h.getConfigInt64("disk.warning_threshold_gb", 10)
 	criticalThreshold := h.getConfigInt64("disk.critical_threshold_gb", 5)
+	protectWatching := h.getConfigBool("disk.cleanup_protect_watching", true)
+	mediaStatus, mediaMessage := h.monitor.CheckMediaLibrary()
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
 		"message": "Success",
 		"data": gin.H{
-			"enabled":                enabled,
-			"strategy":               strategy,
-			"retention_days":         retentionDays,
-			"min_free_gb":            minFreeGB,
-			"warning_threshold_gb":   warningThreshold,
-			"critical_threshold_gb":  criticalThreshold,
+			"enabled":               enabled,
+			"strategy":              strategy,
+			"retention_days":        retentionDays,
+			"min_free_gb":           minFreeGB,
+			"warning_threshold_gb":  warningThreshold,
+			"critical_threshold_gb": criticalThreshold,
+			"protect_watching":      protectWatching,
+			"media_library_status":  mediaStatus,
+			"media_library_message": mediaMessage,
 		},
 	})
 }
@@ -140,6 +184,7 @@ func (h *DiskHandler) UpdateSettings(c *gin.Context) {
 	h.setConfig("disk.cleanup_keep_gb", req.MinFreeGB)
 	h.setConfig("disk.warning_threshold_gb", req.WarningThresholdGB)
 	h.setConfig("disk.critical_threshold_gb", req.CriticalThresholdGB)
+	h.setConfig("disk.cleanup_protect_watching", req.ProtectWatching)
 
 	logger.Info("Disk cleanup settings updated",
 		"enabled", req.Enabled,
@@ -155,6 +200,7 @@ func (h *DiskHandler) UpdateSettings(c *gin.Context) {
 type TriggerCleanupRequest struct {
 	Strategy string `json:"strategy"`
 	KeepDays int    `json:"keep_days"`
+	KeepGB   int64  `json:"keep_gb"`
 }
 
 // TriggerCleanup 触发手动清理
@@ -166,42 +212,32 @@ func (h *DiskHandler) TriggerCleanup(c *gin.Context) {
 		req.KeepDays = 30
 	}
 
-	// 获取下载路径
 	downloadPath := h.getDownloadPath()
-
-	// 获取当前磁盘状态
-	info, err := h.monitor.GetDiskInfo(downloadPath)
+	strategy := disk.CleanupStrategy(req.Strategy)
+	if strategy == "" {
+		strategy = disk.CleanupHybrid
+	}
+	result, err := h.monitor.RunCleanup(disk.CleanupOptions{
+		Trigger:         disk.CleanupTriggerManual,
+		Strategy:        strategy,
+		KeepDays:        req.KeepDays,
+		KeepGB:          req.KeepGB,
+		DownloadPath:    downloadPath,
+		ProtectWatching: h.getConfigBool("disk.cleanup_protect_watching", true),
+	})
 	if err != nil {
-		logger.Error("Failed to get disk info before cleanup", "error", err)
+		logger.Error("Failed to run manual cleanup", "error", err.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
-			"message": "获取磁盘状态失败",
+			"message": "清理失败",
 		})
 		return
 	}
 
-	beforeFree := info.FreeGB
-
-	// 这里简化处理，实际应该调用 monitor 的 cleanup 方法
-	// 但由于 cleanup 是内部方法，这里模拟清理逻辑
-	// 实际项目中可能需要将 cleanup 方法暴露或使用其他方式
-
-	// 重新获取磁盘状态（模拟清理后）
-	info, _ = h.monitor.GetDiskInfo(downloadPath)
-	afterFree := info.FreeGB
-
-	cleaned := afterFree > beforeFree || req.Strategy != ""
-
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
 		"message": "Success",
-		"data": gin.H{
-			"cleaned":        cleaned,
-			"deleted_count":  0, // 简化版本
-			"freed_bytes":    int64((afterFree - beforeFree) * 1024 * 1024 * 1024),
-			"before_free_gb": beforeFree,
-			"after_free_gb":  afterFree,
-		},
+		"data":    result,
 	})
 }
 
@@ -217,15 +253,60 @@ func (h *DiskHandler) GetHistory(c *gin.Context) {
 		pageSize = 20
 	}
 
-	// 简化版本：返回空列表
-	// 实际项目中应该查询数据库中的清理历史记录
+	samples, err := h.monitor.ListDiskSamples(pageSize * 3)
+	if err != nil {
+		logger.Error("Failed to list disk samples", "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "获取磁盘历史失败"})
+		return
+	}
+	records, total, err := h.monitor.ListCleanupRecords((page-1)*pageSize, pageSize)
+	if err != nil {
+		logger.Error("Failed to list cleanup records", "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "获取清理历史失败"})
+		return
+	}
+
+	sampleDTOs := make([]DiskSampleResponse, 0, len(samples))
+	for i := len(samples) - 1; i >= 0; i-- {
+		sample := samples[i]
+		sampleDTOs = append(sampleDTOs, DiskSampleResponse{
+			Path:         sample.Path,
+			DownloadPath: sample.DownloadPath,
+			Total:        sample.TotalBytes,
+			Used:         sample.UsedBytes,
+			Free:         sample.FreeBytes,
+			UsagePercent: sample.UsagePercent,
+			Status:       sample.Status,
+			CreatedAt:    sample.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	cleanupDTOs := make([]modelDiskCleanupRecordDTO, 0, len(records))
+	for _, record := range records {
+		cleanupDTOs = append(cleanupDTOs, modelDiskCleanupRecordDTO{
+			ID:                 record.ID,
+			Trigger:            record.Trigger,
+			Strategy:           record.Strategy,
+			DownloadPath:       record.DownloadPath,
+			DeletedCount:       record.DeletedCount,
+			SkippedCount:       record.SkippedCount,
+			FreedBytes:         record.FreedBytes,
+			BeforeFreeBytes:    record.BeforeFreeBytes,
+			AfterFreeBytes:     record.AfterFreeBytes,
+			MediaLibraryStatus: record.MediaLibraryStatus,
+			Message:            record.Message,
+			CreatedAt:          record.CreatedAt.Format(time.RFC3339),
+		})
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
 		"message": "Success",
-		"data": gin.H{
-			"list":  []gin.H{},
-			"total": 0,
-			"page":  page,
+		"data": DiskHistoryResponse{
+			Samples: sampleDTOs,
+			Cleanup: cleanupDTOs,
+			List:    cleanupDTOs,
+			Total:   total,
+			Page:    page,
 		},
 	})
 }
