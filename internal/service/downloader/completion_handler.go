@@ -7,6 +7,7 @@ import (
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
+	"github.com/WormW/auto-rss/internal/service/medialibrary"
 	"gorm.io/gorm"
 )
 
@@ -24,10 +25,16 @@ type completionHandler struct {
 	renamerSvc      *RenameService
 	qbClient        QBittorrentClient
 	db              *gorm.DB
+	mediaLibrary    MediaLibraryRefresher
 }
 
 type completionDownloadRepository interface {
 	Update(download *model.Download) error
+}
+
+// MediaLibraryRefresher refreshes a media library for a completed download.
+type MediaLibraryRefresher interface {
+	RefreshDownloadAfterImport(download *model.Download) medialibrary.RefreshResult
 }
 
 // NewCompletionHandler 创建完成处理服务
@@ -38,13 +45,19 @@ func NewCompletionHandler(
 	renamerSvc *RenameService,
 	qbClient QBittorrentClient,
 	db *gorm.DB,
+	mediaLibrary ...MediaLibraryRefresher,
 ) CompletionHandler {
+	var mediaSvc MediaLibraryRefresher
+	if len(mediaLibrary) > 0 {
+		mediaSvc = mediaLibrary[0]
+	}
 	return &completionHandler{
 		downloadRepo:    downloadRepo,
 		notificationSvc: notificationSvc,
 		renamerSvc:      renamerSvc,
 		qbClient:        qbClient,
 		db:              db,
+		mediaLibrary:    mediaSvc,
 	}
 }
 
@@ -114,6 +127,15 @@ func (h *completionHandler) HandleComplete(download *model.Download, torrent *To
 			"download_id", download.ID,
 			"error", err.Error())
 		return err
+	}
+
+	if h.mediaLibrary != nil {
+		result := h.mediaLibrary.RefreshDownloadAfterImport(download)
+		logger.Info("Media library refresh after download completion",
+			"download_id", download.ID,
+			"status", result.Status,
+			"path", result.Path,
+			"message", result.Message)
 	}
 
 	return nil
