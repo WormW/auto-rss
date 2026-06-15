@@ -189,3 +189,72 @@ func TestSetup_AuthDisabledKeepsLocalRoutesAccessible(t *testing.T) {
 		t.Fatalf("expected local no-auth route to remain accessible, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
+
+func TestOnboardingStatusReportsMissingSetup(t *testing.T) {
+	r, _ := setupRouterForTest(t, false)
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/onboarding/status", nil)
+	r.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected onboarding status to succeed, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Code int `json:"code"`
+		Data struct {
+			Completed  bool     `json:"completed"`
+			ShouldShow bool     `json:"should_show"`
+			Missing    []string `json:"missing"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to parse onboarding response: %v", err)
+	}
+	if response.Code != 0 {
+		t.Fatalf("expected code 0, got %d", response.Code)
+	}
+	if response.Data.Completed {
+		t.Fatalf("expected onboarding to be incomplete")
+	}
+	if !response.Data.ShouldShow {
+		t.Fatalf("expected onboarding to show when setup is missing")
+	}
+	if len(response.Data.Missing) == 0 {
+		t.Fatalf("expected missing setup keys")
+	}
+}
+
+func TestOnboardingCompletePersistsState(t *testing.T) {
+	r, _ := setupRouterForTest(t, false)
+
+	completeRecorder := httptest.NewRecorder()
+	completeReq := httptest.NewRequest(http.MethodPost, "/api/v1/onboarding/complete", nil)
+	r.ServeHTTP(completeRecorder, completeReq)
+	if completeRecorder.Code != http.StatusOK {
+		t.Fatalf("expected onboarding complete to succeed, got %d: %s", completeRecorder.Code, completeRecorder.Body.String())
+	}
+
+	statusRecorder := httptest.NewRecorder()
+	statusReq := httptest.NewRequest(http.MethodGet, "/api/v1/onboarding/status", nil)
+	r.ServeHTTP(statusRecorder, statusReq)
+	if statusRecorder.Code != http.StatusOK {
+		t.Fatalf("expected onboarding status to succeed, got %d: %s", statusRecorder.Code, statusRecorder.Body.String())
+	}
+
+	var response struct {
+		Data struct {
+			Completed  bool `json:"completed"`
+			ShouldShow bool `json:"should_show"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(statusRecorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to parse onboarding response: %v", err)
+	}
+	if !response.Data.Completed {
+		t.Fatalf("expected onboarding to be completed")
+	}
+	if response.Data.ShouldShow {
+		t.Fatalf("expected completed onboarding not to show")
+	}
+}
