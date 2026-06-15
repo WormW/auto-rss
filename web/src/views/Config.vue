@@ -142,6 +142,106 @@
       </n-form>
     </n-card>
 
+    <n-card title="媒体库联动" class="config-card">
+      <n-form :model="mediaLibraryConfig" label-placement="top" class="config-form">
+        <n-form-item label="启用媒体库刷新">
+          <n-switch v-model:value="mediaLibraryConfig.enabled" />
+        </n-form-item>
+        <n-form-item label="媒体库类型">
+          <n-select
+            v-model:value="mediaLibraryConfig.provider"
+            :options="mediaLibraryProviderOptions"
+            :disabled="!mediaLibraryConfig.enabled"
+          />
+        </n-form-item>
+        <n-form-item label="服务地址">
+          <n-input
+            v-model:value="mediaLibraryConfig.base_url"
+            placeholder="http://jellyfin:8096"
+            :disabled="!mediaLibraryConfig.enabled"
+          />
+        </n-form-item>
+        <n-form-item :label="mediaLibraryConfig.tokenConfigured ? '访问令牌（已保存）' : '访问令牌'">
+          <n-input
+            v-model:value="mediaLibraryConfig.token"
+            type="password"
+            show-password-on="click"
+            :placeholder="mediaLibraryConfig.tokenConfigured ? '留空则继续使用已保存令牌' : '请输入 API Token'"
+            :disabled="!mediaLibraryConfig.enabled"
+          />
+        </n-form-item>
+        <n-form-item v-if="mediaLibraryConfig.provider === 'plex'" label="Plex Section ID">
+          <n-input
+            v-model:value="mediaLibraryConfig.section_id"
+            placeholder="例如 1"
+            :disabled="!mediaLibraryConfig.enabled"
+          />
+        </n-form-item>
+        <n-form-item v-else label="媒体库标识（可选）">
+          <n-input
+            v-model:value="mediaLibraryConfig.library_id"
+            placeholder="留空刷新全部媒体库"
+            :disabled="!mediaLibraryConfig.enabled"
+          />
+        </n-form-item>
+        <n-form-item label="整理完成后自动刷新">
+          <n-switch
+            v-model:value="mediaLibraryConfig.refresh_on_import"
+            :disabled="!mediaLibraryConfig.enabled"
+          />
+        </n-form-item>
+        <n-form-item label="路径映射">
+          <div class="path-mapping-list">
+            <div
+              v-for="(mapping, index) in mediaLibraryConfig.path_mappings"
+              :key="index"
+              class="path-mapping-row"
+            >
+              <n-input
+                v-model:value="mapping.from"
+                placeholder="下载路径，如 /downloads"
+                :disabled="!mediaLibraryConfig.enabled"
+              />
+              <span class="mapping-arrow">→</span>
+              <n-input
+                v-model:value="mapping.to"
+                placeholder="媒体库路径，如 /media/anime"
+                :disabled="!mediaLibraryConfig.enabled"
+              />
+              <n-button
+                circle
+                secondary
+                size="small"
+                :disabled="!mediaLibraryConfig.enabled || mediaLibraryConfig.path_mappings.length <= 1"
+                @click="removePathMapping(index)"
+              >
+                <template #icon><n-icon><TrashOutline /></n-icon></template>
+              </n-button>
+            </div>
+            <n-button
+              secondary
+              size="small"
+              :disabled="!mediaLibraryConfig.enabled"
+              @click="addPathMapping"
+            >
+              添加映射
+            </n-button>
+          </div>
+          <template #feedback>
+            <n-text depth="3" style="font-size: 12px">
+              当 Auto-RSS 和媒体库容器看到的路径不同时配置映射，例如 /downloads → /media/anime。
+            </n-text>
+          </template>
+        </n-form-item>
+        <n-form-item>
+          <n-space>
+            <n-button type="primary" @click="saveMediaLibraryConfig">保存配置</n-button>
+            <n-button @click="testMediaLibraryConnection">测试连接</n-button>
+          </n-space>
+        </n-form-item>
+      </n-form>
+    </n-card>
+
     <n-card title="文件重命名规则" class="config-card">
       <n-form label-placement="top" class="config-form">
         <n-form-item label="模板预设">
@@ -222,9 +322,18 @@ import {
   NTag,
   NAlert,
   NText,
+  NIcon,
   useMessage
 } from 'naive-ui'
-import { configApi, rssApi, fileOrganizerApi, type SmartFetchConfig } from '@/api'
+import { TrashOutline } from '@vicons/ionicons5'
+import {
+  configApi,
+  rssApi,
+  fileOrganizerApi,
+  mediaLibraryApi,
+  type MediaLibraryConfig,
+  type SmartFetchConfig
+} from '@/api'
 
 const message = useMessage()
 
@@ -260,11 +369,29 @@ const fileOrganizerConfig = ref({
   dir: ''
 })
 
+const mediaLibraryConfig = ref<MediaLibraryConfig & { tokenConfigured?: boolean }>({
+  enabled: false,
+  provider: 'jellyfin',
+  base_url: '',
+  token: '',
+  tokenConfigured: false,
+  library_id: '',
+  section_id: '',
+  refresh_on_import: true,
+  path_mappings: [{ from: '/downloads', to: '/media/anime' }]
+})
+
 const logLevelOptions = [
   { label: 'Debug', value: 'debug' },
   { label: 'Info', value: 'info' },
   { label: 'Warn', value: 'warn' },
   { label: 'Error', value: 'error' }
+]
+
+const mediaLibraryProviderOptions = [
+  { label: 'Jellyfin', value: 'jellyfin' },
+  { label: 'Emby', value: 'emby' },
+  { label: 'Plex', value: 'plex' }
 ]
 
 // 重命名模板相关
@@ -473,6 +600,90 @@ const loadSmartFetchConfig = async () => {
   }
 }
 
+const loadMediaLibraryConfig = async () => {
+  try {
+    const res: any = await mediaLibraryApi.getConfig()
+    if (res.code === 0 && res.data) {
+      mediaLibraryConfig.value = {
+        enabled: Boolean(res.data.enabled),
+        provider: res.data.provider || 'jellyfin',
+        base_url: res.data.base_url || '',
+        token: '',
+        tokenConfigured: Boolean(res.data.token_configured),
+        library_id: res.data.library_id || '',
+        section_id: res.data.section_id || '',
+        refresh_on_import: res.data.refresh_on_import !== false,
+        path_mappings: Array.isArray(res.data.path_mappings) && res.data.path_mappings.length > 0
+          ? res.data.path_mappings
+          : [{ from: '/downloads', to: '/media/anime' }]
+      }
+    }
+  } catch (error) {
+    message.error('加载媒体库配置失败')
+  }
+}
+
+const addPathMapping = () => {
+  mediaLibraryConfig.value.path_mappings.push({ from: '', to: '' })
+}
+
+const removePathMapping = (index: number) => {
+  mediaLibraryConfig.value.path_mappings.splice(index, 1)
+  if (mediaLibraryConfig.value.path_mappings.length === 0) {
+    addPathMapping()
+  }
+}
+
+const buildMediaLibraryPayload = (): MediaLibraryConfig => ({
+  enabled: mediaLibraryConfig.value.enabled,
+  provider: mediaLibraryConfig.value.provider,
+  base_url: mediaLibraryConfig.value.base_url,
+  token: mediaLibraryConfig.value.token || undefined,
+  library_id: mediaLibraryConfig.value.library_id || undefined,
+  section_id: mediaLibraryConfig.value.section_id || undefined,
+  refresh_on_import: mediaLibraryConfig.value.refresh_on_import,
+  path_mappings: mediaLibraryConfig.value.path_mappings
+    .map((mapping) => ({
+      from: mapping.from.trim(),
+      to: mapping.to.trim()
+    }))
+    .filter((mapping) => mapping.from || mapping.to)
+})
+
+const saveMediaLibraryConfig = async () => {
+  try {
+    const res: any = await mediaLibraryApi.saveConfig(buildMediaLibraryPayload())
+    if (res.data) {
+      mediaLibraryConfig.value.token = ''
+      mediaLibraryConfig.value.tokenConfigured = Boolean(res.data.token_configured)
+    }
+    message.success('媒体库配置保存成功')
+  } catch (error: any) {
+    const errorMsg = error?.response?.data?.message || '保存媒体库配置失败'
+    message.error(errorMsg)
+  }
+}
+
+const testMediaLibraryConnection = async () => {
+  if (!mediaLibraryConfig.value.enabled) {
+    message.warning('请先启用媒体库刷新')
+    return
+  }
+  try {
+    message.loading('正在测试媒体库连接...', { duration: 0 })
+    await mediaLibraryApi.testConnection({
+      ...buildMediaLibraryPayload(),
+      enabled: true
+    })
+    message.destroyAll()
+    message.success('媒体库连接测试成功')
+  } catch (error: any) {
+    message.destroyAll()
+    const errorMsg = error?.response?.data?.message || '媒体库连接测试失败'
+    message.error(errorMsg)
+  }
+}
+
 const saveQBConfig = async () => {
   if (!qbConfig.value.host || !qbConfig.value.username || !qbConfig.value.password) {
     message.warning('请填写完整的 qBittorrent 配置信息')
@@ -593,6 +804,7 @@ const handleTriggerFileOrganizer = async () => {
 onMounted(() => {
   loadConfig()
   loadSmartFetchConfig()
+  loadMediaLibraryConfig()
   loadRenamePresets()
   loadRenameTemplate()
 })
@@ -614,6 +826,25 @@ onMounted(() => {
 
 .config-form {
   max-width: 600px;
+}
+
+.path-mapping-list {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.path-mapping-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.mapping-arrow {
+  color: #8a8f98;
+  font-size: 14px;
 }
 
 /* 移动端响应式 */

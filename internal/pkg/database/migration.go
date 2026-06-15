@@ -85,7 +85,20 @@ func RunMigrations(db *gorm.DB) error {
 			},
 		},
 		{
-			ID: "202606120001", // 智能拉取可视化与单订阅覆盖配置
+			ID: "202606120001", // 下载记录增加媒体库刷新状态
+			Migrate: func(tx *gorm.DB) error {
+				if err := tx.AutoMigrate(&model.Download{}); err != nil {
+					return err
+				}
+				return tx.Exec("CREATE INDEX IF NOT EXISTS idx_downloads_media_library_refresh_status ON downloads(media_library_refresh_status)").Error
+			},
+			Rollback: func(tx *gorm.DB) error {
+				tx.Exec("DROP INDEX IF EXISTS idx_downloads_media_library_refresh_status")
+				return nil
+			},
+		},
+		{
+			ID: "202606150001", // 智能拉取可视化与单订阅覆盖配置
 			Migrate: func(tx *gorm.DB) error {
 				if err := tx.AutoMigrate(&model.Subscription{}, &model.Config{}); err != nil {
 					return err

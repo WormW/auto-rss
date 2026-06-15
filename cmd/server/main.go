@@ -15,6 +15,7 @@ import (
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/downloader"
+	"github.com/WormW/auto-rss/internal/service/medialibrary"
 	"github.com/gin-gonic/gin"
 )
 
@@ -119,6 +120,7 @@ func run() error {
 	// 创建应用上下文
 	appCtx := app.NewContext(db, cfg, subscriptionRepo, downloadRepo, bangumiService)
 	appCtx.SetRenameTemplate(renameTemplate)
+	appCtx.SetMediaLibraryService(medialibrary.NewService(configRepo, downloadRepo))
 
 	// 初始化文件整理服务
 	if err := appCtx.InitializeFileOrganizer(); err != nil {

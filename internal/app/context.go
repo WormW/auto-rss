@@ -7,6 +7,7 @@ import (
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/bangumi"
+	"github.com/WormW/auto-rss/internal/service/medialibrary"
 	"github.com/WormW/auto-rss/internal/service/organizer"
 	"gorm.io/gorm"
 )
@@ -19,6 +20,7 @@ type Context struct {
 	subscriptionRepo repository.SubscriptionRepository
 	downloadRepo     repository.DownloadRepository
 	bangumiService   *bangumi.BangumiService
+	mediaLibrarySvc  *medialibrary.Service
 	renameTemplate   string
 	fileOrganizer    *organizer.FileOrganizer
 	shutdownHooks    []func()
@@ -40,6 +42,20 @@ func (ctx *Context) SetRenameTemplate(template string) {
 	ctx.mu.Lock()
 	defer ctx.mu.Unlock()
 	ctx.renameTemplate = template
+}
+
+// SetMediaLibraryService 设置媒体库刷新服务
+func (ctx *Context) SetMediaLibraryService(service *medialibrary.Service) {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	ctx.mediaLibrarySvc = service
+}
+
+// GetMediaLibraryService 获取媒体库刷新服务
+func (ctx *Context) GetMediaLibraryService() *medialibrary.Service {
+	ctx.mu.RLock()
+	defer ctx.mu.RUnlock()
+	return ctx.mediaLibrarySvc
 }
 
 // GetFileOrganizer 获取文件整理服务
@@ -98,6 +114,7 @@ func (ctx *Context) ReloadFileOrganizer() error {
 		ctx.db,
 		ctx.bangumiService,
 		ctx.renameTemplate,
+		ctx.mediaLibrarySvc,
 	)
 	if err != nil {
 		logger.Error("Failed to create file organizer", "error", err)
