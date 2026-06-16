@@ -47,7 +47,19 @@
                 <n-tag size="tiny" :type="getStatusConfig(item.status).type">
                   {{ getStatusConfig(item.status).text }}
                 </n-tag>
+                <n-tag
+                  size="tiny"
+                  :type="getMediaLibraryStatusConfig(item.media_library_refresh_status).type"
+                >
+                  {{ getMediaLibraryStatusConfig(item.media_library_refresh_status).text }}
+                </n-tag>
+                <n-tag size="tiny" :type="getMetadataStatusConfig(item).type">
+                  {{ getMetadataStatusConfig(item).text }}
+                </n-tag>
               </n-space>
+            </div>
+            <div v-if="item.media_library_path" class="card-library-path">
+              {{ item.media_library_path }}
             </div>
             <div class="card-actions">
               <n-button v-if="item.status === 'failed' || item.status === 'stalled'" text size="small" @click="openDiagnostics(item)">
@@ -57,6 +69,10 @@
               <n-button v-if="item.status === 'failed'" text size="small" type="warning" @click="handleRetry(item.id)">
                 <template #icon><n-icon><RefreshOutline /></n-icon></template>
                 重试
+              </n-button>
+              <n-button v-if="item.status === 'completed'" text size="small" @click="handleMediaRefresh(item.id)">
+                <template #icon><n-icon><SyncOutline /></n-icon></template>
+                刷新媒体库
               </n-button>
               <n-button text size="small" type="error" @click="handleDelete(item.id)">
                 <template #icon><n-icon><TrashOutline /></n-icon></template>
@@ -139,8 +155,8 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, h, onUnmounted } from 'vue'
 import { NButton, NDataTable, NSelect, NSpace, NTag, NDropdown, NTooltip, NIcon, NCard, NCheckbox, NSpin, NEmpty, NPagination, NModal, useMessage, useDialog } from 'naive-ui'
-import { InformationCircleOutline, RefreshOutline, TrashOutline } from '@vicons/ionicons5'
-import { downloadApi, type Download, type DownloadDiagnostics } from '@/api'
+import { InformationCircleOutline, RefreshOutline, SyncOutline, TrashOutline } from '@vicons/ionicons5'
+import { downloadApi, mediaLibraryApi, type Download, type DownloadDiagnostics } from '@/api'
 
 const message = useMessage()
 const dialog = useDialog()
@@ -202,6 +218,56 @@ const getDiagnosticTagType = (severity: DownloadDiagnostics['severity']) => {
     error: 'error'
   }
   return map[severity] || 'info'
+}
+
+const getMediaLibraryStatusConfig = (status?: string) => {
+  const statusMap: Record<string, { type: 'success' | 'warning' | 'error' | 'info', text: string }> = {
+    success: { type: 'success', text: '已入库刷新' },
+    failed: { type: 'error', text: '入库异常' },
+    disabled: { type: 'info', text: '未启用入库' },
+    pending: { type: 'warning', text: '待刷新' }
+  }
+  return statusMap[status || 'pending'] || { type: 'info', text: '未刷新' }
+}
+
+const getMediaLibraryTag = (row: Download) => {
+  const config = getMediaLibraryStatusConfig(row.media_library_refresh_status)
+  const detail = row.media_library_refresh_error || row.media_library_path || '暂无媒体库刷新记录'
+  return h(
+    NTooltip,
+    { trigger: 'hover' },
+    {
+      trigger: () => h(NTag, { type: config.type, size: 'small' }, { default: () => config.text }),
+      default: () => detail
+    }
+  )
+}
+
+const getMetadataStatusConfig = (row: Download) => {
+  const sub = row.subscription
+  if (!sub?.bangumi_id) {
+    return { type: 'warning' as const, text: '未匹配元数据' }
+  }
+  if (sub.bangumi_cover_local || sub.bangumi_cover) {
+    return { type: 'success' as const, text: '封面已匹配' }
+  }
+  return { type: 'info' as const, text: '元数据已匹配' }
+}
+
+const getMetadataTag = (row: Download) => {
+  const config = getMetadataStatusConfig(row)
+  const sub = row.subscription
+  const detail = sub?.bangumi_id
+    ? `Bangumi ID: ${sub.bangumi_id}${sub.bangumi_cover_local || sub.bangumi_cover ? '，已有封面' : '，暂无封面'}`
+    : '订阅尚未匹配 Bangumi 元数据'
+  return h(
+    NTooltip,
+    { trigger: 'hover' },
+    {
+      trigger: () => h(NTag, { type: config.type, size: 'small' }, { default: () => config.text }),
+      default: () => detail
+    }
+  )
 }
 
 const checkLabels: Record<string, string> = {
@@ -267,9 +333,27 @@ const columns = [
     render: (row: Download) => getStatusTag(row.status)
   },
   {
+    title: '媒体库',
+    key: 'media_library_refresh_status',
+    width: 130,
+    render: (row: Download) => getMediaLibraryTag(row)
+  },
+  {
+    title: '元数据',
+    key: 'metadata',
+    width: 130,
+    render: (row: Download) => getMetadataTag(row)
+  },
+  {
+    title: '媒体库路径',
+    key: 'media_library_path',
+    ellipsis: { tooltip: true },
+    render: (row: Download) => row.media_library_path || row.renamed_path || row.file_path || '-'
+  },
+  {
     title: '操作',
     key: 'actions',
-    width: 160,
+    width: 210,
     render: (row: Download) => {
       const buttons: Array<ReturnType<typeof h>> = []
       if (row.status === 'failed' || row.status === 'stalled') {
@@ -300,6 +384,22 @@ const columns = [
                 { icon: () => h(NIcon, null, { default: () => h(RefreshOutline) }) }
               ),
               default: () => '重试下载'
+            }
+          )
+        )
+      }
+      if (row.status === 'completed') {
+        buttons.push(
+          h(
+            NTooltip,
+            { trigger: 'hover' },
+            {
+              trigger: () => h(
+                NButton,
+                { size: 'small', circle: true, secondary: true, onClick: () => handleMediaRefresh(row.id) },
+                { icon: () => h(NIcon, null, { default: () => h(SyncOutline) }) }
+              ),
+              default: () => '刷新媒体库'
             }
           )
         )
@@ -336,6 +436,25 @@ const loadDownloads = async () => {
     downloads.value = []
   } finally {
     loading.value = false
+  }
+}
+
+const handleMediaRefresh = async (id: number) => {
+  try {
+    const res: any = await mediaLibraryApi.refreshDownload(id)
+    const result = res.data
+    if (result?.status === 'success') {
+      message.success('媒体库刷新已触发')
+    } else if (result?.status === 'disabled') {
+      message.info(result.message || '媒体库刷新未启用')
+    } else {
+      message.warning(result?.message || '媒体库刷新已处理')
+    }
+    loadDownloads()
+  } catch (error: any) {
+    const errorMsg = error?.response?.data?.message || '媒体库刷新失败'
+    message.error(errorMsg)
+    loadDownloads()
   }
 }
 
@@ -514,6 +633,15 @@ const handleClear = async (key: string) => {
 .card-info {
   margin-bottom: 8px;
   padding-left: 26px;
+}
+
+.card-library-path {
+  margin: 0 0 8px 26px;
+  color: #6b7280;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-all;
 }
 
 .card-actions {

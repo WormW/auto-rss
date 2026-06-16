@@ -136,6 +136,7 @@ func (s *scheduler) checkRSSFeeds() {
 	}
 
 	// 使用智能过滤器评估每个订阅
+	s.smartFetchFilter.LoadConfigFromDB(s.configRepo)
 	fetchStatuses, needsUpdateIndexes := s.smartFetchFilter.FilterSubscriptions(subscriptions)
 
 	// 保存需要更新的订阅（如刚完结的订阅需要更新 CompletedAt）

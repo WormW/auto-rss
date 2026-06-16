@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -27,6 +28,35 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	}
 
 	return db
+}
+
+type smartFetchConfigRepoStub struct {
+	values map[string]string
+}
+
+func (r *smartFetchConfigRepoStub) Get(key string) (*model.Config, error) {
+	if value, ok := r.values[key]; ok {
+		return &model.Config{Key: key, Value: value}, nil
+	}
+	return nil, errors.New("not found")
+}
+
+func (r *smartFetchConfigRepoStub) GetCached(key string) (string, error) {
+	cfg, err := r.Get(key)
+	if err != nil {
+		return "", err
+	}
+	return cfg.Value, nil
+}
+
+func (r *smartFetchConfigRepoStub) Set(key, value string) error { return nil }
+func (r *smartFetchConfigRepoStub) Delete(key string) error     { return nil }
+func (r *smartFetchConfigRepoStub) GetAll() ([]model.Config, error) {
+	configs := make([]model.Config, 0, len(r.values))
+	for key, value := range r.values {
+		configs = append(configs, model.Config{Key: key, Value: value})
+	}
+	return configs, nil
 }
 
 func TestMain(m *testing.M) {
@@ -167,6 +197,47 @@ func TestEvaluateSubscription_CompletedStopDaysZero(t *testing.T) {
 	// 但是会根据其他逻辑（如在活跃窗口等）决定是否拉取
 	// 这里主要看 Reason 不包含 "stop_checking"
 	assert.NotContains(t, status.FetchReason, "stop_checking", "Should not stop checking when CompletedStopDays=0")
+}
+
+func TestEvaluateSubscription_SmartFetchGlobalDisabled(t *testing.T) {
+	db := setupTestDB(t)
+	filter := NewSmartFetchFilter(repository.NewDownloadRepository(db))
+	filter.LoadConfigFromDB(&smartFetchConfigRepoStub{
+		values: map[string]string{
+			"smart_fetch.enabled": "false",
+		},
+	})
+
+	status, _ := filter.EvaluateSubscription(&model.Subscription{
+		ID:             1,
+		Name:           "全局禁用智能拉取",
+		TotalEpisodes:  12,
+		CurrentEpisode: 12,
+		AirDay:         "1",
+	})
+
+	assert.True(t, status.ShouldFetch)
+	assert.False(t, status.SmartFetchEnabled)
+	assert.Equal(t, "smart_fetch_disabled", status.FetchReason)
+	assert.NotEmpty(t, status.Explanation)
+}
+
+func TestEvaluateSubscription_SubscriptionOverrideNever(t *testing.T) {
+	db := setupTestDB(t)
+	filter := NewSmartFetchFilter(repository.NewDownloadRepository(db))
+
+	status, _ := filter.EvaluateSubscription(&model.Subscription{
+		ID:                 1,
+		Name:               "单订阅禁用智能拉取",
+		TotalEpisodes:      12,
+		CurrentEpisode:     12,
+		AirDay:             "1",
+		SmartFetchOverride: "never",
+	})
+
+	assert.True(t, status.ShouldFetch)
+	assert.False(t, status.SmartFetchEnabled)
+	assert.Equal(t, "smart_fetch_disabled", status.FetchReason)
 }
 
 func TestIsCompleted(t *testing.T) {

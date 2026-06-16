@@ -26,6 +26,7 @@ import (
 	"github.com/WormW/auto-rss/internal/service/calendar"
 	"github.com/WormW/auto-rss/internal/service/disk"
 	"github.com/WormW/auto-rss/internal/service/downloader"
+	"github.com/WormW/auto-rss/internal/service/medialibrary"
 	"github.com/WormW/auto-rss/internal/service/notification"
 	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/WormW/auto-rss/internal/service/scheduler"
@@ -100,6 +101,11 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	// 初始化通知服务
 	notificationSvc := notification.NewService(db)
 	wsHub := notificationSvc.GetWebSocketHub()
+	mediaLibrarySvc := appCtx.GetMediaLibraryService()
+	if mediaLibrarySvc == nil {
+		mediaLibrarySvc = medialibrary.NewService(configRepo, downloadRepo)
+		appCtx.SetMediaLibraryService(mediaLibrarySvc)
+	}
 
 	// 初始化日历服务
 	calendarSvc := calendar.NewCalendar(subscriptionRepo, downloadRepo)
@@ -113,7 +119,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	appCtx.RegisterShutdownHook(diskMonitor.Stop)
 
 	// 初始化下载监控服务（在 handler 之前，因为某些 handler 可能需要它）
-	downloadMonitor := downloader.NewDownloadMonitor(db, qbClient, downloadRepo, subscriptionRepo, configRepo, renameTemplate)
+	downloadMonitor := downloader.NewDownloadMonitor(db, qbClient, downloadRepo, subscriptionRepo, configRepo, renameTemplate, mediaLibrarySvc)
 	downloadMonitor.SetNotificationService(notificationSvc)
 	downloadMonitor.Start(30 * time.Second)
 	appCtx.RegisterShutdownHook(downloadMonitor.Stop)
@@ -140,6 +146,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	diskHandler := handler.NewDiskHandler(db, downloadRepo, subscriptionRepo, configRepo)
 	tagHandler := handler.NewTagHandler(subscriptionRepo)
 	scannerHandler := handler.NewScannerHandler(db, subscriptionRepo, downloadRepo, configRepo)
+	mediaLibraryHandler := handler.NewMediaLibraryHandler(mediaLibrarySvc, downloadRepo, subscriptionRepo)
 	authHandler := handler.NewAuthHandler(cfg, jwtService)
 	notificationHandler := handler.NewNotificationHandler(db, notificationSvc, wsHub, jwtService, cfg.AuthEnabled)
 	backupHandler := handler.NewBackupHandler(backup.NewService(db))
@@ -193,6 +200,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			subscriptions.POST("", subscriptionHandler.Create)
 			subscriptions.GET("", subscriptionHandler.List)
 			subscriptions.POST("/preview", subscriptionHandler.Preview)
+			subscriptions.GET("/smart-fetch/status", subscriptionHandler.ListSmartFetchStatus)
 			subscriptions.GET("/:id", subscriptionHandler.GetByID)
 			subscriptions.PUT("/:id", subscriptionHandler.Update)
 			subscriptions.DELETE("/:id", subscriptionHandler.Delete)
@@ -258,6 +266,8 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		{
 			configs.GET("", configHandler.GetAll)
 			configs.PUT("", configHandler.Update)
+			configs.GET("/smart-fetch", configHandler.GetSmartFetch)
+			configs.PUT("/smart-fetch", configHandler.UpdateSmartFetch)
 			configs.POST("/qbittorrent/test", configHandler.TestQBittorrent)
 			configs.POST("/qbittorrent/save", configHandler.SaveQBittorrentConfig)
 
@@ -334,6 +344,16 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			disks.PUT("/settings", diskHandler.UpdateSettings)
 			disks.POST("/cleanup", diskHandler.TriggerCleanup)
 			disks.GET("/history", diskHandler.GetHistory)
+		}
+
+		// 媒体库联动
+		mediaLibrary := protected.Group("/media-library")
+		{
+			mediaLibrary.GET("/config", mediaLibraryHandler.GetConfig)
+			mediaLibrary.PUT("/config", mediaLibraryHandler.SaveConfig)
+			mediaLibrary.POST("/test", mediaLibraryHandler.TestConnection)
+			mediaLibrary.POST("/downloads/:id/refresh", mediaLibraryHandler.RefreshDownload)
+			mediaLibrary.GET("/subscriptions/:id/status", mediaLibraryHandler.GetSubscriptionStatus)
 		}
 
 		// 标签管理

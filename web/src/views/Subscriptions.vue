@@ -267,6 +267,21 @@
                       <span>{{ getRssCheckWarningText(sub) }}</span>
                     </div>
 
+                    <div v-if="getSmartFetchStatus(sub.id)" class="smart-fetch-row">
+                      <div class="smart-fetch-main">
+                        <n-tag
+                          size="tiny"
+                          :type="getSmartFetchTagType(getSmartFetchStatus(sub.id))"
+                        >
+                          {{ getSmartFetchStatus(sub.id)?.should_fetch ? '本轮拉取' : '本轮跳过' }}
+                        </n-tag>
+                        <span>{{ getSmartFetchStatus(sub.id)?.explanation }}</span>
+                      </div>
+                      <span class="smart-fetch-next">
+                        {{ formatNextFetch(getSmartFetchStatus(sub.id)?.next_fetch_seconds) }}
+                      </span>
+                    </div>
+
                     <!-- 底部操作栏 -->
                     <div class="action-row">
                       <span v-if="sub.last_download_at" class="last-time">{{ formatTime(sub.last_download_at) }}</span>
@@ -395,6 +410,18 @@
                       <span :style="{ color: isSeasonComplete(sub) ? '#18a058' : '' }">
                         {{ sub.current_episode || 0 }} / {{ sub.total_episodes || '?' }}
                       </span>
+                    </div>
+                  </div>
+
+                  <div v-if="getSmartFetchStatus(sub.id)" class="smart-fetch-row compact">
+                    <div class="smart-fetch-main">
+                      <n-tag
+                        size="tiny"
+                        :type="getSmartFetchTagType(getSmartFetchStatus(sub.id))"
+                      >
+                        {{ getSmartFetchStatus(sub.id)?.should_fetch ? '本轮拉取' : '本轮跳过' }}
+                      </n-tag>
+                      <span>{{ getSmartFetchStatus(sub.id)?.explanation }}</span>
                     </div>
                   </div>
 
@@ -896,6 +923,17 @@
               <n-form-item label="启用">
                 <n-switch v-model:value="formData.enabled" />
               </n-form-item>
+
+              <n-form-item label="智能拉取">
+                <n-radio-group v-model:value="formData.smart_fetch_override" size="small">
+                  <n-radio-button
+                    v-for="option in smartFetchOverrideOptions"
+                    :key="option.value"
+                    :value="option.value"
+                    :label="option.label"
+                  />
+                </n-radio-group>
+              </n-form-item>
             </n-form>
 
             <div class="rule-preview" v-if="previewResult || previewLoading">
@@ -981,12 +1019,15 @@ import {
   NCheckbox,
   NButtonGroup,
   NDataTable,
+  NRadioButton,
+  NRadioGroup,
   useMessage,
   useDialog
 } from 'naive-ui'
 import {
   subscriptionApi,
   type DiagnosticStatus,
+  type SmartFetchStatus,
   type Subscription,
   type SubscriptionDiagnosticAction,
   type SubscriptionDiagnostics,
@@ -1021,6 +1062,7 @@ const dialog = useDialog()
 // 基础状态
 const loading = ref(false)
 const subscriptions = ref<Subscription[]>([])
+const smartFetchStatusMap = ref<Record<number, SmartFetchStatus>>({})
 const showModal = ref(false)
 const showRssStep = ref(true)
 const step2Loading = ref(false)
@@ -1094,6 +1136,11 @@ const statusOptions = [
   { label: '已完结', value: 'completed' },
   { label: '已禁用', value: 'disabled' }
 ]
+const smartFetchOverrideOptions = [
+  { label: '跟随全局', value: 'follow' },
+  { label: '强制启用', value: 'always' },
+  { label: '强制关闭', value: 'never' }
+]
 
 const previewActionConfig: Record<string, { label: string; type: 'success' | 'warning' | 'error' | 'info' | 'default' }> = {
   download: { label: '新增', type: 'success' },
@@ -1104,6 +1151,25 @@ const previewActionConfig: Record<string, { label: string; type: 'success' | 'wa
 
 const getPreviewActionConfig = (action: string) => {
   return previewActionConfig[action] || { label: action, type: 'default' as const }
+}
+
+const getSmartFetchStatus = (id: number) => smartFetchStatusMap.value[id]
+
+const getSmartFetchTagType = (status?: SmartFetchStatus): 'success' | 'warning' | 'error' | 'info' | 'default' => {
+  if (!status) return 'default'
+  if (!status.smart_fetch_enabled) return 'default'
+  if (status.should_fetch) return status.is_in_active_window ? 'success' : 'info'
+  return status.is_completed ? 'default' : 'warning'
+}
+
+const formatNextFetch = (seconds?: number) => {
+  if (seconds === undefined || seconds === null) return ''
+  if (seconds <= 0) return '下次检查: 即刻'
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `下次检查: ${minutes} 分钟后`
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return `下次检查: ${hours} 小时后`
+  return `下次检查: ${Math.round(hours / 24)} 天后`
 }
 
 // 统计计算
@@ -1279,6 +1345,25 @@ const listColumns = computed<DataTableColumns<Subscription>>(() => [
     )
   },
   {
+    title: '智能拉取',
+    key: 'smart_fetch',
+    width: 260,
+    render: (row) => {
+      const status = getSmartFetchStatus(row.id)
+      if (!status) {
+        return <span style="font-size: 12px; color: #999;">计算中</span>
+      }
+      return (
+        <div class="list-smart-fetch">
+          <NTag size="tiny" type={getSmartFetchTagType(status)}>
+            {status.should_fetch ? '拉取' : '跳过'}
+          </NTag>
+          <span>{status.explanation}</span>
+        </div>
+      )
+    }
+  },
+  {
     title: '更新时间',
     key: 'update_time',
     width: 120,
@@ -1339,6 +1424,8 @@ const formData = ref({
   collection_torrent: '',
   filter_rules: '',
   enabled: true,
+  smart_fetch_enabled: null as boolean | null,
+  smart_fetch_override: 'follow' as 'follow' | 'always' | 'never',
   rss_source_id: undefined as number | undefined,
   source_type: 'manual'
 })
@@ -1679,6 +1766,8 @@ const showAddDialog = () => {
     collection_torrent: '',
     filter_rules: '',
     enabled: true,
+    smart_fetch_enabled: null,
+    smart_fetch_override: 'follow',
     rss_source_id: undefined,
     source_type: 'manual'
   }
@@ -1702,6 +1791,8 @@ const handleSearchSubscribe = (data: {
     fansub: data.fansub,
     language: data.language || '',
     language_preference: 'auto',
+    smart_fetch_enabled: null,
+    smart_fetch_override: 'follow',
     rss_source_id: data.rss_source_id,
     source_type: data.rss_source_id ? 'rss_source' : 'manual'
   }
@@ -1731,6 +1822,8 @@ const handleEdit = (sub: Subscription) => {
     collection_torrent: sub.collection_torrent || '',
     filter_rules: sub.filter_rules || '',
     enabled: sub.enabled !== false,
+    smart_fetch_enabled: sub.smart_fetch_enabled ?? null,
+    smart_fetch_override: sub.smart_fetch_override || 'follow',
     rss_source_id: sub.rss_source_id,
     source_type: sub.source_type || 'manual'
   }
@@ -1810,10 +1903,23 @@ const loadSubscriptions = async () => {
   try {
     const res: any = await subscriptionApi.list(1, 999)
     subscriptions.value = res.data?.list || []
+    await loadSmartFetchStatus()
   } catch (error: any) {
     message.error(error.message || '加载订阅列表失败')
   } finally {
     loading.value = false
+  }
+}
+
+const loadSmartFetchStatus = async () => {
+  try {
+    const res: any = await subscriptionApi.smartFetchStatus()
+    const list = res.data?.list || []
+    smartFetchStatusMap.value = Object.fromEntries(
+      list.map((item: SmartFetchStatus) => [item.subscription_id, item])
+    )
+  } catch (error) {
+    smartFetchStatusMap.value = {}
   }
 }
 
@@ -2058,6 +2164,8 @@ onMounted(() => {
       collection_torrent: '',
       filter_rules: '',
       enabled: true,
+      smart_fetch_enabled: null,
+      smart_fetch_override: 'follow',
       rss_source_id: route.query.rss_source_id ? parseInt(route.query.rss_source_id as string) : undefined,
       source_type: 'rss_source'
     }
@@ -2460,6 +2568,49 @@ onMounted(() => {
   gap: 4px;
   font-size: 11px;
   color: #f0a020;
+}
+
+.smart-fetch-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid #edf0f5;
+  border-radius: 6px;
+  background: #fafafa;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #4b5563;
+}
+
+.smart-fetch-row.compact {
+  padding: 6px 8px;
+}
+
+.smart-fetch-main,
+.list-smart-fetch {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.smart-fetch-main span,
+.list-smart-fetch span {
+  overflow-wrap: anywhere;
+}
+
+.smart-fetch-next {
+  flex-shrink: 0;
+  color: #8a8f99;
+  white-space: nowrap;
+}
+
+.list-smart-fetch {
+  font-size: 12px;
+  line-height: 1.45;
+  color: #4b5563;
 }
 
 /* 操作行 */

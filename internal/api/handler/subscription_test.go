@@ -41,6 +41,10 @@ type mockRSSParser struct {
 	err   error
 }
 
+type smartFetchConfigRepo struct {
+	values map[string]string
+}
+
 func (m *mockRSSParser) FetchAndParse(rssURL string) ([]rss.RSSItem, error) {
 	return m.items, m.err
 }
@@ -63,6 +67,42 @@ func (m *mockRSSParser) ExtractEpisode(title string) int {
 
 func (m *mockRSSParser) SetProxy(proxyURL string) error {
 	return nil
+}
+
+func (r *smartFetchConfigRepo) Get(key string) (*model.Config, error) {
+	if value, ok := r.values[key]; ok {
+		return &model.Config{Key: key, Value: value}, nil
+	}
+	return nil, gorm.ErrRecordNotFound
+}
+
+func (r *smartFetchConfigRepo) GetCached(key string) (string, error) {
+	cfg, err := r.Get(key)
+	if err != nil {
+		return "", err
+	}
+	return cfg.Value, nil
+}
+
+func (r *smartFetchConfigRepo) Set(key, value string) error {
+	if r.values == nil {
+		r.values = make(map[string]string)
+	}
+	r.values[key] = value
+	return nil
+}
+
+func (r *smartFetchConfigRepo) Delete(key string) error {
+	delete(r.values, key)
+	return nil
+}
+
+func (r *smartFetchConfigRepo) GetAll() ([]model.Config, error) {
+	configs := make([]model.Config, 0, len(r.values))
+	for key, value := range r.values {
+		configs = append(configs, model.Config{Key: key, Value: value})
+	}
+	return configs, nil
 }
 
 func (m *mockSubscriptionRepo) Create(subscription *model.Subscription) error {
@@ -256,6 +296,59 @@ func TestSubscriptionHandler_GetByID(t *testing.T) {
 			assert.Equal(t, tt.wantStatus, w.Code)
 		})
 	}
+}
+
+func TestSubscriptionHandler_ListSmartFetchStatus(t *testing.T) {
+	smartDisabled := false
+	mockRepo := &mockSubscriptionRepo{
+		getWithCountFunc: func() ([]repository.SubscriptionWithStats, error) {
+			return []repository.SubscriptionWithStats{
+				{
+					Subscription: model.Subscription{
+						ID:                 1,
+						Name:               "Smart Disabled",
+						TotalEpisodes:      12,
+						CurrentEpisode:     12,
+						AirDay:             "1",
+						SmartFetchEnabled:  &smartDisabled,
+						SmartFetchOverride: "never",
+					},
+				},
+			}, nil
+		},
+	}
+	handler := NewSubscriptionHandler(
+		mockRepo,
+		&mockDownloadRepo{},
+		&smartFetchConfigRepo{values: map[string]string{"smart_fetch.enabled": "true"}},
+		nil,
+		"",
+	)
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/subscriptions/smart-fetch/status", handler.ListSmartFetchStatus)
+
+	req := httptest.NewRequest(http.MethodGet, "/subscriptions/smart-fetch/status", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			List []SubscriptionSmartFetchStatus `json:"list"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Data.List, 1)
+	assert.Equal(t, 0, resp.Code)
+	assert.Equal(t, uint(1), resp.Data.List[0].SubscriptionID)
+	assert.False(t, resp.Data.List[0].SmartFetchEnabled)
+	assert.True(t, resp.Data.List[0].ShouldFetch)
+	assert.Equal(t, "smart_fetch_disabled", resp.Data.List[0].Reason)
+	assert.NotEmpty(t, resp.Data.List[0].Explanation)
 }
 
 func TestSubscriptionHandler_PreviewAppliesRules(t *testing.T) {
