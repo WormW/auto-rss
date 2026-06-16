@@ -235,6 +235,7 @@ import {
   Leaf,
   LogOutOutline,
   PersonOutline,
+  RocketOutline,
   MenuOutline,
   CloudOfflineOutline,
   RefreshOutline
@@ -399,6 +400,11 @@ const menuOptions: MenuOption[] = [
 
 const userOptions = [
   {
+    label: '配置向导',
+    key: 'onboarding',
+    icon: renderIcon(RocketOutline)
+  },
+  {
     label: '个人资料',
     key: 'profile',
     icon: renderIcon(PersonOutline)
@@ -451,6 +457,10 @@ watch(hideShell, (isHidden) => {
 })
 
 const handleUserSelect = async (key: string) => {
+  if (key === 'onboarding') {
+    await router.push({ name: 'onboarding' })
+    return
+  }
   if (key === 'logout') {
     disconnectWebSocket()
     await authApi.logout()

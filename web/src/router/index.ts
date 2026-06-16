@@ -1,5 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import { authApi } from '@/api'
+import { authApi, onboardingApi, type OnboardingStatus } from '@/api'
 import { hasAuthTokens } from '@/services/auth-state'
 
 const router = createRouter({
@@ -14,6 +14,12 @@ const router = createRouter({
       name: 'login',
       component: () => import('@/views/Login.vue'),
       meta: { public: true, hideShell: true }
+    },
+    {
+      path: '/onboarding',
+      name: 'onboarding',
+      component: () => import('@/views/Onboarding.vue'),
+      meta: { hideShell: true }
     },
     {
       path: '/rss-sources',
@@ -65,12 +71,20 @@ const router = createRouter({
 
 router.beforeEach(async (to) => {
   const redirectTarget = typeof to.query.redirect === 'string' ? to.query.redirect : '/rss-sources'
+  const shouldCheckOnboarding = to.name !== 'login' && to.name !== 'onboarding'
 
   try {
     const status = await authApi.status()
     if (!status.auth_enabled) {
       if (to.name === 'login') {
         return { name: 'rss-sources' }
+      }
+      if (shouldCheckOnboarding) {
+        const onboardingResponse: any = await onboardingApi.status()
+        const onboardingStatus = onboardingResponse.data as OnboardingStatus
+        if (onboardingStatus.should_show) {
+          return { name: 'onboarding', query: { redirect: to.fullPath } }
+        }
       }
       return true
     }
@@ -81,6 +95,14 @@ router.beforeEach(async (to) => {
 
     if (!hasAuthTokens()) {
       return { name: 'login', query: { redirect: to.fullPath } }
+    }
+
+    if (shouldCheckOnboarding) {
+      const onboardingResponse: any = await onboardingApi.status()
+      const onboardingStatus = onboardingResponse.data as OnboardingStatus
+      if (onboardingStatus.should_show) {
+        return { name: 'onboarding', query: { redirect: to.fullPath } }
+      }
     }
 
     return true

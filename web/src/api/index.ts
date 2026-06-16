@@ -344,6 +344,45 @@ export interface SubscriptionRetryFailedResponse {
   results: SubscriptionRetryFailedResult[]
 }
 
+export interface OnboardingStep {
+  key: string
+  label: string
+  complete: boolean
+  message: string
+}
+
+export interface OnboardingDownloadPathStatus {
+  path: string
+  set: boolean
+  exists: boolean
+  is_dir: boolean
+  writable: boolean
+  error?: string
+}
+
+export interface OnboardingStatus {
+  completed: boolean
+  skipped: boolean
+  should_show: boolean
+  missing: string[]
+  steps: OnboardingStep[]
+  qbittorrent: {
+    configured: boolean
+    host: string
+    username: string
+    message: string
+  }
+  download_path: OnboardingDownloadPathStatus
+  rename_template: {
+    configured: boolean
+    template: string
+    message: string
+  }
+  rss_source_count: number
+  subscription_count: number
+  notification_count: number
+}
+
 export interface SmartFetchStatus {
   subscription_id: number
   should_fetch: boolean
@@ -459,6 +498,17 @@ export const mediaLibraryApi = {
 export const rssApi = {
   refresh: () =>
     api.post('/rss/refresh')
+}
+
+export const onboardingApi = {
+  status: () =>
+    api.get('/onboarding/status'),
+  skip: () =>
+    api.post('/onboarding/skip'),
+  complete: () =>
+    api.post('/onboarding/complete'),
+  validateDownloadPath: (path: string) =>
+    api.post('/onboarding/download-path/validate', { path })
 }
 
 export const configApi = {
