@@ -274,14 +274,19 @@
             </n-form>
 
             <n-result
-              status="success"
-              title="配置可以收尾"
-              description="完成后不会再次自动弹出向导，可从系统配置继续调整高级选项。"
+              :status="canFinishRequiredSetup ? 'success' : 'warning'"
+              :title="canFinishRequiredSetup ? '配置可以收尾' : '还有必需配置未完成'"
+              :description="finishDescription"
             >
               <template #footer>
                 <n-space justify="center">
                   <n-button @click="goStep('rename')">返回检查</n-button>
-                  <n-button type="primary" @click="finishOnboarding" :loading="finishing">
+                  <n-button
+                    type="primary"
+                    @click="finishOnboarding"
+                    :loading="finishing"
+                    :disabled="!canFinishRequiredSetup"
+                  >
                     完成并进入订阅
                   </n-button>
                 </n-space>
@@ -453,6 +458,15 @@ const isStepDone = (key: string) => {
   }
   return status.value?.steps.some(step => step.key === key && step.complete) || false
 }
+
+const missingRequiredSteps = computed(() => status.value?.steps.filter(step => !step.complete) || [])
+const canFinishRequiredSetup = computed(() => missingRequiredSteps.value.length === 0)
+const finishDescription = computed(() => {
+  if (canFinishRequiredSetup.value) {
+    return '完成后不会再次自动弹出向导，可从系统配置继续调整高级选项。'
+  }
+  return `请先完成：${missingRequiredSteps.value.map(step => step.label).join('、')}`
+})
 
 const goStep = (key: string) => {
   const index = steps.findIndex(step => step.key === key)
@@ -835,13 +849,24 @@ const handleSkip = async () => {
 }
 
 const finishOnboarding = async () => {
+  if (!canFinishRequiredSetup.value) {
+    message.warning(finishDescription.value)
+    return
+  }
+
   finishing.value = true
   try {
     await onboardingApi.complete()
     message.success('首次启动向导已完成')
     await router.replace({ name: 'subscriptions' })
-  } catch {
-    message.error('保存完成状态失败')
+  } catch (error: any) {
+    const missing = error?.response?.data?.data?.missing
+    if (Array.isArray(missing) && missing.length > 0) {
+      message.error(`必需配置尚未完成：${missing.join(', ')}`)
+      await refreshStatus()
+      return
+    }
+    message.error(error?.response?.data?.message || '保存完成状态失败')
   } finally {
     finishing.value = false
   }
