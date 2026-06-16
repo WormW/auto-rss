@@ -42,6 +42,7 @@ type DownloadMonitor struct {
 	renameService    *RenameService
 	retryService     *RetryService
 	notificationSvc  NotificationService
+	mediaLibrarySvc  MediaLibraryRefresher
 	ticker           *time.Ticker
 	stopChan         chan struct{}
 	// New service interfaces
@@ -57,9 +58,14 @@ func NewDownloadMonitor(
 	subscriptionRepo repository.SubscriptionRepository,
 	configRepo repository.ConfigRepository,
 	renameTemplate string,
+	mediaLibrarySvc ...MediaLibraryRefresher,
 ) *DownloadMonitor {
 	retrySvc := NewRetryService(downloadRepo)
 	renameSvc := NewRenameService(renameTemplate)
+	var mediaSvc MediaLibraryRefresher
+	if len(mediaLibrarySvc) > 0 {
+		mediaSvc = mediaLibrarySvc[0]
+	}
 
 	return &DownloadMonitor{
 		db:               db,
@@ -69,6 +75,7 @@ func NewDownloadMonitor(
 		configRepo:       configRepo,
 		retryService:     retrySvc,
 		renameService:    renameSvc,
+		mediaLibrarySvc:  mediaSvc,
 		stopChan:         make(chan struct{}),
 	}
 }
@@ -78,7 +85,7 @@ func (m *DownloadMonitor) SetNotificationService(svc NotificationService) {
 	m.notificationSvc = svc
 	// Initialize services that need notification service
 	m.statusSync = NewStatusSync(m.downloadRepo, svc)
-	m.completionHandler = NewCompletionHandler(m.subscriptionRepo, m.downloadRepo, svc, m.renameService, m.qbClient, m.db)
+	m.completionHandler = NewCompletionHandler(m.subscriptionRepo, m.downloadRepo, svc, m.renameService, m.qbClient, m.db, m.mediaLibrarySvc)
 }
 
 // Start 启动监控服务

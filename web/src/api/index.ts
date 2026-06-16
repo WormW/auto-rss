@@ -178,6 +178,10 @@ export interface Download {
   torrent_hash: string
   file_path: string
   renamed_path: string
+  media_library_path: string
+  media_library_refresh_status: 'pending' | 'disabled' | 'success' | 'failed' | ''
+  media_library_refresh_error: string
+  media_library_refreshed_at?: string
   status: string
   qb_task_id: string
   error_message: string
@@ -190,6 +194,7 @@ export interface Download {
   next_retry_at?: string
   last_error?: string
   retry_reason?: string
+  subscription?: Subscription
 }
 
 export interface SubscriptionPreviewItem {
@@ -337,6 +342,32 @@ export interface SubscriptionRetryFailedResponse {
   results: SubscriptionRetryFailedResult[]
 }
 
+export interface MediaLibraryPathMapping {
+  from: string
+  to: string
+}
+
+export interface MediaLibraryConfig {
+  enabled: boolean
+  provider: 'jellyfin' | 'emby' | 'plex'
+  base_url: string
+  token?: string
+  token_configured?: boolean
+  username?: string
+  library_id?: string
+  section_id?: string
+  path_mappings: MediaLibraryPathMapping[]
+  refresh_on_import: boolean
+}
+
+export interface MediaLibraryRefreshResult {
+  enabled: boolean
+  status: 'pending' | 'disabled' | 'success' | 'failed'
+  message: string
+  path: string
+  refreshed_at?: string
+}
+
 export const subscriptionApi = {
   list: (page = 1, pageSize = 20) =>
     api.get('/subscriptions', { params: { page, page_size: pageSize } }),
@@ -377,6 +408,19 @@ export const downloadApi = {
     api.post('/downloads/batch-delete', { ids }),
   clear: (status?: string) =>
     api.delete('/downloads/clear', { params: { status } })
+}
+
+export const mediaLibraryApi = {
+  getConfig: () =>
+    api.get('/media-library/config'),
+  saveConfig: (config: MediaLibraryConfig) =>
+    api.put('/media-library/config', config),
+  testConnection: (config: MediaLibraryConfig) =>
+    api.post('/media-library/test', config),
+  refreshDownload: (id: number) =>
+    api.post(`/media-library/downloads/${id}/refresh`),
+  getSubscriptionStatus: (id: number) =>
+    api.get(`/media-library/subscriptions/${id}/status`)
 }
 
 export const rssApi = {
