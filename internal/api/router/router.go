@@ -112,7 +112,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	calendarSvc.SetNotificationService(notificationSvc)
 
 	// 初始化磁盘监控服务
-	diskMonitor := disk.NewMonitor(downloadRepo, subscriptionRepo, configRepo)
+	diskMonitor := disk.NewMonitor(db, downloadRepo, subscriptionRepo, configRepo)
 	_ = diskMonitor.LoadConfig()
 	diskMonitor.SetNotificationService(notificationSvc)
 	diskMonitor.Start()

@@ -1,11 +1,18 @@
 package disk
 
 import (
+	"encoding/json"
+	"encoding/xml"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -13,6 +20,7 @@ import (
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/repository"
+	"gorm.io/gorm"
 )
 
 const (
@@ -34,12 +42,92 @@ const (
 
 // DiskInfo 磁盘信息
 type DiskInfo struct {
-	Path       string  `json:"path"`
-	TotalGB    float64 `json:"total_gb"`
-	UsedGB     float64 `json:"used_gb"`
-	FreeGB     float64 `json:"free_gb"`
+	Path         string  `json:"path"`
+	TotalGB      float64 `json:"total_gb"`
+	UsedGB       float64 `json:"used_gb"`
+	FreeGB       float64 `json:"free_gb"`
+	TotalBytes   int64   `json:"total_bytes"`
+	UsedBytes    int64   `json:"used_bytes"`
+	FreeBytes    int64   `json:"free_bytes"`
 	UsagePercent float64 `json:"usage_percent"`
-	Status     string  `json:"status"`
+	Status       string  `json:"status"`
+}
+
+const (
+	CleanupTriggerManual = "manual"
+	CleanupTriggerAuto   = "auto"
+
+	MediaLibraryStatusUnconfigured = "unconfigured"
+	MediaLibraryStatusConnected    = "connected"
+	MediaLibraryStatusFailed       = "failed"
+)
+
+// CleanupOptions controls a cleanup run.
+type CleanupOptions struct {
+	Trigger         string
+	Strategy        CleanupStrategy
+	KeepDays        int
+	KeepGB          int64
+	DownloadPath    string
+	ProtectWatching bool
+}
+
+// CleanupResult is shared by manual and automatic cleanup callers.
+type CleanupResult struct {
+	Cleaned            bool          `json:"cleaned"`
+	DeletedCount       int           `json:"deleted_count"`
+	SkippedCount       int           `json:"skipped_count"`
+	FreedBytes         int64         `json:"freed_bytes"`
+	BeforeFreeGB       float64       `json:"before_free_gb"`
+	AfterFreeGB        float64       `json:"after_free_gb"`
+	BeforeFreeBytes    int64         `json:"before_free_bytes"`
+	AfterFreeBytes     int64         `json:"after_free_bytes"`
+	MediaLibraryStatus string        `json:"media_library_status"`
+	Items              []CleanupItem `json:"items"`
+}
+
+// CleanupItem records the outcome for a single candidate.
+type CleanupItem struct {
+	DownloadID uint   `json:"download_id"`
+	Path       string `json:"path"`
+	Action     string `json:"action"`
+	Reason     string `json:"reason,omitempty"`
+	FreedBytes int64  `json:"freed_bytes"`
+}
+
+type mediaLibraryState struct {
+	Status              string
+	Message             string
+	ProtectedPaths      map[string]struct{}
+	ConservativeSkipAll bool
+}
+
+func (s mediaLibraryState) IsProtected(download model.Download) bool {
+	if len(s.ProtectedPaths) == 0 {
+		return false
+	}
+	paths := []string{download.FilePath, download.RenamedPath}
+	for _, p := range paths {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			continue
+		}
+		if realPath, err := filepath.EvalSymlinks(abs); err == nil {
+			abs = realPath
+		}
+		if _, ok := s.ProtectedPaths[abs]; ok {
+			return true
+		}
+		for protected := range s.ProtectedPaths {
+			if isSameOrChild(abs, protected) || isSameOrChild(protected, abs) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // CleanupStrategy 清理策略类型
@@ -56,15 +144,15 @@ const (
 
 // Config 磁盘监控配置
 type Config struct {
-	Enabled                 bool            `json:"enabled"`                  // 是否启用监控
-	WarningThresholdGB      int64           `json:"warning_threshold_gb"`     // 警告阈值
-	CriticalThresholdGB     int64           `json:"critical_threshold_gb"`    // 危险阈值
-	AutoCleanupEnabled      bool            `json:"auto_cleanup_enabled"`     // 自动清理开关
-	CleanupStrategy         CleanupStrategy `json:"cleanup_strategy"`         // 清理策略
-	CleanupKeepDays         int             `json:"cleanup_keep_days"`        // 保留天数
-	CleanupKeepGB           int64           `json:"cleanup_keep_gb"`          // 预留空间
-	CleanupProtectWatching  bool            `json:"cleanup_protect_watching"` // 保护正在观看的
-	PauseOnCritical         bool            `json:"pause_on_critical"`        // 危险时暂停下载
+	Enabled                bool            `json:"enabled"`                  // 是否启用监控
+	WarningThresholdGB     int64           `json:"warning_threshold_gb"`     // 警告阈值
+	CriticalThresholdGB    int64           `json:"critical_threshold_gb"`    // 危险阈值
+	AutoCleanupEnabled     bool            `json:"auto_cleanup_enabled"`     // 自动清理开关
+	CleanupStrategy        CleanupStrategy `json:"cleanup_strategy"`         // 清理策略
+	CleanupKeepDays        int             `json:"cleanup_keep_days"`        // 保留天数
+	CleanupKeepGB          int64           `json:"cleanup_keep_gb"`          // 预留空间
+	CleanupProtectWatching bool            `json:"cleanup_protect_watching"` // 保护正在观看的
+	PauseOnCritical        bool            `json:"pause_on_critical"`        // 危险时暂停下载
 }
 
 // downloadPaused 全局原子标志，用于暂停新下载
@@ -87,6 +175,7 @@ func DefaultConfig() *Config {
 
 // Monitor 磁盘监控服务
 type Monitor struct {
+	db               *gorm.DB
 	config           *Config
 	downloadRepo     repository.DownloadRepository
 	subscriptionRepo repository.SubscriptionRepository
@@ -104,11 +193,13 @@ type NotificationService interface {
 
 // NewMonitor 创建磁盘监控服务
 func NewMonitor(
+	db *gorm.DB,
 	downloadRepo repository.DownloadRepository,
 	subscriptionRepo repository.SubscriptionRepository,
 	configRepo repository.ConfigRepository,
 ) *Monitor {
 	return &Monitor{
+		db:               db,
 		config:           DefaultConfig(),
 		downloadRepo:     downloadRepo,
 		subscriptionRepo: subscriptionRepo,
@@ -160,6 +251,24 @@ func (m *Monitor) LoadConfig() error {
 	if cfg, err := m.configRepo.Get("disk.cleanup_keep_days"); err == nil && cfg != nil {
 		if val, err := strconv.Atoi(cfg.Value); err == nil {
 			m.config.CleanupKeepDays = val
+		}
+	}
+
+	if cfg, err := m.configRepo.Get("disk.cleanup_keep_gb"); err == nil && cfg != nil {
+		if val, err := strconv.ParseInt(cfg.Value, 10, 64); err == nil {
+			m.config.CleanupKeepGB = val
+		}
+	}
+
+	if cfg, err := m.configRepo.Get("disk.cleanup_protect_watching"); err == nil && cfg != nil {
+		if val, err := strconv.ParseBool(cfg.Value); err == nil {
+			m.config.CleanupProtectWatching = val
+		}
+	}
+
+	if cfg, err := m.configRepo.Get("disk.pause_on_critical"); err == nil && cfg != nil {
+		if val, err := strconv.ParseBool(cfg.Value); err == nil {
+			m.config.PauseOnCritical = val
 		}
 	}
 
@@ -222,6 +331,10 @@ func (m *Monitor) checkDisk() {
 		"usage_percent", fmt.Sprintf("%.1f%%", diskInfo.UsagePercent),
 		"status", diskInfo.Status)
 
+	if err := m.RecordDiskSample(downloadPath, diskInfo); err != nil {
+		logger.Warn("Failed to persist disk sample", "error", err.Error())
+	}
+
 	// 检查状态变化
 	if diskInfo.Status != m.lastStatus {
 		m.handleStatusChange(diskInfo)
@@ -230,7 +343,9 @@ func (m *Monitor) checkDisk() {
 
 	// 如果处于危险状态且启用了自动清理
 	if diskInfo.Status == StatusCritical && m.config.AutoCleanupEnabled {
-		m.performCleanup(diskInfo)
+		if _, err := m.RunCleanup(CleanupOptions{Trigger: CleanupTriggerAuto, ProtectWatching: m.config.CleanupProtectWatching}); err != nil {
+			logger.Error("Auto cleanup failed", "error", err.Error())
+		}
 	}
 }
 
@@ -275,9 +390,63 @@ func (m *Monitor) GetDiskInfo(path string) (*DiskInfo, error) {
 		TotalGB:      totalGB,
 		UsedGB:       usedGB,
 		FreeGB:       freeGB,
+		TotalBytes:   int64(totalBytes),
+		UsedBytes:    int64(usedBytes),
+		FreeBytes:    int64(freeBytes),
 		UsagePercent: usagePercent,
 		Status:       status,
 	}, nil
+}
+
+// RecordDiskSample persists a disk reading for trend history.
+func (m *Monitor) RecordDiskSample(downloadPath string, info *DiskInfo) error {
+	if m.db == nil || info == nil {
+		return nil
+	}
+	return m.db.Create(&model.DiskSample{
+		Path:         info.Path,
+		DownloadPath: downloadPath,
+		TotalBytes:   info.TotalBytes,
+		UsedBytes:    info.UsedBytes,
+		FreeBytes:    info.FreeBytes,
+		UsagePercent: info.UsagePercent,
+		Status:       info.Status,
+		CreatedAt:    time.Now(),
+	}).Error
+}
+
+// ListDiskSamples returns recent disk samples, newest first unless callers reorder them.
+func (m *Monitor) ListDiskSamples(limit int) ([]model.DiskSample, error) {
+	if m.db == nil {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	var samples []model.DiskSample
+	err := m.db.Order("created_at DESC").Limit(limit).Find(&samples).Error
+	return samples, err
+}
+
+// ListCleanupRecords returns recent cleanup summaries.
+func (m *Monitor) ListCleanupRecords(offset, limit int) ([]model.DiskCleanupRecord, int64, error) {
+	if m.db == nil {
+		return nil, 0, nil
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	var records []model.DiskCleanupRecord
+	var total int64
+	query := m.db.Model(&model.DiskCleanupRecord{})
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	err := query.Order("created_at DESC").Offset(offset).Limit(limit).Find(&records).Error
+	return records, total, err
 }
 
 // handleStatusChange 处理状态变化
@@ -315,175 +484,440 @@ func (m *Monitor) handleStatusChange(info *DiskInfo) {
 	}
 }
 
-// performCleanup 执行清理
-func (m *Monitor) performCleanup(info *DiskInfo) {
-	logger.Info("Starting auto cleanup",
-		"strategy", m.config.CleanupStrategy,
-		"free_gb", fmt.Sprintf("%.2f", info.FreeGB))
-
-	var cleanedCount int
-	var cleanedGB float64
-
-	switch m.config.CleanupStrategy {
-	case CleanupByAge:
-		cleanedCount, cleanedGB = m.cleanupByAge()
-	case CleanupBySpace:
-		cleanedCount, cleanedGB = m.cleanupBySpace(info)
-	case CleanupHybrid:
-		cleanedCount, cleanedGB = m.cleanupHybrid(info)
+// RunCleanup executes cleanup and persists a summary record.
+func (m *Monitor) RunCleanup(opts CleanupOptions) (*CleanupResult, error) {
+	if opts.Trigger == "" {
+		opts.Trigger = CleanupTriggerManual
 	}
-
-	logger.Info("Auto cleanup completed",
-		"cleaned_count", cleanedCount,
-		"cleaned_gb", fmt.Sprintf("%.2f", cleanedGB))
-
-	// 发送清理报告
-	if cleanedCount > 0 && m.notificationSvc != nil {
-		m.sendCleanupNotification(cleanedCount, cleanedGB)
+	if opts.Strategy == "" {
+		opts.Strategy = m.config.CleanupStrategy
 	}
-}
-
-// cleanupByAge 按年龄清理
-func (m *Monitor) cleanupByAge() (int, float64) {
-	cutoffTime := time.Now().AddDate(0, 0, -m.config.CleanupKeepDays)
-
-	// 获取已完成的下载任务
-	downloads, _, err := m.downloadRepo.List(0, 1000, "completed")
+	if opts.KeepDays <= 0 {
+		opts.KeepDays = m.config.CleanupKeepDays
+	}
+	if opts.KeepGB <= 0 {
+		opts.KeepGB = m.config.CleanupKeepGB
+	}
+	if opts.DownloadPath == "" {
+		opts.DownloadPath = m.getDownloadPath()
+	}
+	beforeInfo, err := m.GetDiskInfo(opts.DownloadPath)
 	if err != nil {
-		logger.Error("Failed to list completed downloads for cleanup", "error", err.Error())
-		return 0, 0
+		return nil, err
 	}
 
-	var cleanedCount int
-	var cleanedBytes int64
+	mediaState := m.checkMediaLibrary()
+	result := &CleanupResult{
+		BeforeFreeGB:       beforeInfo.FreeGB,
+		BeforeFreeBytes:    beforeInfo.FreeBytes,
+		MediaLibraryStatus: mediaState.Status,
+	}
 
-	for _, download := range downloads {
-		// 检查是否需要保护（正在观看的）
-		if m.config.CleanupProtectWatching && m.isBeingWatched(&download) {
+	logger.Info("Starting disk cleanup", "trigger", opts.Trigger, "strategy", opts.Strategy, "download_path", opts.DownloadPath)
+
+	downloads, _, err := m.downloadRepo.List(0, 1000, model.DownloadStatusCompleted)
+	if err != nil {
+		return nil, err
+	}
+	m.sortCleanupCandidates(downloads)
+
+	cutoff := time.Now().AddDate(0, 0, -opts.KeepDays)
+	targetFreeBytes := opts.KeepGB * 1024 * 1024 * 1024
+	needSpaceCleanup := opts.Strategy == CleanupBySpace || opts.Strategy == CleanupHybrid
+
+	for i := range downloads {
+		download := downloads[i]
+		if !m.shouldConsiderForStrategy(&download, opts.Strategy, cutoff, result.FreedBytes, targetFreeBytes, beforeInfo.FreeBytes, needSpaceCleanup) {
 			continue
 		}
 
-		// 检查下载时间
-		if download.DownloadedAt != nil && download.DownloadedAt.Before(cutoffTime) {
-			if err := m.deleteDownload(&download); err != nil {
-				logger.Error("Failed to delete old download",
-					"download_id", download.ID,
-					"error", err.Error())
-				continue
-			}
-			cleanedCount++
-			if download.FilePath != "" {
-				size := m.getFileSize(download.FilePath)
-				cleanedBytes += size
-			}
+		item := CleanupItem{DownloadID: download.ID, Path: download.FilePath}
+		if opts.ProtectWatching && mediaState.ConservativeSkipAll {
+			item.Action = "skipped"
+			item.Reason = mediaState.Message
+			result.SkippedCount++
+			result.Items = append(result.Items, item)
+			continue
 		}
+		if opts.ProtectWatching && mediaState.IsProtected(download) {
+			item.Action = "skipped"
+			item.Reason = "media is currently watched or recently played"
+			result.SkippedCount++
+			result.Items = append(result.Items, item)
+			continue
+		}
+
+		freed, err := m.deleteDownloadSafely(&download, opts.DownloadPath)
+		if err != nil {
+			item.Action = "skipped"
+			item.Reason = err.Error()
+			result.SkippedCount++
+			result.Items = append(result.Items, item)
+			continue
+		}
+		item.Action = "deleted"
+		item.FreedBytes = freed
+		result.DeletedCount++
+		result.FreedBytes += freed
+		result.Items = append(result.Items, item)
 	}
 
-	return cleanedCount, float64(cleanedBytes) / (1024 * 1024 * 1024)
+	afterInfo, err := m.GetDiskInfo(opts.DownloadPath)
+	if err == nil {
+		result.AfterFreeGB = afterInfo.FreeGB
+		result.AfterFreeBytes = afterInfo.FreeBytes
+	}
+	result.Cleaned = result.DeletedCount > 0
+
+	if err := m.recordCleanup(opts, result); err != nil {
+		logger.Warn("Failed to persist cleanup record", "error", err.Error())
+	}
+
+	logger.Info("Disk cleanup completed", "deleted_count", result.DeletedCount, "skipped_count", result.SkippedCount, "freed_bytes", result.FreedBytes)
+	if opts.Trigger == CleanupTriggerAuto && result.DeletedCount > 0 && m.notificationSvc != nil {
+		m.sendCleanupNotification(result.DeletedCount, float64(result.FreedBytes)/(1024*1024*1024))
+	}
+
+	return result, nil
 }
 
-// cleanupBySpace 按空间清理
-func (m *Monitor) cleanupBySpace(info *DiskInfo) (int, float64) {
-	targetFreeGB := float64(m.config.CleanupKeepGB)
-	needToFreeGB := targetFreeGB - info.FreeGB
-
-	if needToFreeGB <= 0 {
-		return 0, 0
-	}
-
-	// 获取已完成的下载任务，按下载时间排序（先删除最旧的）
-	downloads, _, err := m.downloadRepo.List(0, 1000, "completed")
-	if err != nil {
-		logger.Error("Failed to list completed downloads for cleanup", "error", err.Error())
-		return 0, 0
-	}
-
-	// 按下载时间排序（最旧的在前）
+func (m *Monitor) sortCleanupCandidates(downloads []model.Download) {
 	sort.Slice(downloads, func(i, j int) bool {
-		if downloads[i].DownloadedAt == nil || downloads[j].DownloadedAt == nil {
-			return downloads[i].CreatedAt.Before(downloads[j].CreatedAt)
+		left := downloads[i].CreatedAt
+		right := downloads[j].CreatedAt
+		if downloads[i].DownloadedAt != nil {
+			left = *downloads[i].DownloadedAt
 		}
-		return downloads[i].DownloadedAt.Before(*downloads[j].DownloadedAt)
+		if downloads[j].DownloadedAt != nil {
+			right = *downloads[j].DownloadedAt
+		}
+		return left.Before(right)
 	})
+}
 
-	var cleanedCount int
-	var cleanedBytes int64
+func (m *Monitor) shouldConsiderForStrategy(download *model.Download, strategy CleanupStrategy, cutoff time.Time, freedBytes, targetFreeBytes, beforeFreeBytes int64, needSpaceCleanup bool) bool {
+	ageEligible := download.DownloadedAt != nil && download.DownloadedAt.Before(cutoff)
+	spaceStillNeeded := needSpaceCleanup && beforeFreeBytes+freedBytes < targetFreeBytes
 
-	for _, download := range downloads {
-		if float64(cleanedBytes)/(1024*1024*1024) >= needToFreeGB {
-			break
-		}
+	switch strategy {
+	case CleanupByAge:
+		return ageEligible
+	case CleanupBySpace:
+		return spaceStillNeeded
+	case CleanupHybrid:
+		return ageEligible || spaceStillNeeded
+	default:
+		return ageEligible
+	}
+}
 
-		// 检查是否需要保护
-		if m.config.CleanupProtectWatching && m.isBeingWatched(&download) {
+func (m *Monitor) recordCleanup(opts CleanupOptions, result *CleanupResult) error {
+	if m.db == nil || result == nil {
+		return nil
+	}
+	messageBytes, _ := json.Marshal(result.Items)
+	return m.db.Create(&model.DiskCleanupRecord{
+		Trigger:            opts.Trigger,
+		Strategy:           string(opts.Strategy),
+		DownloadPath:       opts.DownloadPath,
+		DeletedCount:       result.DeletedCount,
+		SkippedCount:       result.SkippedCount,
+		FreedBytes:         result.FreedBytes,
+		BeforeFreeBytes:    result.BeforeFreeBytes,
+		AfterFreeBytes:     result.AfterFreeBytes,
+		MediaLibraryStatus: result.MediaLibraryStatus,
+		Message:            string(messageBytes),
+		CreatedAt:          time.Now(),
+	}).Error
+}
+
+// CheckMediaLibrary returns the current Plex/Jellyfin connection status.
+func (m *Monitor) CheckMediaLibrary() (string, string) {
+	state := m.checkMediaLibrary()
+	return state.Status, state.Message
+}
+
+func (m *Monitor) checkMediaLibrary() mediaLibraryState {
+	serverType := strings.ToLower(strings.TrimSpace(m.getConfigValue("media_library.type")))
+	baseURL := strings.TrimRight(strings.TrimSpace(m.getConfigValue("media_library.url")), "/")
+	token := strings.TrimSpace(m.getConfigValue("media_library.token"))
+	userID := strings.TrimSpace(m.getConfigValue("media_library.user_id"))
+	recentHours := m.getConfigInt("media_library.recent_play_hours", 24)
+
+	if serverType == "" && baseURL == "" && token == "" {
+		return mediaLibraryState{Status: MediaLibraryStatusUnconfigured, Message: "media library is not configured", ConservativeSkipAll: true}
+	}
+	if serverType == "" || baseURL == "" || token == "" {
+		return mediaLibraryState{Status: MediaLibraryStatusFailed, Message: "media library configuration is incomplete", ConservativeSkipAll: true}
+	}
+
+	var paths []string
+	var err error
+	switch serverType {
+	case "jellyfin", "emby":
+		paths, err = fetchJellyfinProtectedPaths(baseURL, token, userID, recentHours)
+	case "plex":
+		paths, err = fetchPlexProtectedPaths(baseURL, token, recentHours)
+	default:
+		err = fmt.Errorf("unsupported media library type %q", serverType)
+	}
+	if err != nil {
+		return mediaLibraryState{Status: MediaLibraryStatusFailed, Message: err.Error(), ConservativeSkipAll: true}
+	}
+
+	protected := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		if strings.TrimSpace(p) == "" {
 			continue
 		}
-
-		if err := m.deleteDownload(&download); err != nil {
-			logger.Error("Failed to delete download for space",
-				"download_id", download.ID,
-				"error", err.Error())
+		abs, err := filepath.Abs(p)
+		if err != nil {
 			continue
 		}
+		if realPath, err := filepath.EvalSymlinks(abs); err == nil {
+			abs = realPath
+		}
+		protected[abs] = struct{}{}
+	}
 
-		cleanedCount++
-		if download.FilePath != "" {
-			size := m.getFileSize(download.FilePath)
-			cleanedBytes += size
+	return mediaLibraryState{Status: MediaLibraryStatusConnected, Message: "media library connected", ProtectedPaths: protected}
+}
+
+func fetchJellyfinProtectedPaths(baseURL, token, userID string, recentHours int) ([]string, error) {
+	endpoint := baseURL + "/Sessions"
+	var sessions []struct {
+		NowPlayingItem *struct {
+			Path string `json:"Path"`
+		} `json:"NowPlayingItem"`
+	}
+	if err := getJSON(endpoint, map[string]string{"X-Emby-Token": token}, &sessions); err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(sessions))
+	for _, session := range sessions {
+		if session.NowPlayingItem != nil && session.NowPlayingItem.Path != "" {
+			paths = append(paths, session.NowPlayingItem.Path)
 		}
 	}
-
-	return cleanedCount, float64(cleanedBytes) / (1024 * 1024 * 1024)
-}
-
-// cleanupHybrid 混合清理策略
-func (m *Monitor) cleanupHybrid(info *DiskInfo) (int, float64) {
-	// 首先按年龄清理
-	count, gb := m.cleanupByAge()
-
-	// 如果空间仍然不足，按空间清理
-	if info.FreeGB+gb < float64(m.config.CriticalThresholdGB) {
-		// 更新磁盘信息
-		newInfo, _ := m.GetDiskInfo(m.getDownloadPath())
-		c2, g2 := m.cleanupBySpace(newInfo)
-		count += c2
-		gb += g2
+	if userID != "" {
+		recent, err := fetchJellyfinRecentPaths(baseURL, token, userID, recentHours)
+		if err != nil {
+			return nil, err
+		}
+		paths = append(paths, recent...)
 	}
-
-	return count, gb
+	return paths, nil
 }
 
-// isBeingWatched 检查是否正在观看
-// 这是一个占位实现，实际应该查询 Plex/Jellyfin API
-func (m *Monitor) isBeingWatched(download *model.Download) bool {
-	// TODO: 集成 Plex/Jellyfin API 检查观看状态
-	// 暂时返回 false
-	return false
+func fetchJellyfinRecentPaths(baseURL, token, userID string, recentHours int) ([]string, error) {
+	if recentHours <= 0 {
+		recentHours = 24
+	}
+	cutoff := time.Now().Add(-time.Duration(recentHours) * time.Hour)
+	endpoint := fmt.Sprintf("%s/Users/%s/Items?Recursive=true&Filters=IsPlayed&Fields=Path,DatePlayed&SortBy=DatePlayed&SortOrder=Descending&Limit=50", baseURL, url.PathEscape(userID))
+	var response struct {
+		Items []struct {
+			Path       string `json:"Path"`
+			DatePlayed string `json:"DatePlayed"`
+		} `json:"Items"`
+	}
+	if err := getJSON(endpoint, map[string]string{"X-Emby-Token": token}, &response); err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, item := range response.Items {
+		if item.Path == "" || item.DatePlayed == "" {
+			continue
+		}
+		playedAt, err := time.Parse(time.RFC3339, item.DatePlayed)
+		if err != nil || playedAt.Before(cutoff) {
+			continue
+		}
+		paths = append(paths, item.Path)
+	}
+	return paths, nil
 }
 
-// deleteDownload 删除下载文件和记录
-func (m *Monitor) deleteDownload(download *model.Download) error {
-	// 删除文件
-	if download.FilePath != "" {
-		if err := os.RemoveAll(download.FilePath); err != nil {
-			logger.Warn("Failed to delete file",
-				"path", download.FilePath,
-				"error", err.Error())
-			// 继续删除数据库记录
+func fetchPlexProtectedPaths(baseURL, token string, recentHours int) ([]string, error) {
+	endpoint := baseURL + "/status/sessions?X-Plex-Token=" + url.QueryEscape(token)
+	paths, err := fetchPlexPathsFromEndpoint(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	recent, err := fetchPlexRecentPaths(baseURL, token, recentHours)
+	if err != nil {
+		return nil, err
+	}
+	return append(paths, recent...), nil
+}
+
+func fetchPlexRecentPaths(baseURL, token string, recentHours int) ([]string, error) {
+	if recentHours <= 0 {
+		recentHours = 24
+	}
+	endpoint := fmt.Sprintf("%s/status/sessions/history/all?X-Plex-Token=%s&sort=viewedAt:desc", baseURL, url.QueryEscape(token))
+	type historyContainer struct {
+		Videos []struct {
+			ViewedAt int64 `xml:"viewedAt,attr"`
+			Media    []struct {
+				Parts []struct {
+					File string `xml:"file,attr"`
+				} `xml:"Part"`
+			} `xml:"Media"`
+		} `xml:"Video"`
+	}
+	var container historyContainer
+	if err := getXML(endpoint, nil, &container); err != nil {
+		return nil, err
+	}
+	cutoff := time.Now().Add(-time.Duration(recentHours) * time.Hour)
+	var paths []string
+	for _, video := range container.Videos {
+		if video.ViewedAt > 0 && time.Unix(video.ViewedAt, 0).Before(cutoff) {
+			continue
+		}
+		for _, media := range video.Media {
+			for _, part := range media.Parts {
+				if part.File != "" {
+					paths = append(paths, part.File)
+				}
+			}
 		}
 	}
+	return paths, nil
+}
 
-	// 删除数据库记录
+func fetchPlexPathsFromEndpoint(endpoint string) ([]string, error) {
+	type mediaContainer struct {
+		Videos []struct {
+			Media []struct {
+				Parts []struct {
+					File string `xml:"file,attr"`
+				} `xml:"Part"`
+			} `xml:"Media"`
+		} `xml:"Video"`
+	}
+	var container mediaContainer
+	if err := getXML(endpoint, nil, &container); err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, video := range container.Videos {
+		for _, media := range video.Media {
+			for _, part := range media.Parts {
+				if part.File != "" {
+					paths = append(paths, part.File)
+				}
+			}
+		}
+	}
+	return paths, nil
+}
+
+func getJSON(endpoint string, headers map[string]string, target any) error {
+	body, err := getHTTPBody(endpoint, headers)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(body, target)
+}
+
+func getXML(endpoint string, headers map[string]string, target any) error {
+	body, err := getHTTPBody(endpoint, headers)
+	if err != nil {
+		return err
+	}
+	return xml.Unmarshal(body, target)
+}
+
+func getHTTPBody(endpoint string, headers map[string]string) ([]byte, error) {
+	client := http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("media library returned status %d", resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
+}
+
+// deleteDownloadSafely removes a file or directory and only then deletes the DB row.
+func (m *Monitor) deleteDownloadSafely(download *model.Download, downloadRoot string) (int64, error) {
+	deletePath, err := validateDeletePath(download.FilePath, downloadRoot)
+	if err != nil {
+		return 0, err
+	}
+
+	size := m.getFileSize(deletePath)
+	if err := os.RemoveAll(deletePath); err != nil {
+		return 0, fmt.Errorf("failed to delete file: %w", err)
+	}
 	if err := m.downloadRepo.Delete(download.ID); err != nil {
-		return fmt.Errorf("failed to delete download record: %w", err)
+		return 0, fmt.Errorf("failed to delete download record: %w", err)
 	}
 
-	logger.Info("Deleted download",
-		"download_id", download.ID,
-		"title", download.Title,
-		"path", download.FilePath)
+	logger.Info("Deleted download", "download_id", download.ID, "title", download.Title, "path", deletePath, "freed_bytes", size)
+	return size, nil
+}
 
-	return nil
+func validateDeletePath(rawPath, rawRoot string) (string, error) {
+	if strings.TrimSpace(rawPath) == "" {
+		return "", errors.New("empty path")
+	}
+	if strings.TrimSpace(rawRoot) == "" {
+		return "", errors.New("empty download root")
+	}
+
+	rootAbs, err := filepath.Abs(rawRoot)
+	if err != nil {
+		return "", fmt.Errorf("invalid download root: %w", err)
+	}
+	pathAbs, err := filepath.Abs(rawPath)
+	if err != nil {
+		return "", fmt.Errorf("invalid path: %w", err)
+	}
+
+	rootReal, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return "", fmt.Errorf("invalid download root: %w", err)
+	}
+	pathReal, err := filepath.EvalSymlinks(pathAbs)
+	if err != nil {
+		return "", fmt.Errorf("invalid path: %w", err)
+	}
+
+	if pathReal == rootReal {
+		return "", errors.New("refusing to delete download root")
+	}
+	rel, err := filepath.Rel(rootReal, pathReal)
+	if err != nil {
+		return "", fmt.Errorf("invalid relative path: %w", err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", errors.New("path is outside download root")
+	}
+
+	return pathReal, nil
+}
+
+func isSameOrChild(path, root string) bool {
+	if path == root {
+		return true
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
 // getFileSize 获取文件大小
@@ -507,15 +941,34 @@ func (m *Monitor) getFileSize(path string) int64 {
 // getDownloadPath 获取下载路径
 func (m *Monitor) getDownloadPath() string {
 	// 从配置获取
-	if m.configRepo != nil {
-		if cfg, err := m.configRepo.Get("download_path"); err == nil && cfg != nil {
-			if cfg.Value != "" {
-				return cfg.Value
-			}
-		}
+	if value := m.getConfigValue("download_path"); value != "" {
+		return value
 	}
 	// 默认路径
 	return "/downloads"
+}
+
+func (m *Monitor) getConfigValue(key string) string {
+	if m.configRepo == nil {
+		return ""
+	}
+	cfg, err := m.configRepo.Get(key)
+	if err != nil || cfg == nil {
+		return ""
+	}
+	return cfg.Value
+}
+
+func (m *Monitor) getConfigInt(key string, defaultValue int) int {
+	value := m.getConfigValue(key)
+	if value == "" {
+		return defaultValue
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return defaultValue
+	}
+	return parsed
 }
 
 // pauseDownloads 暂停新下载

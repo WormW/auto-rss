@@ -42,6 +42,8 @@ func newTestDB(t *testing.T) *gorm.DB {
 		&model.Subscription{},
 		&model.Download{},
 		&model.Config{},
+		&model.DiskSample{},
+		&model.DiskCleanupRecord{},
 		&model.RSSSource{},
 		&model.Log{},
 		&model.RefreshToken{},

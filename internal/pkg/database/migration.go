@@ -31,6 +31,8 @@ func RunMigrations(db *gorm.DB) error {
 					&model.Subscription{},
 					&model.Download{},
 					&model.Config{},
+					&model.DiskSample{},
+					&model.DiskCleanupRecord{},
 					&model.RSSSource{},
 					&model.Log{},
 					&model.RefreshToken{},
@@ -42,6 +44,8 @@ func RunMigrations(db *gorm.DB) error {
 					"subscriptions",
 					"downloads",
 					"configs",
+					"disk_samples",
+					"disk_cleanup_records",
 					"rss_sources",
 					"logs",
 					"refresh_tokens",
@@ -126,6 +130,15 @@ func RunMigrations(db *gorm.DB) error {
 				}).Delete(&model.Config{}).Error
 			},
 		},
+		{
+			ID: "202606150002", // persist disk samples and cleanup summaries
+			Migrate: func(tx *gorm.DB) error {
+				return tx.AutoMigrate(&model.DiskSample{}, &model.DiskCleanupRecord{})
+			},
+			Rollback: func(tx *gorm.DB) error {
+				return tx.Migrator().DropTable("disk_cleanup_records", "disk_samples")
+			},
+		},
 	})
 
 	// 设置迁移超时
@@ -169,6 +182,8 @@ func ResetMigrations(db *gorm.DB) error {
 					&model.Subscription{},
 					&model.Download{},
 					&model.Config{},
+					&model.DiskSample{},
+					&model.DiskCleanupRecord{},
 					&model.RSSSource{},
 					&model.Log{},
 					&model.RefreshToken{},
