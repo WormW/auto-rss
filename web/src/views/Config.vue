@@ -48,6 +48,53 @@
       </n-form>
     </n-card>
 
+    <n-card title="智能拉取策略" class="config-card">
+      <n-form :model="smartFetchConfig" label-placement="top" class="config-form">
+        <n-form-item label="启用智能拉取">
+          <n-switch v-model:value="smartFetchConfig.enabled" />
+        </n-form-item>
+        <n-form-item label="更新日前窗口">
+          <n-input-number
+            v-model:value="smartFetchConfig.before_air_day"
+            :min="0"
+            :max="7"
+            style="width: 100%;"
+          >
+            <template #suffix>天</template>
+          </n-input-number>
+        </n-form-item>
+        <n-form-item label="更新日后窗口">
+          <n-input-number
+            v-model:value="smartFetchConfig.after_air_day"
+            :min="0"
+            :max="7"
+            style="width: 100%;"
+          >
+            <template #suffix>天</template>
+          </n-input-number>
+        </n-form-item>
+        <n-form-item label="跳过已完结">
+          <n-switch v-model:value="smartFetchConfig.skip_completed" />
+        </n-form-item>
+        <n-form-item label="完结停止检查">
+          <n-input-number
+            v-model:value="smartFetchConfig.completed_stop_days"
+            :min="0"
+            :max="365"
+            style="width: 100%;"
+          >
+            <template #suffix>天</template>
+          </n-input-number>
+        </n-form-item>
+        <n-form-item label="本地完整性检查">
+          <n-switch v-model:value="smartFetchConfig.check_local_complete" />
+        </n-form-item>
+        <n-form-item>
+          <n-button type="primary" :loading="smartFetchSaving" @click="saveSmartFetchConfig">保存配置</n-button>
+        </n-form-item>
+      </n-form>
+    </n-card>
+
     <n-card title="系统设置" class="config-card">
       <n-form :model="systemConfig" label-placement="top" class="config-form">
         <n-form-item label="日志级别">
@@ -279,7 +326,14 @@ import {
   useMessage
 } from 'naive-ui'
 import { TrashOutline } from '@vicons/ionicons5'
-import { configApi, rssApi, fileOrganizerApi, mediaLibraryApi, type MediaLibraryConfig } from '@/api'
+import {
+  configApi,
+  rssApi,
+  fileOrganizerApi,
+  mediaLibraryApi,
+  type MediaLibraryConfig,
+  type SmartFetchConfig
+} from '@/api'
 
 const message = useMessage()
 
@@ -293,6 +347,16 @@ const rssConfig = ref({
   interval: 30,
   downloadPath: '/downloads'
 })
+
+const smartFetchConfig = ref<SmartFetchConfig>({
+  enabled: true,
+  before_air_day: 1,
+  after_air_day: 2,
+  skip_completed: false,
+  completed_stop_days: 30,
+  check_local_complete: true
+})
+const smartFetchSaving = ref(false)
 
 const systemConfig = ref({
   logLevel: 'info',
@@ -482,6 +546,24 @@ const loadConfig = async () => {
         case 'download_path':
           rssConfig.value.downloadPath = config.value
           break
+        case 'smart_fetch.enabled':
+          smartFetchConfig.value.enabled = config.value === 'true'
+          break
+        case 'smart_fetch.before_air_day':
+          smartFetchConfig.value.before_air_day = parseInt(config.value) || 1
+          break
+        case 'smart_fetch.after_air_day':
+          smartFetchConfig.value.after_air_day = parseInt(config.value) || 2
+          break
+        case 'smart_fetch.skip_completed':
+          smartFetchConfig.value.skip_completed = config.value === 'true'
+          break
+        case 'smart_fetch.completed_stop_days':
+          smartFetchConfig.value.completed_stop_days = parseInt(config.value) || 0
+          break
+        case 'smart_fetch.check_local_complete':
+          smartFetchConfig.value.check_local_complete = config.value !== 'false'
+          break
         case 'system_proxy':
           systemConfig.value.proxy = config.value
           break
@@ -501,6 +583,20 @@ const loadConfig = async () => {
     })
   } catch (error) {
     message.error('加载配置失败')
+  }
+}
+
+const loadSmartFetchConfig = async () => {
+  try {
+    const res: any = await configApi.getSmartFetch()
+    if (res.code === 0 && res.data) {
+      smartFetchConfig.value = {
+        ...smartFetchConfig.value,
+        ...res.data
+      }
+    }
+  } catch (error) {
+    console.error('加载智能拉取配置失败:', error)
   }
 }
 
@@ -617,6 +713,19 @@ const saveRSSConfig = async () => {
   }
 }
 
+const saveSmartFetchConfig = async () => {
+  smartFetchSaving.value = true
+  try {
+    await configApi.updateSmartFetch(smartFetchConfig.value)
+    message.success('智能拉取配置保存成功')
+  } catch (error: any) {
+    const errorMsg = error?.response?.data?.message || '保存配置失败'
+    message.error(errorMsg)
+  } finally {
+    smartFetchSaving.value = false
+  }
+}
+
 const saveSystemConfig = async () => {
   try {
     await configApi.update('log_level', systemConfig.value.logLevel)
@@ -694,6 +803,7 @@ const handleTriggerFileOrganizer = async () => {
 
 onMounted(() => {
   loadConfig()
+  loadSmartFetchConfig()
   loadMediaLibraryConfig()
   loadRenamePresets()
   loadRenameTemplate()
