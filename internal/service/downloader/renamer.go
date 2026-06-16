@@ -9,6 +9,7 @@ import (
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
+	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
 )
 
@@ -39,14 +40,15 @@ type RenameContext struct {
 
 // GenerateFileName 生成新文件名
 // 支持的模板变量:
-//   ${title}          - 番剧名称
-//   ${season}         - 季度数字 (1, 2, 3)
-//   ${seasonFormat}   - 格式化季度 (01, 02, 03)
-//   ${episode}        - 集数数字 (1, 2, 3)
-//   ${episodeFormat}  - 格式化集数 (01, 02, 03)
-//   ${fansub}         - 字幕组
-//   ${resolution}     - 分辨率 (1080p, 720p)
-//   ${language}       - 语言 (CHS, CHT)
+//
+//	${title}          - 番剧名称
+//	${season}         - 季度数字 (1, 2, 3)
+//	${seasonFormat}   - 格式化季度 (01, 02, 03)
+//	${episode}        - 集数数字 (1, 2, 3)
+//	${episodeFormat}  - 格式化集数 (01, 02, 03)
+//	${fansub}         - 字幕组
+//	${resolution}     - 分辨率 (1080p, 720p)
+//	${language}       - 语言 (CHS, CHT)
 func (r *RenameService) GenerateFileName(ctx *RenameContext) string {
 	template := r.defaultTemplate
 
@@ -60,7 +62,8 @@ func (r *RenameService) GenerateFileName(ctx *RenameContext) string {
 
 	// 替换模板变量
 	result := template
-	result = strings.ReplaceAll(result, "${title}", sanitizeFileName(ctx.Subscription.Name))
+	mediaTitle := utils.MediaLibraryTitle(ctx.Subscription.Name)
+	result = strings.ReplaceAll(result, "${title}", sanitizeFileName(mediaTitle))
 	result = strings.ReplaceAll(result, "${season}", fmt.Sprintf("%d", ctx.Subscription.Season))
 	result = strings.ReplaceAll(result, "${seasonFormat}", fmt.Sprintf("%02d", ctx.Subscription.Season))
 	result = strings.ReplaceAll(result, "${episode}", fmt.Sprintf("%d", ctx.Download.Episode))
@@ -599,4 +602,3 @@ func isVideoFileExt(ext string) bool {
 	}
 	return videoExts[ext]
 }
-
