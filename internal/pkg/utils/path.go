@@ -32,7 +32,8 @@ func GetCoverPath() string {
 func GenerateDownloadPath(basePath, animeName string) string {
 	// 统一路径基准，避免 /path/show 与 /path/show/Season 2 在不同入口产生漂移。
 	basePath = strings.TrimSpace(basePath)
-	cleanName := SanitizeDirectoryName(animeName)
+	mediaTitle := MediaLibraryTitle(animeName)
+	cleanName := SanitizeDirectoryName(mediaTitle)
 	if basePath == "" {
 		return cleanName
 	}

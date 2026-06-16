@@ -97,6 +97,36 @@ func TestRenameServiceGenerateFileName(t *testing.T) {
 			},
 			expected: "测试动画 S01E08 [1080p].mp4",
 		},
+		{
+			name:     "默认媒体库模板清理中文季号标题",
+			template: "",
+			ctx: &RenameContext{
+				Download: &model.Download{
+					Episode: 1,
+				},
+				Subscription: &model.Subscription{
+					Name:   "入间同学入魔了 第四季",
+					Season: 4,
+				},
+				Extension: ".mp4",
+			},
+			expected: "入间同学入魔了/Season 4/入间同学入魔了 S04E01.mp4",
+		},
+		{
+			name:     "默认媒体库模板清理日文系列号标题",
+			template: "",
+			ctx: &RenameContext{
+				Download: &model.Download{
+					Episode: 1,
+				},
+				Subscription: &model.Subscription{
+					Name:   "魔入りました！入間くん 第4シリーズ",
+					Season: 4,
+				},
+				Extension: ".mkv",
+			},
+			expected: "魔入りました！入間くん/Season 4/魔入りました！入間くん S04E01.mkv",
+		},
 	}
 
 	for _, tt := range tests {

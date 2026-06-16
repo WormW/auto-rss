@@ -144,6 +144,47 @@ func TestPopulateSubscription(t *testing.T) {
 	assert.Equal(t, 2024, sub.AirYear)
 }
 
+func TestPopulateSubscription_CleansTerminalSeasonTitle(t *testing.T) {
+	bgService := NewBangumiService()
+	imgService := NewImageService("./test_covers")
+	configRepo := &mockConfigRepo{}
+
+	e := &enricher{
+		bangumiService: bgService,
+		imageService:   imgService,
+		configRepo:     configRepo,
+	}
+
+	tests := []struct {
+		name       string
+		nameCN     string
+		nameJP     string
+		season     int
+		wantName   string
+		wantSeason int
+	}{
+		{name: "Chinese name_cn", nameCN: "入间同学入魔了 第四季", season: 4, wantName: "入间同学入魔了", wantSeason: 4},
+		{name: "Japanese fallback title", nameJP: "魔入りました！入間くん 第4シリーズ", season: 4, wantName: "魔入りました！入間くん", wantSeason: 4},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sub := &model.Subscription{Name: tt.nameJP, Season: tt.season}
+			subject := &Subject{
+				ID:     12345,
+				Name:   tt.nameJP,
+				NameCN: tt.nameCN,
+				Season: tt.season,
+			}
+
+			e.populateSubscription(sub, subject)
+
+			assert.Equal(t, tt.wantName, sub.Name)
+			assert.Equal(t, tt.wantSeason, sub.Season)
+		})
+	}
+}
+
 func TestPopulateSubscription_NoNameCN(t *testing.T) {
 	bgService := NewBangumiService()
 	imgService := NewImageService("./test_covers")

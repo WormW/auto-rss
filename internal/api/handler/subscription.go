@@ -167,165 +167,6 @@ func (h *SubscriptionHandler) setProxy() {
 	}
 }
 
-func normalizeSubscriptionNameAndSeason(name string, season int) (string, int) {
-	if name == "" {
-		if season <= 0 {
-			return name, 1
-		}
-		return name, season
-	}
-
-	detectedSeason := season
-	seasonPatterns := []string{
-		`第([0-9一二三四五六七八九十两]+)季`,
-		`第([0-9一二三四五六七八九十两]+)期`,
-		`(?i)Season\s*([0-9IVX]+)`,
-		`(?i)(?:^|\s|\()S([0-9]{1,2})(?:$|\s|\))`,
-	}
-
-	for _, pattern := range seasonPatterns {
-		re := regexp.MustCompile(pattern)
-		if matches := re.FindStringSubmatch(name); len(matches) > 1 {
-			if parsed := parseSeasonToken(matches[1]); parsed > 0 {
-				detectedSeason = parsed
-				break
-			}
-		}
-	}
-
-	cleaned := name
-	trimPatterns := []string{
-		`\s*[\(（]?第[0-9一二三四五六七八九十两]+季[\)）]?\s*$`,
-		`\s*[\(（]?第[0-9一二三四五六七八九十两]+期[\)）]?\s*$`,
-		`(?i)\s*[\(（]?Season\s*[0-9IVX]+[\)）]?\s*$`,
-		`(?i)\s*[\(（]?S[0-9]{1,2}[\)）]?\s*$`,
-	}
-	for _, pattern := range trimPatterns {
-		re := regexp.MustCompile(pattern)
-		cleaned = re.ReplaceAllString(cleaned, "")
-	}
-	cleaned = strings.TrimSpace(strings.Trim(cleaned, "-_·:："))
-	if cleaned == "" {
-		cleaned = name
-	}
-
-	if detectedSeason <= 0 {
-		detectedSeason = 1
-	}
-
-	return cleaned, detectedSeason
-}
-
-func parseSeasonToken(token string) int {
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return 0
-	}
-
-	if n, err := strconv.Atoi(token); err == nil {
-		return n
-	}
-
-	if n := romanToInt(strings.ToUpper(token)); n > 0 {
-		return n
-	}
-
-	if n := chineseNumeralToInt(token); n > 0 {
-		return n
-	}
-
-	return 0
-}
-
-func romanToInt(s string) int {
-	if s == "" {
-		return 0
-	}
-
-	vals := map[rune]int{'I': 1, 'V': 5, 'X': 10}
-	total := 0
-	prev := 0
-
-	for i := len(s) - 1; i >= 0; i-- {
-		v, ok := vals[rune(s[i])]
-		if !ok {
-			return 0
-		}
-		if v < prev {
-			total -= v
-		} else {
-			total += v
-		}
-		prev = v
-	}
-
-	return total
-}
-
-func chineseNumeralToInt(s string) int {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0
-	}
-
-	digits := map[rune]int{
-		'零': 0,
-		'一': 1,
-		'二': 2,
-		'三': 3,
-		'四': 4,
-		'五': 5,
-		'六': 6,
-		'七': 7,
-		'八': 8,
-		'九': 9,
-		'两': 2,
-	}
-
-	if s == "十" {
-		return 10
-	}
-
-	if strings.ContainsRune(s, '十') {
-		parts := strings.SplitN(s, "十", 2)
-		tens := 1
-		if parts[0] != "" {
-			r := []rune(parts[0])
-			if len(r) != 1 {
-				return 0
-			}
-			v, ok := digits[r[0]]
-			if !ok {
-				return 0
-			}
-			tens = v
-		}
-
-		ones := 0
-		if len(parts) == 2 && parts[1] != "" {
-			r := []rune(parts[1])
-			if len(r) != 1 {
-				return 0
-			}
-			v, ok := digits[r[0]]
-			if !ok {
-				return 0
-			}
-			ones = v
-		}
-		return tens*10 + ones
-	}
-
-	r := []rune(s)
-	if len(r) == 1 {
-		if v, ok := digits[r[0]]; ok {
-			return v
-		}
-	}
-
-	return 0
-}
-
 func splitRuleTokens(raw string) []string {
 	return strings.FieldsFunc(raw, func(r rune) bool {
 		return r == ',' || r == '\n' || r == '\r' || r == ';' || r == '，' || r == '；'
@@ -477,7 +318,7 @@ func (h *SubscriptionHandler) Preview(c *gin.Context) {
 	if sub.Name == "" {
 		sub.Name = "未命名订阅"
 	}
-	sub.Name, sub.Season = normalizeSubscriptionNameAndSeason(sub.Name, sub.Season)
+	sub.Name, sub.Season = utils.NormalizeMediaTitleAndSeason(sub.Name, sub.Season)
 
 	h.setProxy()
 	items, err := h.rssParser.FetchAndParseWithTimeout(req.RssURL, 15*time.Second)
@@ -674,7 +515,8 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 	h.enrichWithBangumi(&subscription)
 
 	// 将标题中的"第X季/Season X"规范到 season 字段
-	subscription.Name, subscription.Season = normalizeSubscriptionNameAndSeason(subscription.Name, subscription.Season)
+	// Keep Subscription.Name as the series title; Season carries the season number.
+	subscription.Name, subscription.Season = utils.NormalizeMediaTitleAndSeason(subscription.Name, subscription.Season)
 
 	if subscription.RssURL != "" {
 		existing, err := h.repo.GetByRSSURLAndSeason(subscription.RssURL, subscription.Season)
@@ -831,7 +673,7 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 		}
 	}
 
-	existing.Name, existing.Season = normalizeSubscriptionNameAndSeason(existing.Name, existing.Season)
+	existing.Name, existing.Season = utils.NormalizeMediaTitleAndSeason(existing.Name, existing.Season)
 
 	var shouldDownloadCollection bool
 	if collectionTorrent, ok := updates["collection_torrent"].(string); ok {

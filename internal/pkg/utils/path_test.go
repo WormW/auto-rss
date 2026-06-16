@@ -77,6 +77,18 @@ func TestGenerateDownloadPath(t *testing.T) {
 			animeName: "灵笼 Incarnation 第2季",
 			expected:  "/downloads/灵笼",
 		},
+		{
+			name:      "媒体库新路径去除中文季号",
+			basePath:  "/downloads",
+			animeName: "入间同学入魔了 第四季",
+			expected:  "/downloads/入间同学入魔了",
+		},
+		{
+			name:      "媒体库新路径去除日文系列号",
+			basePath:  "/downloads",
+			animeName: "魔入りました！入間くん 第4シリーズ",
+			expected:  "/downloads/魔入りました！入間くん",
+		},
 	}
 
 	for _, tt := range tests {
