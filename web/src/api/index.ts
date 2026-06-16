@@ -165,6 +165,8 @@ export interface Subscription {
   air_timezone?: string
   notify_enabled?: boolean
   notify_before_min?: number
+  smart_fetch_enabled?: boolean | null
+  smart_fetch_override?: 'follow' | 'always' | 'never' | ''
 }
 
 export interface Download {
@@ -342,6 +344,35 @@ export interface SubscriptionRetryFailedResponse {
   results: SubscriptionRetryFailedResult[]
 }
 
+export interface SmartFetchStatus {
+  subscription_id: number
+  should_fetch: boolean
+  reason: string
+  explanation: string
+  next_fetch_in: string
+  next_fetch_seconds: number
+  next_fetch_at: string
+  missing_episodes: number[]
+  is_in_active_window: boolean
+  is_completed: boolean
+  smart_fetch_enabled: boolean
+  smart_fetch_override?: 'follow' | 'always' | 'never' | ''
+}
+
+export interface SmartFetchStatusResponse {
+  evaluated_at: string
+  list: SmartFetchStatus[]
+}
+
+export interface SmartFetchConfig {
+  enabled: boolean
+  before_air_day: number
+  after_air_day: number
+  skip_completed: boolean
+  completed_stop_days: number
+  check_local_complete: boolean
+}
+
 export interface MediaLibraryPathMapping {
   from: string
   to: string
@@ -373,6 +404,8 @@ export const subscriptionApi = {
     api.get('/subscriptions', { params: { page, page_size: pageSize } }),
   getById: (id: number) =>
     api.get(`/subscriptions/${id}`),
+  smartFetchStatus: () =>
+    api.get('/subscriptions/smart-fetch/status'),
   diagnostics: (id: number) =>
     api.get(`/subscriptions/${id}/diagnostics`),
   retryFailed: (id: number) =>
@@ -433,6 +466,10 @@ export const configApi = {
     api.get('/config'),
   update: (key: string, value: string) =>
     api.put('/config', { key, value }),
+  getSmartFetch: () =>
+    api.get('/config/smart-fetch'),
+  updateSmartFetch: (data: Partial<SmartFetchConfig>) =>
+    api.put('/config/smart-fetch', data),
   testQBittorrent: (host: string, username: string, password: string) =>
     api.post('/config/qbittorrent/test', { host, username, password }),
   saveQBittorrent: (host: string, username: string, password: string) =>

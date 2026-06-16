@@ -97,6 +97,35 @@ func RunMigrations(db *gorm.DB) error {
 				return nil
 			},
 		},
+		{
+			ID: "202606150001", // 智能拉取可视化与单订阅覆盖配置
+			Migrate: func(tx *gorm.DB) error {
+				if err := tx.AutoMigrate(&model.Subscription{}, &model.Config{}); err != nil {
+					return err
+				}
+
+				defaultConfigs := []model.Config{
+					{Key: "smart_fetch.enabled", Value: "true", Description: "启用智能拉取策略"},
+					{Key: "smart_fetch.before_air_day", Value: "1", Description: "更新日前N天开始拉取"},
+					{Key: "smart_fetch.after_air_day", Value: "2", Description: "更新日后N天继续拉取"},
+					{Key: "smart_fetch.skip_completed", Value: "false", Description: "是否跳过已完结的订阅"},
+					{Key: "smart_fetch.completed_stop_days", Value: "30", Description: "完结后N天停止常规检查，0表示不停止"},
+					{Key: "smart_fetch.check_local_complete", Value: "true", Description: "是否检查本地完整性"},
+				}
+				for _, cfg := range defaultConfigs {
+					if err := tx.Where("key = ?", cfg.Key).FirstOrCreate(&cfg).Error; err != nil {
+						return err
+					}
+				}
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				// SQLite 不可靠支持删除列；保留结构，仅移除新增默认配置。
+				return tx.Where("key IN ?", []string{
+					"smart_fetch.completed_stop_days",
+				}).Delete(&model.Config{}).Error
+			},
+		},
 	})
 
 	// 设置迁移超时

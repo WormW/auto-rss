@@ -62,8 +62,23 @@
   "smart_fetch.before_air_day": 1,       // 更新日前1天开始
   "smart_fetch.after_air_day": 2,        // 更新日后2天结束
   "smart_fetch.skip_completed": false,   // 不跳过已完结（可能还有v2）
+  "smart_fetch.completed_stop_days": 30, // 完结30天后停止常规检查，0表示不停止
   "smart_fetch.check_local_complete": true // 检查本地完整性
 }
+```
+
+### Web UI 与 API
+
+- “系统配置”页提供全局智能拉取开关、更新日前后窗口、完结跳过、完结停止检查、本地完整性检查配置。
+- “订阅”卡片和列表会显示本轮是否拉取、原因解释、下次预计检查时间。
+- 编辑订阅时可选择“跟随全局 / 强制启用 / 强制关闭”。
+
+相关接口：
+
+```text
+GET /api/v1/config/smart-fetch
+PUT /api/v1/config/smart-fetch
+GET /api/v1/subscriptions/smart-fetch/status
 ```
 
 ### 订阅字段要求
@@ -152,7 +167,7 @@ INFO Parsed RSS feed
 
 - 未设置 `air_day` 的订阅：默认随时拉取（保持原有行为）
 - 未设置 `total_episodes` 的订阅：无法判断是否完结，默认当作连载中
-- 可以单独禁用某个订阅的智能拉取（待实现）
+- 单订阅可在编辑弹窗中覆盖全局智能拉取策略
 
 ## 注意事项
 
@@ -163,8 +178,8 @@ INFO Parsed RSS feed
 
 ## 未来扩展
 
-- [ ] Web UI 智能拉取状态展示
-- [ ] 单订阅禁用智能拉取开关
+- [x] Web UI 智能拉取状态展示
+- [x] 单订阅禁用智能拉取开关
 - [ ] 基于历史发布时间的自适应窗口
 - [ ] 节假日/停播检测
 - [ ] 多字幕组发布模式学习

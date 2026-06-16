@@ -50,19 +50,23 @@ type Subscription struct {
 	LanguagePreference string `json:"language_preference" gorm:"type:varchar(10);default:'auto'"` // auto/chs/cht/both
 
 	// 追番日历相关
-	AirDay          string     `json:"air_day" gorm:"type:varchar(10)"`        // 更新星期: 0-6 (0=周日)
-	AirTime         string     `json:"air_time" gorm:"type:varchar(10)"`       // 更新时间: "23:00"
-	AirTimezone     string     `json:"air_timezone" gorm:"type:varchar(10);default:'JST'"` // 时区
-	NotifyEnabled   bool       `json:"notify_enabled" gorm:"default:true"`     // 是否开启更新提醒
-	NotifyBeforeMin int        `json:"notify_before_min" gorm:"default:10"`    // 提前提醒分钟数
+	AirDay          string `json:"air_day" gorm:"type:varchar(10)"`                    // 更新星期: 0-6 (0=周日)
+	AirTime         string `json:"air_time" gorm:"type:varchar(10)"`                   // 更新时间: "23:00"
+	AirTimezone     string `json:"air_timezone" gorm:"type:varchar(10);default:'JST'"` // 时区
+	NotifyEnabled   bool   `json:"notify_enabled" gorm:"default:true"`                 // 是否开启更新提醒
+	NotifyBeforeMin int    `json:"notify_before_min" gorm:"default:10"`                // 提前提醒分钟数
 
 	// 完结时间追踪 - 用于判断完结后多久停止检查
 	CompletedAt *time.Time `json:"completed_at"` // 完结时间（首次检测到 CurrentEpisode >= TotalEpisodes 时设置）
 
+	// 智能拉取配置
+	SmartFetchEnabled  *bool  `json:"smart_fetch_enabled" gorm:"default:null"`      // 单订阅智能拉取开关；nil 表示跟随全局
+	SmartFetchOverride string `json:"smart_fetch_override" gorm:"type:varchar(20)"` // 覆盖策略：follow/always/never
+
 	// 分组相关字段
-	GroupID *uint             `json:"group_id" gorm:"index"`                  // 所属分组ID
+	GroupID *uint              `json:"group_id" gorm:"index"`                     // 所属分组ID
 	Group   *SubscriptionGroup `json:"group,omitempty" gorm:"foreignKey:GroupID"` // 所属分组
-	Tags    string            `json:"tags" gorm:"type:text"`                  // 标签（JSON数组格式）
+	Tags    string             `json:"tags" gorm:"type:text"`                     // 标签（JSON数组格式）
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -74,11 +78,11 @@ type Subscription struct {
 // SubscriptionGroup 订阅分组模型
 type SubscriptionGroup struct {
 	ID          uint      `json:"id" gorm:"primaryKey"`
-	Name        string    `json:"name" gorm:"not null;size:100;index"` // 分组名称
-	Description string    `json:"description" gorm:"size:500"`          // 分组描述
+	Name        string    `json:"name" gorm:"not null;size:100;index"`    // 分组名称
+	Description string    `json:"description" gorm:"size:500"`            // 分组描述
 	Color       string    `json:"color" gorm:"size:20;default:'#18a058'"` // 分组颜色
-	SortOrder   int       `json:"sort_order" gorm:"default:0"`          // 排序顺序
-	IsDefault   bool      `json:"is_default" gorm:"default:false"`      // 是否为默认分组
+	SortOrder   int       `json:"sort_order" gorm:"default:0"`            // 排序顺序
+	IsDefault   bool      `json:"is_default" gorm:"default:false"`        // 是否为默认分组
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
