@@ -96,6 +96,7 @@ func (h *completionHandler) HandleComplete(download *model.Download, torrent *To
 					"download_id", download.ID,
 					"old_path", torrent.SavePath,
 					"new_path", newPath)
+				h.ensureTVShowNFOForRenamedPath(newPath, subscription)
 			}
 		} else {
 			// 合集种子批量重命名
@@ -109,6 +110,7 @@ func (h *completionHandler) HandleComplete(download *model.Download, torrent *To
 				logger.Info("Collection files renamed successfully",
 					"download_id", download.ID,
 					"renamed_count", renamedCount)
+				h.ensureTVShowNFO(torrent.SavePath, subscription)
 			}
 		}
 	}
@@ -251,6 +253,24 @@ func (h *completionHandler) renameFile(download *model.Download, subscription *m
 	// 返回完整路径
 	fullPath := targetLocation + "/" + newFileName
 	return fullPath, nil
+}
+
+func (h *completionHandler) ensureTVShowNFOForRenamedPath(renamedPath string, subscription *model.Subscription) {
+	if err := ensureTVShowNFOForRenamedPath(renamedPath, subscription); err != nil {
+		logger.Warn("Failed to generate tvshow.nfo",
+			"subscription_id", subscription.ID,
+			"renamed_path", renamedPath,
+			"error", err.Error())
+	}
+}
+
+func (h *completionHandler) ensureTVShowNFO(showRoot string, subscription *model.Subscription) {
+	if err := ensureTVShowNFO(showRoot, subscription); err != nil {
+		logger.Warn("Failed to generate tvshow.nfo",
+			"subscription_id", subscription.ID,
+			"show_root", showRoot,
+			"error", err.Error())
+	}
 }
 
 // renameCollectionFiles 重命名合集种子中的所有视频文件

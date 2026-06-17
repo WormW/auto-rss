@@ -304,8 +304,11 @@ func (r *RenameService) ReorganizeSubscriptionFiles(
 		}
 	}
 	tempService := NewRenameService(renameTemplate)
+	nfoGenerated := false
 
 	for _, download := range downloads {
+		var renamedPath string
+
 		select {
 		case <-ctx.Done():
 			return result, ctx.Err()
@@ -366,6 +369,7 @@ func (r *RenameService) ReorganizeSubscriptionFiles(
 		newDir := filepath.Dir(newRelativePath)
 		newFileName := filepath.Base(newRelativePath)
 		targetLocation := filepath.Join(basePath, newDir)
+		renamedPath = filepath.Join(targetLocation, newFileName)
 
 		// 当前位置
 		currentLocation := torrentInfo.SavePath
@@ -421,6 +425,18 @@ func (r *RenameService) ReorganizeSubscriptionFiles(
 					"new_name", newFilePath)
 			}
 		}
+
+		if renamedPath != "" && !nfoGenerated {
+			if err := ensureTVShowNFOForRenamedPath(renamedPath, subscription); err != nil {
+				logger.Warn("Failed to generate tvshow.nfo after file reorganization",
+					"subscription_id", subscription.ID,
+					"download_id", download.ID,
+					"renamed_path", renamedPath,
+					"error", err.Error())
+			} else {
+				nfoGenerated = true
+			}
+		}
 	}
 
 	return result, nil
@@ -450,9 +466,11 @@ func (r *RenameService) RenameSubscriptionFiles(
 		}
 	}
 	tempService := NewRenameService(renameTemplate)
+	nfoGenerated := false
 
 	for i := range downloads {
 		download := &downloads[i]
+		var renamedPath string
 
 		select {
 		case <-ctx.Done():
@@ -524,6 +542,7 @@ func (r *RenameService) RenameSubscriptionFiles(
 		newDir := filepath.Dir(newRelativePath)
 		newFileName := filepath.Base(newRelativePath)
 		targetLocation := filepath.Join(basePath, newDir)
+		renamedPath = filepath.Join(targetLocation, newFileName)
 
 		// 当前位置
 		currentLocation := torrentInfo.SavePath
@@ -581,12 +600,24 @@ func (r *RenameService) RenameSubscriptionFiles(
 		}
 
 		// 更新数据库中的renamed_path
-		download.RenamedPath = filepath.Join(targetLocation, newFileName)
+		download.RenamedPath = renamedPath
 		if err := downloadRepo.Update(download); err != nil {
 			logger.Warn("Failed to update download record",
 				"download_id", download.ID,
 				"error", err.Error())
 			// 不算作错误，因为文件操作已成功
+		}
+
+		if renamedPath != "" && !nfoGenerated {
+			if err := ensureTVShowNFOForRenamedPath(renamedPath, subscription); err != nil {
+				logger.Warn("Failed to generate tvshow.nfo after batch rename",
+					"subscription_id", subscription.ID,
+					"download_id", download.ID,
+					"renamed_path", renamedPath,
+					"error", err.Error())
+			} else {
+				nfoGenerated = true
+			}
 		}
 	}
 
