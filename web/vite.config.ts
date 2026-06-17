@@ -18,5 +18,36 @@ export default defineConfig({
         changeOrigin: true
       }
     }
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          const normalizedId = id.replace(/\\/g, '/')
+
+          if (!normalizedId.includes('/node_modules/')) {
+            return undefined
+          }
+
+          if (normalizedId.includes('/vue/') || normalizedId.includes('/@vue/')) {
+            return 'vendor-vue'
+          }
+          if (normalizedId.includes('/vue-router/')) {
+            return 'vendor-router'
+          }
+          if (normalizedId.includes('/pinia/')) {
+            return 'vendor-pinia'
+          }
+          if (normalizedId.includes('/@vicons/')) {
+            return 'vendor-icons'
+          }
+          if (normalizedId.includes('/axios/')) {
+            return 'vendor-axios'
+          }
+
+          return undefined
+        }
+      }
+    }
   }
 })
