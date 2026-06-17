@@ -58,6 +58,7 @@ func (m *mockSubscriptionRepo) UpdateInTx(tx *gorm.DB, subscription *model.Subsc
 
 // MockQBittorrentClient for testing
 type mockQBClient struct {
+	getTorrentInfoFunc  func(hash string) (*TorrentInfo, error)
 	getTorrentFilesFunc func(hash string) ([]TorrentFile, error)
 	setLocationFunc     func(hash, location string) error
 	renameFileFunc      func(hash, oldName, newName string) error
@@ -76,6 +77,9 @@ func (m *mockQBClient) GetTorrentsByCategory(category string) ([]*TorrentInfo, e
 }
 
 func (m *mockQBClient) GetTorrentInfo(hash string) (*TorrentInfo, error) {
+	if m.getTorrentInfoFunc != nil {
+		return m.getTorrentInfoFunc(hash)
+	}
 	return nil, nil
 }
 

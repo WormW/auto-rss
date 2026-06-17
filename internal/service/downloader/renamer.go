@@ -62,7 +62,7 @@ func (r *RenameService) GenerateFileName(ctx *RenameContext) string {
 
 	// 替换模板变量
 	result := template
-	mediaTitle := utils.MediaLibraryTitle(ctx.Subscription.Name)
+	mediaTitle := subscriptionMediaLibraryTitle(ctx.Subscription)
 	result = strings.ReplaceAll(result, "${title}", sanitizeFileName(mediaTitle))
 	result = strings.ReplaceAll(result, "${season}", fmt.Sprintf("%d", ctx.Subscription.Season))
 	result = strings.ReplaceAll(result, "${seasonFormat}", fmt.Sprintf("%02d", ctx.Subscription.Season))
@@ -140,6 +140,13 @@ func sanitizeFileName(name string) string {
 	result = regexp.MustCompile(`\s+`).ReplaceAllString(result, " ")
 
 	return result
+}
+
+func subscriptionMediaLibraryTitle(subscription *model.Subscription) string {
+	if subscription == nil {
+		return ""
+	}
+	return utils.MediaLibraryTitle(subscription.Name)
 }
 
 // ParseTemplate 解析模板预览（用于前端展示）
@@ -427,11 +434,12 @@ func (r *RenameService) ReorganizeSubscriptionFiles(
 		}
 
 		if renamedPath != "" && !nfoGenerated {
-			if err := ensureTVShowNFOForRenamedPath(renamedPath, subscription); err != nil {
+			if err := ensureTVShowNFOForSubscriptionBasePath(basePath, subscription); err != nil {
 				logger.Warn("Failed to generate tvshow.nfo after file reorganization",
 					"subscription_id", subscription.ID,
 					"download_id", download.ID,
 					"renamed_path", renamedPath,
+					"base_path", basePath,
 					"error", err.Error())
 			} else {
 				nfoGenerated = true
@@ -609,11 +617,12 @@ func (r *RenameService) RenameSubscriptionFiles(
 		}
 
 		if renamedPath != "" && !nfoGenerated {
-			if err := ensureTVShowNFOForRenamedPath(renamedPath, subscription); err != nil {
+			if err := ensureTVShowNFOForSubscriptionBasePath(basePath, subscription); err != nil {
 				logger.Warn("Failed to generate tvshow.nfo after batch rename",
 					"subscription_id", subscription.ID,
 					"download_id", download.ID,
 					"renamed_path", renamedPath,
+					"base_path", basePath,
 					"error", err.Error())
 			} else {
 				nfoGenerated = true

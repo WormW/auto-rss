@@ -53,6 +53,30 @@ func ensureTVShowNFOForRenamedPath(renamedPath string, subscription *model.Subsc
 	return ensureTVShowNFO(showRoot, subscription)
 }
 
+func ensureTVShowNFOForSubscriptionBasePath(basePath string, subscription *model.Subscription) error {
+	showRoot, err := tvShowRootForSubscriptionBasePath(basePath, subscription)
+	if err != nil {
+		return err
+	}
+	return ensureTVShowNFO(showRoot, subscription)
+}
+
+func tvShowRootForSubscriptionBasePath(basePath string, subscription *model.Subscription) (string, error) {
+	if strings.TrimSpace(basePath) == "" {
+		return "", fmt.Errorf("invalid base path for tvshow.nfo: %q", basePath)
+	}
+	if subscription == nil {
+		return "", fmt.Errorf("subscription is nil")
+	}
+
+	showTitle := sanitizeFileName(subscriptionMediaLibraryTitle(subscription))
+	if strings.TrimSpace(showTitle) == "" || showTitle == "." {
+		return "", fmt.Errorf("invalid show title for tvshow.nfo: %q", subscription.Name)
+	}
+
+	return filepath.Join(basePath, showTitle), nil
+}
+
 func ensureTVShowNFO(showRoot string, subscription *model.Subscription) error {
 	if subscription == nil {
 		return fmt.Errorf("subscription is nil")
