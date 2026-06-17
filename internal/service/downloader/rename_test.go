@@ -1,10 +1,50 @@
 package downloader
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/WormW/auto-rss/internal/model"
 )
+
+type stubConfigRepo struct {
+	values map[string]string
+}
+
+func (s *stubConfigRepo) Get(key string) (*model.Config, error) {
+	if value, ok := s.values[key]; ok {
+		return &model.Config{Key: key, Value: value}, nil
+	}
+	return nil, nil
+}
+
+func (s *stubConfigRepo) GetCached(key string) (string, error) {
+	if value, ok := s.values[key]; ok {
+		return value, nil
+	}
+	return "", nil
+}
+
+func (s *stubConfigRepo) Set(key, value string) error {
+	s.values[key] = value
+	return nil
+}
+
+func (s *stubConfigRepo) Delete(key string) error {
+	delete(s.values, key)
+	return nil
+}
+
+func (s *stubConfigRepo) GetAll() ([]model.Config, error) {
+	configs := make([]model.Config, 0, len(s.values))
+	for key, value := range s.values {
+		configs = append(configs, model.Config{Key: key, Value: value})
+	}
+	return configs, nil
+}
 
 func TestRenameServiceGenerateFileName(t *testing.T) {
 	tests := []struct {
@@ -137,6 +177,188 @@ func TestRenameServiceGenerateFileName(t *testing.T) {
 				t.Errorf("GenerateFileName() = %v, want %v", result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestReorganizeSubscriptionFilesGeneratesNFOInShowRoot(t *testing.T) {
+	tests := []struct {
+		name             string
+		template         string
+		wantMovedTo      string
+		wantRenamedTo    string
+		wantRenamedCount int
+	}{
+		{
+			name:             "default nested template",
+			wantMovedTo:      filepath.Join("Test Anime", "Season 1"),
+			wantRenamedTo:    "Test Anime S01E01.mkv",
+			wantRenamedCount: 1,
+		},
+		{
+			name:             "flat simple preset",
+			template:         GetPresetTemplates()["simple"],
+			wantMovedTo:      ".",
+			wantRenamedTo:    "Test Anime - 01.mkv",
+			wantRenamedCount: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			basePath := t.TempDir()
+			configRepo := &stubConfigRepo{values: map[string]string{}}
+			if tt.template != "" {
+				configRepo.values["rename_template"] = tt.template
+			}
+
+			var movedTo string
+			var renamedTo string
+			qbClient := &mockQBClient{
+				getTorrentInfoFunc: func(hash string) (*TorrentInfo, error) {
+					return &TorrentInfo{Hash: hash, SavePath: filepath.Join(basePath, "incoming")}, nil
+				},
+				getTorrentFilesFunc: func(hash string) ([]TorrentFile, error) {
+					return []TorrentFile{{Name: "episode01.mkv", Size: 1000000}}, nil
+				},
+				setLocationFunc: func(hash, location string) error {
+					movedTo = location
+					return nil
+				},
+				renameFileFunc: func(hash, oldName, newName string) error {
+					renamedTo = newName
+					return nil
+				},
+			}
+
+			service := NewRenameService("")
+			result, err := service.ReorganizeSubscriptionFiles(
+				context.Background(),
+				testRenameSubscription(),
+				[]model.Download{{ID: 1, TorrentHash: "hash-1", Episode: 1}},
+				qbClient,
+				configRepo,
+				basePath,
+			)
+			if err != nil {
+				t.Fatalf("ReorganizeSubscriptionFiles() error = %v", err)
+			}
+
+			wantMovedPath := filepath.Join(basePath, tt.wantMovedTo)
+			if movedTo != wantMovedPath {
+				t.Fatalf("SetLocation() path = %q, want %q", movedTo, wantMovedPath)
+			}
+			if renamedTo != tt.wantRenamedTo {
+				t.Fatalf("RenameTorrentFile() path = %q, want %q", renamedTo, tt.wantRenamedTo)
+			}
+			if result["renamed"] != tt.wantRenamedCount {
+				t.Fatalf("renamed count = %v, want %d", result["renamed"], tt.wantRenamedCount)
+			}
+
+			assertGeneratedShowRootNFO(t, basePath)
+		})
+	}
+}
+
+func TestRenameSubscriptionFilesGeneratesNFOInShowRoot(t *testing.T) {
+	tests := []struct {
+		name            string
+		template        string
+		wantMovedTo     string
+		wantRenamedPath string
+	}{
+		{
+			name:            "default nested template",
+			wantMovedTo:     filepath.Join("Test Anime", "Season 1"),
+			wantRenamedPath: filepath.Join("Test Anime", "Season 1", "Test Anime S01E01.mkv"),
+		},
+		{
+			name:            "flat fansub preset",
+			template:        GetPresetTemplates()["fansub_style"],
+			wantMovedTo:     ".",
+			wantRenamedPath: "[ANi] Test Anime - 01 [1080p].mkv",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			basePath := t.TempDir()
+			configRepo := &stubConfigRepo{values: map[string]string{}}
+			if tt.template != "" {
+				configRepo.values["rename_template"] = tt.template
+			}
+
+			var movedTo string
+			var updatedRenamedPath string
+			qbClient := &mockQBClient{
+				getTorrentInfoFunc: func(hash string) (*TorrentInfo, error) {
+					return &TorrentInfo{Hash: hash, SavePath: filepath.Join(basePath, "incoming")}, nil
+				},
+				getTorrentFilesFunc: func(hash string) ([]TorrentFile, error) {
+					return []TorrentFile{{Name: "episode01.1080p.mkv", Size: 1000000}}, nil
+				},
+				setLocationFunc: func(hash, location string) error {
+					movedTo = location
+					return nil
+				},
+			}
+			downloadRepo := &mockDownloadRepo{
+				updateFunc: func(download *model.Download) error {
+					updatedRenamedPath = download.RenamedPath
+					return nil
+				},
+			}
+
+			service := NewRenameService("")
+			_, err := service.RenameSubscriptionFiles(
+				context.Background(),
+				testRenameSubscription(),
+				[]model.Download{{ID: 1, TorrentHash: "hash-1", Episode: 1}},
+				qbClient,
+				configRepo,
+				downloadRepo,
+				basePath,
+			)
+			if err != nil {
+				t.Fatalf("RenameSubscriptionFiles() error = %v", err)
+			}
+
+			wantMovedPath := filepath.Join(basePath, tt.wantMovedTo)
+			if movedTo != wantMovedPath {
+				t.Fatalf("SetLocation() path = %q, want %q", movedTo, wantMovedPath)
+			}
+
+			wantRenamedPath := filepath.Join(basePath, tt.wantRenamedPath)
+			if updatedRenamedPath != wantRenamedPath {
+				t.Fatalf("download.RenamedPath = %q, want %q", updatedRenamedPath, wantRenamedPath)
+			}
+
+			assertGeneratedShowRootNFO(t, basePath)
+		})
+	}
+}
+
+func testRenameSubscription() *model.Subscription {
+	return &model.Subscription{
+		ID:        1,
+		Name:      "Test Anime",
+		Season:    1,
+		Fansub:    "ANi",
+		BangumiID: 12345,
+	}
+}
+
+func assertGeneratedShowRootNFO(t *testing.T, basePath string) {
+	t.Helper()
+
+	baseNFOPath := filepath.Join(basePath, tvShowNFOFileName)
+	if _, err := os.Stat(baseNFOPath); !os.IsNotExist(err) {
+		t.Fatalf("tvshow.nfo should not be created at media-library base path, stat err = %v", err)
+	}
+
+	showNFOPath := filepath.Join(basePath, "Test Anime", tvShowNFOFileName)
+	content := readFileString(t, showNFOPath)
+	if !strings.Contains(content, "<bangumiid>12345</bangumiid>") {
+		t.Fatalf("tvshow.nfo missing bangumi id: %s", content)
 	}
 }
 

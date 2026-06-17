@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"github.com/WormW/auto-rss/internal/repository"
 	"gorm.io/gorm"
 )
 
@@ -95,6 +96,14 @@ func (m *mockDownloadRepo) CreateInTx(tx *gorm.DB, download *model.Download) err
 
 func (m *mockDownloadRepo) UpdateInTx(tx *gorm.DB, download *model.Download) error {
 	return nil
+}
+
+func (m *mockDownloadRepo) GetDownloadHistory(filter *repository.DownloadHistoryFilter, offset, limit int) ([]model.Download, int64, error) {
+	return nil, 0, nil
+}
+
+func (m *mockDownloadRepo) GetDownloadStatistics(days int) (*repository.DownloadStatistics, error) {
+	return nil, nil
 }
 
 // MockNotificationService for testing
@@ -330,7 +339,7 @@ func TestStatusSync_Sync(t *testing.T) {
 	sync := NewStatusSync(mockRepo, mockNotify)
 
 	torrents := []*TorrentInfo{
-		{Hash: "abc123", State: "uploading"},    // will change to completed
+		{Hash: "abc123", State: "uploading"},   // will change to completed
 		{Hash: "xyz789", State: "downloading"}, // not in DB
 	}
 
@@ -416,7 +425,7 @@ func TestStatusSync_Reconcile(t *testing.T) {
 			expectedSkipped:    0,
 		},
 		{
-			name: "skip empty hash",
+			name:     "skip empty hash",
 			torrents: []*TorrentInfo{},
 			downloadingTasks: []model.Download{
 				{ID: 1, TorrentHash: "", UpdatedAt: now.Add(-20 * time.Minute)},
