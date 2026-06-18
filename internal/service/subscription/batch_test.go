@@ -156,6 +156,45 @@ func TestBatchImporter_Import_CreatesSubscriptions(t *testing.T) {
 	}
 }
 
+func TestBatchImporter_Import_PreservesProvidedRSSURL(t *testing.T) {
+	mockMikan := &mockMikanService{
+		searchResult: &mikan.SearchResult{
+			Groups: []*mikan.AnimeGroup{
+				{
+					Items: []*mikan.AnimeItem{
+						{Title: "Test Anime", URL: "http://test.com/1"},
+					},
+				},
+			},
+		},
+		groups: []*mikan.FansubGroup{
+			{Name: "TestFansub", RSS: "http://group-rss.test.com"},
+		},
+	}
+	mockEnricher := &mockBangumiEnricher{}
+	mockRepo := &mockSubscriptionRepo{subscriptions: make(map[string]*model.Subscription)}
+	mockConfig := &mockConfigRepo{}
+
+	importer := NewBatchImporter(mockMikan, mockEnricher, mockRepo, mockConfig)
+	providedRSSURL := "https://mikanani.me/RSS/Bangumi?bangumiId=3026"
+
+	results, err := importer.Import([]ImportItem{
+		{Title: "Test Anime", Fansub: "TestFansub", RssURL: providedRSSURL},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 || !results[0].Success {
+		t.Fatalf("unexpected result: %#v", results)
+	}
+	if results[0].Subscription == nil {
+		t.Fatal("expected subscription to be set")
+	}
+	if results[0].Subscription.RssURL != providedRSSURL {
+		t.Fatalf("RssURL = %q, want %q", results[0].Subscription.RssURL, providedRSSURL)
+	}
+}
+
 func TestBatchImporter_Import_SkipsExisting(t *testing.T) {
 	mockMikan := &mockMikanService{}
 	mockEnricher := &mockBangumiEnricher{}

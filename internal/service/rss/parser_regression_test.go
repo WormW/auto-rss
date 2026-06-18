@@ -1,6 +1,7 @@
 package rss
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/WormW/auto-rss/internal/pkg/utils"
@@ -121,5 +122,59 @@ func TestExtractInfoHashFromTorrentURL(t *testing.T) {
 	want := "4f9c570f6b9ff86278629d352ba8272633a18c3b"
 	if got != want {
 		t.Fatalf("extractInfoHashFromTorrentURL() = %q, want %q", got, want)
+	}
+}
+
+func TestParsePreservesItemSpecificRSSURL(t *testing.T) {
+	feed := strings.NewReader(`<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Mikan</title>
+    <item>
+      <title>[ANi] Some Anime - 01 [1080P]</title>
+      <link>https://mikanani.me/Home/Bangumi/3026</link>
+      <enclosure url="https://mikanani.me/Download/20260618/58a7526e95fe511b80cbdae8a7ddb7d107be9871.torrent" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>`)
+
+	items, err := NewParser().Parse(feed)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("Parse() returned %d items, want 1", len(items))
+	}
+
+	want := "https://mikanani.me/RSS/Bangumi?bangumiId=3026"
+	if items[0].RssURL != want {
+		t.Fatalf("RssURL = %q, want %q", items[0].RssURL, want)
+	}
+	if items[0].TorrentURL != "https://mikanani.me/Download/20260618/58a7526e95fe511b80cbdae8a7ddb7d107be9871.torrent" {
+		t.Fatalf("TorrentURL = %q", items[0].TorrentURL)
+	}
+}
+
+func TestParseLeavesItemRSSURLEmptyWhenAbsent(t *testing.T) {
+	feed := strings.NewReader(`<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Generic torrents</title>
+    <item>
+      <title>[ANi] Some Anime - 01 [1080P]</title>
+      <link>https://example.com/downloads/episode-01.torrent</link>
+    </item>
+  </channel>
+</rss>`)
+
+	items, err := NewParser().Parse(feed)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("Parse() returned %d items, want 1", len(items))
+	}
+	if items[0].RssURL != "" {
+		t.Fatalf("RssURL = %q, want empty", items[0].RssURL)
 	}
 }

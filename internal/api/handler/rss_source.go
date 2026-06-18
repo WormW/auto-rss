@@ -29,7 +29,7 @@ func NewRSSSourceHandler(repo repository.RSSSourceRepository, configRepo reposit
 
 type CreateRSSSourceRequest struct {
 	Name        string `json:"name" binding:"required"`
-	BaseURL     string `json:"base_url" binding:"required"`  // 移除 url 验证，改为手动验证
+	BaseURL     string `json:"base_url" binding:"required"` // 移除 url 验证，改为手动验证
 	Description string `json:"description"`
 	Enabled     *bool  `json:"enabled"`
 }
@@ -227,16 +227,23 @@ func (h *RSSSourceHandler) FetchAnimes(c *gin.Context) {
 		animeName := extractAnimeName(item.Title, item.Fansub)
 
 		anime, exists := animeMap[animeName]
+		itemRSSURL := strings.TrimSpace(item.RssURL)
 		if !exists {
+			rssURL := itemRSSURL
+			if rssURL == "" {
+				rssURL = source.BaseURL
+			}
 			anime = &model.RSSAnime{
 				Title:      animeName,
-				RssURL:     source.BaseURL,  // 这里后续可以改为番剧专属的 RSS URL
+				RssURL:     rssURL,
 				Fansub:     item.Fansub,
 				Episodes:   []string{},
 				SourceID:   source.ID,
 				SourceName: source.Name,
 			}
 			animeMap[animeName] = anime
+		} else if itemRSSURL != "" && anime.RssURL == source.BaseURL {
+			anime.RssURL = itemRSSURL
 		}
 
 		// 添加集数
@@ -283,12 +290,12 @@ func extractAnimeName(title string, fansub string) string {
 
 	// 移除常见的集数模式
 	patterns := []string{
-		`\s*第?\s*\d+\s*[集话話].*$`,     // 第12集
-		`\s*[Ee][Pp]?\.?\s*\d+.*$`,    // E12, EP12
-		`\s*Episode\s*\d+.*$`,         // Episode 12
-		`\s*\[\s*\d+\s*\].*$`,         // [12]
-		`\s*S\d+E\d+.*$`,              // S01E12
-		`\s*-\s*\d+\s*[-\[].*$`,       // - 12 -
+		`\s*第?\s*\d+\s*[集话話].*$`,   // 第12集
+		`\s*[Ee][Pp]?\.?\s*\d+.*$`, // E12, EP12
+		`\s*Episode\s*\d+.*$`,      // Episode 12
+		`\s*\[\s*\d+\s*\].*$`,      // [12]
+		`\s*S\d+E\d+.*$`,           // S01E12
+		`\s*-\s*\d+\s*[-\[].*$`,    // - 12 -
 	}
 
 	for _, pattern := range patterns {
@@ -297,8 +304,8 @@ func extractAnimeName(title string, fansub string) string {
 	}
 
 	// 移除常见的后缀
-	name = regexp.MustCompile(`\s*\[.*\]$`).ReplaceAllString(name, "")  // 移除末尾的 [...]
-	name = regexp.MustCompile(`\s*【.*】$`).ReplaceAllString(name, "")  // 移除末尾的 【...】
+	name = regexp.MustCompile(`\s*\[.*\]$`).ReplaceAllString(name, "") // 移除末尾的 [...]
+	name = regexp.MustCompile(`\s*【.*】$`).ReplaceAllString(name, "")   // 移除末尾的 【...】
 	name = strings.TrimSpace(name)
 
 	return name

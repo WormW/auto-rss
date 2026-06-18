@@ -35,14 +35,15 @@ type Parser interface {
 // RSSItem RSS 条目
 type RSSItem struct {
 	Title       string
+	RssURL      string
 	TorrentURL  string
 	TorrentHash string
 	PubDate     string
-	PubTime     time.Time     // 解析后的发布时间
+	PubTime     time.Time // 解析后的发布时间
 	Fansub      string
 	Episode     int
-	Language    LanguageType  // 语言类型
-	LangKeyword string        // 匹配到的语言关键词（用于日志）
+	Language    LanguageType // 语言类型
+	LangKeyword string       // 匹配到的语言关键词（用于日志）
 }
 
 type parser struct {
@@ -123,47 +124,53 @@ func (p *parser) FetchAndParseWithTimeout(rssURL string, timeout time.Duration) 
 
 	var items []RSSItem
 	for _, item := range feed.Items {
-		rssItem := RSSItem{
-			Title:   item.Title,
-			PubDate: item.Published,
-		}
-
-		// 解析发布时间
-		if item.PublishedParsed != nil {
-			rssItem.PubTime = *item.PublishedParsed
-		}
-
-		// 提取种子链接
-		if item.Enclosures != nil && len(item.Enclosures) > 0 {
-			rssItem.TorrentURL = item.Enclosures[0].URL
-		} else if item.Link != "" {
-			rssItem.TorrentURL = item.Link
-		}
-
-		// 优先使用 RSS 扩展字段中的 info-hash（如 nyaa:infoHash），其次尝试从 URL 提取。
-		if extHash := utils.ExtractInfoHashFromExtensions(item.Extensions); extHash != "" {
-			rssItem.TorrentHash = extHash
-		} else if rssItem.TorrentURL != "" {
-			rssItem.TorrentHash = utils.ExtractInfoHashFromTorrentURL(rssItem.TorrentURL)
-			if rssItem.TorrentHash == "" {
-				hash := md5.Sum([]byte(rssItem.TorrentURL))
-				rssItem.TorrentHash = fmt.Sprintf("%x", hash)
-			}
-		}
-
-		// 提取字幕组
-		rssItem.Fansub = p.ExtractFansub(item.Title)
-
-		// 提取集数
-		rssItem.Episode = p.ExtractEpisode(item.Title)
-
-		// 提取语言
-		rssItem.Language, rssItem.LangKeyword = DetectLanguage(item.Title)
-
+		rssItem := p.feedItemToRSSItem(item)
 		items = append(items, rssItem)
 	}
 
 	return items, nil
+}
+
+func (p *parser) feedItemToRSSItem(item *gofeed.Item) RSSItem {
+	rssItem := RSSItem{
+		Title:   item.Title,
+		RssURL:  extractItemRSSURL(item),
+		PubDate: item.Published,
+	}
+
+	// 解析发布时间
+	if item.PublishedParsed != nil {
+		rssItem.PubTime = *item.PublishedParsed
+	}
+
+	// 提取种子链接
+	if item.Enclosures != nil && len(item.Enclosures) > 0 {
+		rssItem.TorrentURL = item.Enclosures[0].URL
+	} else if item.Link != "" {
+		rssItem.TorrentURL = item.Link
+	}
+
+	// 优先使用 RSS 扩展字段中的 info-hash（如 nyaa:infoHash），其次尝试从 URL 提取。
+	if extHash := utils.ExtractInfoHashFromExtensions(item.Extensions); extHash != "" {
+		rssItem.TorrentHash = extHash
+	} else if rssItem.TorrentURL != "" {
+		rssItem.TorrentHash = utils.ExtractInfoHashFromTorrentURL(rssItem.TorrentURL)
+		if rssItem.TorrentHash == "" {
+			hash := md5.Sum([]byte(rssItem.TorrentURL))
+			rssItem.TorrentHash = fmt.Sprintf("%x", hash)
+		}
+	}
+
+	// 提取字幕组
+	rssItem.Fansub = p.ExtractFansub(item.Title)
+
+	// 提取集数
+	rssItem.Episode = p.ExtractEpisode(item.Title)
+
+	// 提取语言
+	rssItem.Language, rssItem.LangKeyword = DetectLanguage(item.Title)
+
+	return rssItem
 }
 
 // Parse 从 io.Reader 或 URL 解析 RSS Feed
@@ -191,47 +198,68 @@ func (p *parser) Parse(feed interface{}) ([]RSSItem, error) {
 
 	var items []RSSItem
 	for _, item := range gfeed.Items {
-		rssItem := RSSItem{
-			Title:   item.Title,
-			PubDate: item.Published,
-		}
-
-		// 解析发布时间
-		if item.PublishedParsed != nil {
-			rssItem.PubTime = *item.PublishedParsed
-		}
-
-		// 提取种子链接
-		if item.Enclosures != nil && len(item.Enclosures) > 0 {
-			rssItem.TorrentURL = item.Enclosures[0].URL
-		} else if item.Link != "" {
-			rssItem.TorrentURL = item.Link
-		}
-
-		// 优先使用 RSS 扩展字段中的 info-hash（如 nyaa:infoHash），其次尝试从 URL 提取。
-		if extHash := utils.ExtractInfoHashFromExtensions(item.Extensions); extHash != "" {
-			rssItem.TorrentHash = extHash
-		} else if rssItem.TorrentURL != "" {
-			rssItem.TorrentHash = utils.ExtractInfoHashFromTorrentURL(rssItem.TorrentURL)
-			if rssItem.TorrentHash == "" {
-				hash := md5.Sum([]byte(rssItem.TorrentURL))
-				rssItem.TorrentHash = fmt.Sprintf("%x", hash)
-			}
-		}
-
-		// 提取字幕组
-		rssItem.Fansub = p.ExtractFansub(item.Title)
-
-		// 提取集数
-		rssItem.Episode = p.ExtractEpisode(item.Title)
-
-		// 提取语言
-		rssItem.Language, rssItem.LangKeyword = DetectLanguage(item.Title)
-
-		items = append(items, rssItem)
+		items = append(items, p.feedItemToRSSItem(item))
 	}
 
 	return items, nil
+}
+
+func extractItemRSSURL(item *gofeed.Item) string {
+	if item == nil {
+		return ""
+	}
+
+	candidates := []string{
+		item.Custom["rss_url"],
+		item.Custom["rssUrl"],
+		item.Custom["rss"],
+		item.GUID,
+		item.Link,
+	}
+	candidates = append(candidates, item.Links...)
+
+	for _, value := range candidates {
+		if rssURL := normalizeItemRSSURL(value); rssURL != "" {
+			return rssURL
+		}
+	}
+
+	return ""
+}
+
+func normalizeItemRSSURL(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+
+	path := strings.ToLower(parsed.Path)
+	if strings.Contains(path, "/rss/") || strings.HasSuffix(path, "/rss") || strings.Contains(strings.ToLower(parsed.RawQuery), "rss") {
+		return parsed.String()
+	}
+
+	if bangumiID := extractMikanBangumiID(parsed.Path); bangumiID != "" {
+		parsed.Path = "/RSS/Bangumi"
+		parsed.RawQuery = "bangumiId=" + bangumiID
+		parsed.Fragment = ""
+		return parsed.String()
+	}
+
+	return ""
+}
+
+func extractMikanBangumiID(path string) string {
+	re := regexp.MustCompile(`(?i)/(?:Home/)?Bangumi/(\d+)`)
+	matches := re.FindStringSubmatch(path)
+	if len(matches) < 2 {
+		return ""
+	}
+	return matches[1]
 }
 
 // ExtractFansub 从标题中提取字幕组名称
@@ -244,7 +272,6 @@ func (p *parser) ExtractFansub(title string) string {
 	}
 	return ""
 }
-
 
 // ExtractEpisode 从标题中提取集数
 func (p *parser) ExtractEpisode(title string) int {
