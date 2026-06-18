@@ -175,8 +175,13 @@ func (b *batchImporter) Import(items []ImportItem) ([]ImportResult, error) {
 			continue
 		}
 
+		rssURL := item.RssURL
+		if rssURL == "" {
+			rssURL = selectedGroup.RSS
+		}
+
 		subscription := &model.Subscription{
-			Name: item.Title, RssURL: selectedGroup.RSS, Season: season,
+			Name: item.Title, RssURL: rssURL, Season: season,
 			Status: "active", Enabled: true, Fansub: selectedGroup.Name, RenameEnabled: true,
 		}
 
