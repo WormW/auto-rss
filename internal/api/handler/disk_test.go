@@ -43,6 +43,7 @@ func setupDiskHandlerTest(t *testing.T) (*gin.Engine, *gorm.DB, repository.Downl
 	handler := NewDiskHandler(db, downloadRepo, subscriptionRepo, configRepo)
 	router := gin.New()
 	router.POST("/disk/cleanup", handler.TriggerCleanup)
+	router.GET("/disk/history", handler.GetHistory)
 
 	return router, db, downloadRepo, configRepo, root
 }
@@ -160,6 +161,77 @@ func TestTriggerCleanupReportsPartialFailureWithoutDeletingDBRecord(t *testing.T
 	}
 	if len(remaining) != 1 || remaining[0].TorrentHash != "handler-partial-outside" {
 		t.Fatalf("expected only failed cleanup record retained, got %#v", remaining)
+	}
+}
+
+func TestGetDiskHistoryReturnsCleanupPaginationAndFailureFields(t *testing.T) {
+	router, db, _, _, _ := setupDiskHandlerTest(t)
+	now := time.Now().UTC()
+	records := []model.DiskCleanupRecord{
+		{
+			Trigger:            "manual",
+			Strategy:           "age",
+			DownloadPath:       "/downloads",
+			DeletedCount:       1,
+			SkippedCount:       1,
+			FailedCount:        1,
+			FailedPaths:        `["/downloads/failed.mkv"]`,
+			FreedBytes:         4096,
+			BeforeFreeBytes:    10000,
+			AfterFreeBytes:     14096,
+			MediaLibraryStatus: "unconfigured",
+			Message:            `[{"path":"/downloads/failed.mkv","action":"skipped","reason":"permission denied"}]`,
+			CreatedAt:          now.Add(-1 * time.Minute),
+		},
+		{
+			Trigger:         "auto",
+			Strategy:        "space",
+			DownloadPath:    "/downloads",
+			DeletedCount:    2,
+			FreedBytes:      8192,
+			BeforeFreeBytes: 5000,
+			AfterFreeBytes:  13192,
+			CreatedAt:       now,
+		},
+	}
+	for i := range records {
+		if err := db.Create(&records[i]).Error; err != nil {
+			t.Fatalf("create cleanup record: %v", err)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/disk/history?page=2&page_size=1", nil)
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			Cleanup  []modelDiskCleanupRecordDTO `json:"cleanup"`
+			List     []modelDiskCleanupRecordDTO `json:"list"`
+			Total    int64                       `json:"total"`
+			Page     int                         `json:"page"`
+			PageSize int                         `json:"page_size"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Code != 0 || resp.Data.Total != 2 || resp.Data.Page != 2 || resp.Data.PageSize != 1 {
+		t.Fatalf("unexpected pagination metadata: %#v", resp.Data)
+	}
+	if len(resp.Data.Cleanup) != 1 || len(resp.Data.List) != 1 {
+		t.Fatalf("expected one cleanup item in both aliases, got cleanup=%d list=%d", len(resp.Data.Cleanup), len(resp.Data.List))
+	}
+	item := resp.Data.Cleanup[0]
+	if item.Trigger != "manual" || item.Strategy != "age" || item.DeletedCount != 1 || item.FreedBytes != 4096 {
+		t.Fatalf("unexpected cleanup item fields: %#v", item)
+	}
+	if item.FailedCount != 1 || len(item.FailedPaths) != 1 || item.FailedPaths[0] != "/downloads/failed.mkv" {
+		t.Fatalf("unexpected failure fields: %#v", item)
 	}
 }
 

@@ -102,6 +102,37 @@ func TestRunCleanupDeletesFilesAndReportsRealCounts(t *testing.T) {
 	}
 }
 
+func TestRunCleanupPersistsFailureSummary(t *testing.T) {
+	monitor, db, downloadRepo, _ := newDiskTestMonitor(t)
+	root := t.TempDir()
+	outsideDir := t.TempDir()
+	outsidePath := filepath.Join(outsideDir, "outside.mkv")
+	if err := os.WriteFile(outsidePath, []byte("outside"), 0600); err != nil {
+		t.Fatalf("write outside fixture: %v", err)
+	}
+	oldTime := time.Now().AddDate(0, 0, -40)
+	download := model.Download{Title: "outside", TorrentURL: "https://example.test/outside.torrent", TorrentHash: "hash-failure-summary", Status: model.DownloadStatusCompleted, FilePath: outsidePath, DownloadedAt: &oldTime}
+	if err := downloadRepo.Create(&download); err != nil {
+		t.Fatalf("create download: %v", err)
+	}
+
+	result, err := monitor.RunCleanup(CleanupOptions{Trigger: CleanupTriggerManual, Strategy: CleanupByAge, KeepDays: 30, DownloadPath: root})
+	if err != nil {
+		t.Fatalf("run cleanup: %v", err)
+	}
+	if result.FailedCount != 1 || len(result.FailedPaths) != 1 || result.FailedPaths[0] != outsidePath {
+		t.Fatalf("expected failed path summary in result, got %#v", result)
+	}
+
+	var record model.DiskCleanupRecord
+	if err := db.First(&record).Error; err != nil {
+		t.Fatalf("load cleanup record: %v", err)
+	}
+	if record.FailedCount != 1 || !strings.Contains(record.FailedPaths, outsidePath) {
+		t.Fatalf("expected persisted failure summary, got %#v", record)
+	}
+}
+
 func TestRunCleanupProtectsWatchedJellyfinMedia(t *testing.T) {
 	monitor, db, downloadRepo, configRepo := newDiskTestMonitor(t)
 	root := t.TempDir()

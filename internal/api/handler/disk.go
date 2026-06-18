@@ -1,10 +1,12 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"time"
 
+	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/disk"
@@ -49,11 +51,12 @@ type DiskStatusResponse struct {
 }
 
 type DiskHistoryResponse struct {
-	Samples []DiskSampleResponse        `json:"samples"`
-	Cleanup []modelDiskCleanupRecordDTO `json:"cleanup"`
-	List    []modelDiskCleanupRecordDTO `json:"list"`
-	Total   int64                       `json:"total"`
-	Page    int                         `json:"page"`
+	Samples  []DiskSampleResponse        `json:"samples"`
+	Cleanup  []modelDiskCleanupRecordDTO `json:"cleanup"`
+	List     []modelDiskCleanupRecordDTO `json:"list"`
+	Total    int64                       `json:"total"`
+	Page     int                         `json:"page"`
+	PageSize int                         `json:"page_size"`
 }
 
 type DiskSampleResponse struct {
@@ -68,18 +71,20 @@ type DiskSampleResponse struct {
 }
 
 type modelDiskCleanupRecordDTO struct {
-	ID                 uint   `json:"id"`
-	Trigger            string `json:"trigger"`
-	Strategy           string `json:"strategy"`
-	DownloadPath       string `json:"download_path"`
-	DeletedCount       int    `json:"deleted_count"`
-	SkippedCount       int    `json:"skipped_count"`
-	FreedBytes         int64  `json:"freed_bytes"`
-	BeforeFreeBytes    int64  `json:"before_free_bytes"`
-	AfterFreeBytes     int64  `json:"after_free_bytes"`
-	MediaLibraryStatus string `json:"media_library_status"`
-	Message            string `json:"message"`
-	CreatedAt          string `json:"created_at"`
+	ID                 uint     `json:"id"`
+	Trigger            string   `json:"trigger"`
+	Strategy           string   `json:"strategy"`
+	DownloadPath       string   `json:"download_path"`
+	DeletedCount       int      `json:"deleted_count"`
+	SkippedCount       int      `json:"skipped_count"`
+	FailedCount        int      `json:"failed_count"`
+	FailedPaths        []string `json:"failed_paths"`
+	FreedBytes         int64    `json:"freed_bytes"`
+	BeforeFreeBytes    int64    `json:"before_free_bytes"`
+	AfterFreeBytes     int64    `json:"after_free_bytes"`
+	MediaLibraryStatus string   `json:"media_library_status"`
+	Message            string   `json:"message"`
+	CreatedAt          string   `json:"created_at"`
 }
 
 // GetStatus 获取磁盘状态
@@ -282,33 +287,56 @@ func (h *DiskHandler) GetHistory(c *gin.Context) {
 	}
 	cleanupDTOs := make([]modelDiskCleanupRecordDTO, 0, len(records))
 	for _, record := range records {
-		cleanupDTOs = append(cleanupDTOs, modelDiskCleanupRecordDTO{
-			ID:                 record.ID,
-			Trigger:            record.Trigger,
-			Strategy:           record.Strategy,
-			DownloadPath:       record.DownloadPath,
-			DeletedCount:       record.DeletedCount,
-			SkippedCount:       record.SkippedCount,
-			FreedBytes:         record.FreedBytes,
-			BeforeFreeBytes:    record.BeforeFreeBytes,
-			AfterFreeBytes:     record.AfterFreeBytes,
-			MediaLibraryStatus: record.MediaLibraryStatus,
-			Message:            record.Message,
-			CreatedAt:          record.CreatedAt.Format(time.RFC3339),
-		})
+		cleanupDTOs = append(cleanupDTOs, cleanupRecordDTO(record))
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
 		"message": "Success",
 		"data": DiskHistoryResponse{
-			Samples: sampleDTOs,
-			Cleanup: cleanupDTOs,
-			List:    cleanupDTOs,
-			Total:   total,
-			Page:    page,
+			Samples:  sampleDTOs,
+			Cleanup:  cleanupDTOs,
+			List:     cleanupDTOs,
+			Total:    total,
+			Page:     page,
+			PageSize: pageSize,
 		},
 	})
+}
+
+func cleanupRecordDTO(record model.DiskCleanupRecord) modelDiskCleanupRecordDTO {
+	failedPaths := decodeCleanupFailedPaths(record.FailedPaths)
+	return modelDiskCleanupRecordDTO{
+		ID:                 record.ID,
+		Trigger:            record.Trigger,
+		Strategy:           record.Strategy,
+		DownloadPath:       record.DownloadPath,
+		DeletedCount:       record.DeletedCount,
+		SkippedCount:       record.SkippedCount,
+		FailedCount:        cleanupFailedCount(record.FailedCount, failedPaths),
+		FailedPaths:        failedPaths,
+		FreedBytes:         record.FreedBytes,
+		BeforeFreeBytes:    record.BeforeFreeBytes,
+		AfterFreeBytes:     record.AfterFreeBytes,
+		MediaLibraryStatus: record.MediaLibraryStatus,
+		Message:            record.Message,
+		CreatedAt:          record.CreatedAt.Format(time.RFC3339),
+	}
+}
+
+func decodeCleanupFailedPaths(raw string) []string {
+	var paths []string
+	if raw == "" || json.Unmarshal([]byte(raw), &paths) != nil {
+		return []string{}
+	}
+	return paths
+}
+
+func cleanupFailedCount(recorded int, paths []string) int {
+	if recorded > 0 {
+		return recorded
+	}
+	return len(paths)
 }
 
 // 辅助方法

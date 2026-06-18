@@ -139,6 +139,23 @@ func RunMigrations(db *gorm.DB) error {
 				return tx.Migrator().DropTable("disk_cleanup_records", "disk_samples")
 			},
 		},
+		{
+			ID: "202606180001", // add failed cleanup summary fields
+			Migrate: func(tx *gorm.DB) error {
+				return tx.AutoMigrate(&model.DiskCleanupRecord{})
+			},
+			Rollback: func(tx *gorm.DB) error {
+				if tx.Migrator().HasColumn(&model.DiskCleanupRecord{}, "failed_count") {
+					if err := tx.Migrator().DropColumn(&model.DiskCleanupRecord{}, "failed_count"); err != nil {
+						return err
+					}
+				}
+				if tx.Migrator().HasColumn(&model.DiskCleanupRecord{}, "failed_paths") {
+					return tx.Migrator().DropColumn(&model.DiskCleanupRecord{}, "failed_paths")
+				}
+				return nil
+			},
+		},
 	})
 
 	// 设置迁移超时
