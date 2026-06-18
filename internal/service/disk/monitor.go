@@ -77,6 +77,8 @@ type CleanupResult struct {
 	Cleaned            bool          `json:"cleaned"`
 	DeletedCount       int           `json:"deleted_count"`
 	SkippedCount       int           `json:"skipped_count"`
+	FailedCount        int           `json:"failed_count"`
+	FailedPaths        []string      `json:"failed_paths"`
 	FreedBytes         int64         `json:"freed_bytes"`
 	BeforeFreeGB       float64       `json:"before_free_gb"`
 	AfterFreeGB        float64       `json:"after_free_gb"`
@@ -615,13 +617,19 @@ func (m *Monitor) recordCleanup(opts CleanupOptions, result *CleanupResult) erro
 	if m.db == nil || result == nil {
 		return nil
 	}
+	failedPaths := cleanupFailedPaths(result.Items)
+	result.FailedCount = len(failedPaths)
+	result.FailedPaths = failedPaths
 	messageBytes, _ := json.Marshal(result.Items)
+	failedPathBytes, _ := json.Marshal(failedPaths)
 	return m.db.Create(&model.DiskCleanupRecord{
 		Trigger:            opts.Trigger,
 		Strategy:           string(opts.Strategy),
 		DownloadPath:       opts.DownloadPath,
 		DeletedCount:       result.DeletedCount,
 		SkippedCount:       result.SkippedCount,
+		FailedCount:        len(failedPaths),
+		FailedPaths:        string(failedPathBytes),
 		FreedBytes:         result.FreedBytes,
 		BeforeFreeBytes:    result.BeforeFreeBytes,
 		AfterFreeBytes:     result.AfterFreeBytes,
@@ -629,6 +637,17 @@ func (m *Monitor) recordCleanup(opts CleanupOptions, result *CleanupResult) erro
 		Message:            string(messageBytes),
 		CreatedAt:          time.Now(),
 	}).Error
+}
+
+func cleanupFailedPaths(items []CleanupItem) []string {
+	paths := make([]string, 0)
+	for _, item := range items {
+		if item.Action != "skipped" || strings.TrimSpace(item.Reason) == "" || strings.TrimSpace(item.Path) == "" {
+			continue
+		}
+		paths = append(paths, item.Path)
+	}
+	return paths
 }
 
 // CheckMediaLibrary returns the current Plex/Jellyfin connection status.

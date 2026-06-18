@@ -27,6 +27,8 @@ type DiskCleanupRecord struct {
 	DownloadPath       string    `json:"download_path" gorm:"not null;index"`
 	DeletedCount       int       `json:"deleted_count"`
 	SkippedCount       int       `json:"skipped_count"`
+	FailedCount        int       `json:"failed_count"`
+	FailedPaths        string    `json:"failed_paths" gorm:"type:text"`
 	FreedBytes         int64     `json:"freed_bytes"`
 	BeforeFreeBytes    int64     `json:"before_free_bytes"`
 	AfterFreeBytes     int64     `json:"after_free_bytes"`
