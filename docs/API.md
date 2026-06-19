@@ -468,8 +468,8 @@ DELETE /api/v1/downloads/clear?status=failed
 | `GET` | `/disk/info` | 等同于 `/disk/status` |
 | `GET` | `/disk/settings` | 获取磁盘清理和阈值设置 |
 | `PUT` | `/disk/settings` | 更新磁盘设置 |
-| `POST` | `/disk/cleanup` | 手动触发清理接口；当前返回简化结果 |
-| `GET` | `/disk/history` | 清理历史；当前返回空列表 |
+| `POST` | `/disk/cleanup` | 手动触发清理，复用后台清理逻辑并返回逐项结果 |
+| `GET` | `/disk/history` | 获取磁盘采样和持久化清理历史 |
 
 更新设置：
 
@@ -480,9 +480,112 @@ DELETE /api/v1/downloads/clear?status=failed
   "retention_days": 30,
   "min_free_gb": 50,
   "warning_threshold_gb": 10,
-  "critical_threshold_gb": 5
+  "critical_threshold_gb": 5,
+  "protect_watching": true
 }
 ```
+
+手动清理请求支持 `strategy`（`age`、`space`、`hybrid`）、`keep_days` 和 `keep_gb`：
+
+```json
+{
+  "strategy": "age",
+  "keep_days": 30,
+  "keep_gb": 50
+}
+```
+
+`POST /disk/cleanup` 会按当前配置的下载根目录筛选已完成下载，只删除位于下载根目录内的候选文件，并返回真实清理结果：
+
+```json
+{
+  "code": 0,
+  "message": "Success",
+  "data": {
+    "cleaned": true,
+    "deleted_count": 1,
+    "skipped_count": 1,
+    "failed_count": 1,
+    "failed_paths": ["/downloads/failed.mkv"],
+    "freed_bytes": 4096,
+    "before_free_gb": 12.5,
+    "after_free_gb": 12.6,
+    "before_free_bytes": 13421772800,
+    "after_free_bytes": 13500000000,
+    "media_library_status": "connected",
+    "items": [
+      { "download_id": 1, "path": "/downloads/old.mkv", "action": "deleted", "freed_bytes": 4096 },
+      { "download_id": 2, "path": "/downloads/failed.mkv", "action": "skipped", "reason": "permission denied", "freed_bytes": 0 }
+    ]
+  }
+}
+```
+
+`failed_count` 和 `failed_paths` 来自带失败原因的 `skipped` 项；成功删除文件后对应下载记录会一并删除，失败或受保护项会保留。
+
+`GET /disk/history?page=1&page_size=20` 返回最近磁盘采样和分页清理摘要。清理记录同时放在 `cleanup` 和兼容别名 `list` 中，`total`、`page`、`page_size` 描述清理记录分页：
+
+```json
+{
+  "code": 0,
+  "message": "Success",
+  "data": {
+    "samples": [
+      {
+        "path": "/downloads",
+        "download_path": "/downloads",
+        "total": 107374182400,
+        "used": 53687091200,
+        "free": 53687091200,
+        "usage_percent": 50,
+        "status": "healthy",
+        "created_at": "2026-06-19T01:00:00Z"
+      }
+    ],
+    "cleanup": [
+      {
+        "id": 1,
+        "trigger": "manual",
+        "strategy": "age",
+        "download_path": "/downloads",
+        "deleted_count": 1,
+        "skipped_count": 1,
+        "failed_count": 1,
+        "failed_paths": ["/downloads/failed.mkv"],
+        "freed_bytes": 4096,
+        "before_free_bytes": 13421772800,
+        "after_free_bytes": 13500000000,
+        "media_library_status": "unconfigured",
+        "message": "[{\"path\":\"/downloads/failed.mkv\",\"action\":\"skipped\",\"reason\":\"permission denied\"}]",
+        "created_at": "2026-06-19T01:05:00Z"
+      }
+    ],
+    "list": [
+      {
+        "id": 1,
+        "trigger": "manual",
+        "strategy": "age",
+        "download_path": "/downloads",
+        "deleted_count": 1,
+        "skipped_count": 1,
+        "failed_count": 1,
+        "failed_paths": ["/downloads/failed.mkv"],
+        "freed_bytes": 4096,
+        "before_free_bytes": 13421772800,
+        "after_free_bytes": 13500000000,
+        "media_library_status": "unconfigured",
+        "message": "[{\"path\":\"/downloads/failed.mkv\",\"action\":\"skipped\",\"reason\":\"permission denied\"}]",
+        "created_at": "2026-06-19T01:05:00Z"
+      }
+    ],
+    "total": 1,
+    "page": 1,
+    "page_size": 20
+  }
+}
+```
+
+`GET /disk/settings` 的响应包含 `media_library_status` 和 `media_library_message`。`protect_watching=true` 时，清理会查询 `media_library.type`、`media_library.url`、`media_library.token`、可选 `media_library.user_id` 和 `media_library.recent_play_hours`；支持 Jellyfin/Emby 和 Plex 的正在播放/最近播放路径。媒体库未配置、配置不完整或查询失败时会保守跳过候选项，并在清理结果和历史中记录 `media_library_status` 为 `unconfigured` 或 `failed`。
 
 后台磁盘监控每 5 分钟检查一次下载路径。低于警告阈值会发送通知；低于危险阈值会发送通知并暂停新下载。自动清理服务会在危险状态且 `disk.auto_cleanup_enabled=true` 时执行。
 
