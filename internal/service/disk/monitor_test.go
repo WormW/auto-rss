@@ -171,6 +171,9 @@ func TestRunCleanupProtectsWatchedJellyfinMedia(t *testing.T) {
 	if result.DeletedCount != 0 || result.SkippedCount != 1 || result.MediaLibraryStatus != MediaLibraryStatusConnected {
 		t.Fatalf("expected watched media skipped, got %#v", result)
 	}
+	if len(result.Items) != 1 || result.Items[0].Action != "skipped" || result.Items[0].Reason != "media is currently watched or recently played" {
+		t.Fatalf("expected clear protected skip reason, got %#v", result.Items)
+	}
 	if _, err := os.Stat(watchedPath); err != nil {
 		t.Fatalf("expected watched file to remain: %v", err)
 	}
@@ -178,6 +181,160 @@ func TestRunCleanupProtectsWatchedJellyfinMedia(t *testing.T) {
 	db.Model(&model.Download{}).Count(&count)
 	if count != 1 {
 		t.Fatalf("expected DB record retained, count=%d", count)
+	}
+}
+
+func TestMediaLibraryStateMatchesProtectedPaths(t *testing.T) {
+	root := t.TempDir()
+	protectedFile := filepath.Join(root, "shows", "Protected", "episode-01.mkv")
+	protectedDir := filepath.Join(root, "shows", "Active")
+	protectedChild := filepath.Join(root, "shows", "Movie", "part-01.mkv")
+	for _, path := range []string{filepath.Dir(protectedFile), protectedDir, filepath.Dir(protectedChild)} {
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatalf("create fixture dir %s: %v", path, err)
+		}
+	}
+	for _, path := range []string{protectedFile, filepath.Join(protectedDir, "episode-02.mkv"), protectedChild} {
+		if err := os.WriteFile(path, []byte("media"), 0600); err != nil {
+			t.Fatalf("write fixture %s: %v", path, err)
+		}
+	}
+
+	protectedFileAbs := normalizedProtectedPath(t, protectedFile)
+	protectedDirAbs := normalizedProtectedPath(t, protectedDir)
+	protectedChildAbs := normalizedProtectedPath(t, protectedChild)
+
+	state := mediaLibraryState{ProtectedPaths: map[string]struct{}{
+		protectedFileAbs:  {},
+		protectedDirAbs:   {},
+		protectedChildAbs: {},
+	}}
+
+	cases := []struct {
+		name     string
+		download model.Download
+		want     bool
+	}{
+		{
+			name:     "file path exact match",
+			download: model.Download{FilePath: protectedFile},
+			want:     true,
+		},
+		{
+			name:     "renamed path exact match",
+			download: model.Download{FilePath: filepath.Join(root, "shows", "renamed-source.mkv"), RenamedPath: protectedFile},
+			want:     true,
+		},
+		{
+			name:     "download child of protected parent",
+			download: model.Download{FilePath: filepath.Join(protectedDir, "episode-02.mkv")},
+			want:     true,
+		},
+		{
+			name:     "protected child of download parent",
+			download: model.Download{FilePath: filepath.Dir(protectedChild)},
+			want:     true,
+		},
+		{
+			name:     "sibling prefix is not protected",
+			download: model.Download{FilePath: filepath.Join(root, "shows", "Protected Extras", "episode-01.mkv")},
+			want:     false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := state.IsProtected(tc.download); got != tc.want {
+				t.Fatalf("IsProtected()=%v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("symlink resolved path", func(t *testing.T) {
+		linkPath := filepath.Join(root, "linked-protected.mkv")
+		if err := os.Symlink(protectedFile, linkPath); err != nil {
+			t.Skipf("symlink not available: %v", err)
+		}
+		if got := state.IsProtected(model.Download{FilePath: linkPath}); !got {
+			t.Fatalf("expected symlink to protected file to match")
+		}
+	})
+}
+
+func TestRunCleanupDeletesOnlyConnectedUnprotectedMedia(t *testing.T) {
+	monitor, db, downloadRepo, configRepo := newDiskTestMonitor(t)
+	root := t.TempDir()
+	oldTime := time.Now().AddDate(0, 0, -40)
+	protectedDir := filepath.Join(root, "active-show")
+	protectedPath := filepath.Join(protectedDir, "episode-01.mkv")
+	unprotectedPath := filepath.Join(root, "stale-show", "episode-01.mkv")
+	if err := os.MkdirAll(filepath.Dir(protectedPath), 0700); err != nil {
+		t.Fatalf("create protected dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(unprotectedPath), 0700); err != nil {
+		t.Fatalf("create unprotected dir: %v", err)
+	}
+	if err := os.WriteFile(protectedPath, []byte("keep"), 0600); err != nil {
+		t.Fatalf("write protected fixture: %v", err)
+	}
+	if err := os.WriteFile(unprotectedPath, []byte(strings.Repeat("x", 1024)), 0600); err != nil {
+		t.Fatalf("write unprotected fixture: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/Sessions":
+			fmt.Fprintf(w, `[{"NowPlayingItem":{"Path":%q}}]`, protectedDir)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	setConfigs(t, configRepo, map[string]string{
+		"media_library.type":  "jellyfin",
+		"media_library.url":   server.URL,
+		"media_library.token": "token",
+	})
+
+	for _, download := range []model.Download{
+		{Title: "active", TorrentURL: "https://example.test/active.torrent", TorrentHash: "hash-active", Status: model.DownloadStatusCompleted, FilePath: protectedPath, DownloadedAt: &oldTime},
+		{Title: "stale", TorrentURL: "https://example.test/stale.torrent", TorrentHash: "hash-stale", Status: model.DownloadStatusCompleted, FilePath: unprotectedPath, DownloadedAt: &oldTime},
+	} {
+		if err := downloadRepo.Create(&download); err != nil {
+			t.Fatalf("create download %s: %v", download.Title, err)
+		}
+	}
+
+	result, err := monitor.RunCleanup(CleanupOptions{Trigger: CleanupTriggerManual, Strategy: CleanupByAge, KeepDays: 30, DownloadPath: root, ProtectWatching: true})
+	if err != nil {
+		t.Fatalf("run cleanup: %v", err)
+	}
+	if result.MediaLibraryStatus != MediaLibraryStatusConnected || result.DeletedCount != 1 || result.SkippedCount != 1 || result.FreedBytes != 1024 {
+		t.Fatalf("expected one protected skip and one connected unprotected delete, got %#v", result)
+	}
+
+	itemsByPath := map[string]CleanupItem{}
+	for _, item := range result.Items {
+		itemsByPath[item.Path] = item
+	}
+	if item := itemsByPath[protectedPath]; item.Action != "skipped" || item.Reason != "media is currently watched or recently played" {
+		t.Fatalf("expected protected item to skip with reason, got %#v", item)
+	}
+	if item := itemsByPath[unprotectedPath]; item.Action != "deleted" || item.FreedBytes != 1024 {
+		t.Fatalf("expected unprotected item to delete, got %#v", item)
+	}
+	if _, err := os.Stat(protectedPath); err != nil {
+		t.Fatalf("expected protected file retained: %v", err)
+	}
+	if _, err := os.Stat(unprotectedPath); !os.IsNotExist(err) {
+		t.Fatalf("expected unprotected file deleted, stat err=%v", err)
+	}
+	var remaining []model.Download
+	if err := db.Find(&remaining).Error; err != nil {
+		t.Fatalf("list remaining downloads: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].TorrentHash != "hash-active" {
+		t.Fatalf("expected only protected download retained, got %#v", remaining)
 	}
 }
 
@@ -309,4 +466,16 @@ func setConfigs(t *testing.T, repo repository.ConfigRepository, values map[strin
 			t.Fatalf("set config %s: %v", key, err)
 		}
 	}
+}
+
+func normalizedProtectedPath(t *testing.T, path string) string {
+	t.Helper()
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatalf("abs protected path %s: %v", path, err)
+	}
+	if realPath, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = realPath
+	}
+	return abs
 }
