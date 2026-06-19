@@ -76,6 +76,30 @@ func TestRSSSourceHandler_FetchAnimes_FallsBackToSourceURL(t *testing.T) {
 	}
 }
 
+func TestRSSSourceHandler_FetchAnimes_GroupsGenericFeedTitles(t *testing.T) {
+	sourceURL := "https://example.com/feeds/season.xml"
+	itemRSSURL := "https://example.com/subscriptions/some-anime/rss"
+	items := []rss.RSSItem{
+		{Title: "Some Anime - 01 [1080p][CHS]", Episode: 1, TorrentURL: "magnet:?xt=urn:btih:1111111111111111111111111111111111111111", RssURL: sourceURL},
+		{Title: "Some Anime - 02 [1080p][CHS]", Episode: 2, TorrentURL: "https://example.com/downloads/episode-02.torrent", RssURL: sourceURL},
+		{Title: "Some Anime - 03 [1080p][CHS]", Episode: 3, TorrentURL: "magnet:?xt=urn:btih:3333333333333333333333333333333333333333", RssURL: itemRSSURL},
+	}
+	animes := fetchAnimesForTest(t, items, sourceURL)
+
+	if len(animes) != 1 {
+		t.Fatalf("got %d animes, want 1", len(animes))
+	}
+	if animes[0].Title != "Some Anime" {
+		t.Fatalf("Title = %q, want Some Anime", animes[0].Title)
+	}
+	if animes[0].RssURL != itemRSSURL {
+		t.Fatalf("RssURL = %q, want %q", animes[0].RssURL, itemRSSURL)
+	}
+	if got := animes[0].Episodes; len(got) != 3 || got[0] != "1" || got[1] != "2" || got[2] != "3" {
+		t.Fatalf("Episodes = %#v, want [1 2 3]", got)
+	}
+}
+
 func fetchAnimesForTest(t *testing.T, items []rss.RSSItem, sourceURL string) []model.RSSAnime {
 	t.Helper()
 

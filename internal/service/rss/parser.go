@@ -125,6 +125,9 @@ func (p *parser) FetchAndParseWithTimeout(rssURL string, timeout time.Duration) 
 	var items []RSSItem
 	for _, item := range feed.Items {
 		rssItem := p.feedItemToRSSItem(item)
+		if rssItem.RssURL == "" {
+			rssItem.RssURL = normalizeSourceRSSURL(rssURL)
+		}
 		items = append(items, rssItem)
 	}
 
@@ -196,12 +199,48 @@ func (p *parser) Parse(feed interface{}) ([]RSSItem, error) {
 		return nil, fmt.Errorf("failed to parse RSS feed: %w", err)
 	}
 
+	sourceURL := extractFeedSourceURL(gfeed)
 	var items []RSSItem
 	for _, item := range gfeed.Items {
-		items = append(items, p.feedItemToRSSItem(item))
+		rssItem := p.feedItemToRSSItem(item)
+		if rssItem.RssURL == "" {
+			rssItem.RssURL = sourceURL
+		}
+		items = append(items, rssItem)
 	}
 
 	return items, nil
+}
+
+func extractFeedSourceURL(feed *gofeed.Feed) string {
+	if feed == nil {
+		return ""
+	}
+
+	candidates := []string{
+		feed.FeedLink,
+	}
+	for _, value := range candidates {
+		if rssURL := normalizeSourceRSSURL(value); rssURL != "" {
+			return rssURL
+		}
+	}
+
+	return ""
+}
+
+func normalizeSourceRSSURL(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+
+	return parsed.String()
 }
 
 func extractItemRSSURL(item *gofeed.Item) string {
