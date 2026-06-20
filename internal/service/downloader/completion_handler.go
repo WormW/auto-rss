@@ -7,6 +7,7 @@ import (
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
+	"github.com/WormW/auto-rss/internal/service/medialibrary"
 	"gorm.io/gorm"
 )
 
@@ -24,10 +25,16 @@ type completionHandler struct {
 	renamerSvc      *RenameService
 	qbClient        QBittorrentClient
 	db              *gorm.DB
+	mediaLibrary    MediaLibraryRefresher
 }
 
 type completionDownloadRepository interface {
 	Update(download *model.Download) error
+}
+
+// MediaLibraryRefresher refreshes a media library for a completed download.
+type MediaLibraryRefresher interface {
+	RefreshDownloadAfterImport(download *model.Download) medialibrary.RefreshResult
 }
 
 // NewCompletionHandler 创建完成处理服务
@@ -38,13 +45,19 @@ func NewCompletionHandler(
 	renamerSvc *RenameService,
 	qbClient QBittorrentClient,
 	db *gorm.DB,
+	mediaLibrary ...MediaLibraryRefresher,
 ) CompletionHandler {
+	var mediaSvc MediaLibraryRefresher
+	if len(mediaLibrary) > 0 {
+		mediaSvc = mediaLibrary[0]
+	}
 	return &completionHandler{
 		downloadRepo:    downloadRepo,
 		notificationSvc: notificationSvc,
 		renamerSvc:      renamerSvc,
 		qbClient:        qbClient,
 		db:              db,
+		mediaLibrary:    mediaSvc,
 	}
 }
 
@@ -83,6 +96,7 @@ func (h *completionHandler) HandleComplete(download *model.Download, torrent *To
 					"download_id", download.ID,
 					"old_path", torrent.SavePath,
 					"new_path", newPath)
+				h.ensureTVShowNFOForRenamedPath(newPath, subscription)
 			}
 		} else {
 			// 合集种子批量重命名
@@ -96,6 +110,7 @@ func (h *completionHandler) HandleComplete(download *model.Download, torrent *To
 				logger.Info("Collection files renamed successfully",
 					"download_id", download.ID,
 					"renamed_count", renamedCount)
+				h.ensureTVShowNFO(torrent.SavePath, subscription)
 			}
 		}
 	}
@@ -114,6 +129,15 @@ func (h *completionHandler) HandleComplete(download *model.Download, torrent *To
 			"download_id", download.ID,
 			"error", err.Error())
 		return err
+	}
+
+	if h.mediaLibrary != nil {
+		result := h.mediaLibrary.RefreshDownloadAfterImport(download)
+		logger.Info("Media library refresh after download completion",
+			"download_id", download.ID,
+			"status", result.Status,
+			"path", result.Path,
+			"message", result.Message)
 	}
 
 	return nil
@@ -229,6 +253,24 @@ func (h *completionHandler) renameFile(download *model.Download, subscription *m
 	// 返回完整路径
 	fullPath := targetLocation + "/" + newFileName
 	return fullPath, nil
+}
+
+func (h *completionHandler) ensureTVShowNFOForRenamedPath(renamedPath string, subscription *model.Subscription) {
+	if err := ensureTVShowNFOForRenamedPath(renamedPath, subscription); err != nil {
+		logger.Warn("Failed to generate tvshow.nfo",
+			"subscription_id", subscription.ID,
+			"renamed_path", renamedPath,
+			"error", err.Error())
+	}
+}
+
+func (h *completionHandler) ensureTVShowNFO(showRoot string, subscription *model.Subscription) {
+	if err := ensureTVShowNFO(showRoot, subscription); err != nil {
+		logger.Warn("Failed to generate tvshow.nfo",
+			"subscription_id", subscription.ID,
+			"show_root", showRoot,
+			"error", err.Error())
+	}
 }
 
 // renameCollectionFiles 重命名合集种子中的所有视频文件

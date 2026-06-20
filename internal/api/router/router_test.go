@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -41,6 +42,8 @@ func newTestDB(t *testing.T) *gorm.DB {
 		&model.Subscription{},
 		&model.Download{},
 		&model.Config{},
+		&model.DiskSample{},
+		&model.DiskCleanupRecord{},
 		&model.RSSSource{},
 		&model.Log{},
 		&model.RefreshToken{},
@@ -83,6 +86,11 @@ func newTestAppContext(db *gorm.DB, cfg *config.Config) *app.Context {
 }
 
 func setupRouterForTest(t *testing.T, authEnabled bool) (http.Handler, *app.Context) {
+	r, appCtx, _ := setupRouterForTestWithDB(t, authEnabled)
+	return r, appCtx
+}
+
+func setupRouterForTestWithDB(t *testing.T, authEnabled bool) (http.Handler, *app.Context, *gorm.DB) {
 	t.Helper()
 
 	db := newTestDB(t)
@@ -101,7 +109,7 @@ func setupRouterForTest(t *testing.T, authEnabled bool) (http.Handler, *app.Cont
 	if err != nil {
 		t.Fatalf("failed to setup router: %v", err)
 	}
-	return r, appCtx
+	return r, appCtx, db
 }
 
 func TestSetup_ReturnsErrorWhenSchedulerStartFailsAndBlockingEnabled(t *testing.T) {
@@ -225,8 +233,59 @@ func TestOnboardingStatusReportsMissingSetup(t *testing.T) {
 	}
 }
 
-func TestOnboardingCompletePersistsState(t *testing.T) {
+func TestOnboardingStatusRequiresUsableDownloadDirectory(t *testing.T) {
+	r, _, db := setupRouterForTestWithDB(t, false)
+
+	filePath := t.TempDir() + "/not-a-directory"
+	if err := os.WriteFile(filePath, []byte("not a directory"), 0600); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+	if err := db.Create(&model.Config{Key: "download_path", Value: filePath}).Error; err != nil {
+		t.Fatalf("failed to seed download_path config: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/onboarding/status", nil)
+	r.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected onboarding status to succeed, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Data struct {
+			Missing      []string `json:"missing"`
+			DownloadPath struct {
+				IsDir    bool `json:"is_dir"`
+				Writable bool `json:"writable"`
+			} `json:"download_path"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to parse onboarding response: %v", err)
+	}
+	if response.Data.DownloadPath.IsDir || response.Data.DownloadPath.Writable {
+		t.Fatalf("expected file path not to be marked usable: %#v", response.Data.DownloadPath)
+	}
+	if !containsString(response.Data.Missing, "download_path") {
+		t.Fatalf("expected download_path to remain missing, got %#v", response.Data.Missing)
+	}
+}
+
+func TestOnboardingCompleteRejectsIncompleteSetup(t *testing.T) {
 	r, _ := setupRouterForTest(t, false)
+
+	completeRecorder := httptest.NewRecorder()
+	completeReq := httptest.NewRequest(http.MethodPost, "/api/v1/onboarding/complete", nil)
+	r.ServeHTTP(completeRecorder, completeReq)
+	if completeRecorder.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected onboarding complete to reject incomplete setup, got %d: %s", completeRecorder.Code, completeRecorder.Body.String())
+	}
+}
+
+func TestOnboardingCompletePersistsStateWhenRequiredSetupComplete(t *testing.T) {
+	r, _, db := setupRouterForTestWithDB(t, false)
+
+	seedCompleteOnboardingSetup(t, db)
 
 	completeRecorder := httptest.NewRecorder()
 	completeReq := httptest.NewRequest(http.MethodPost, "/api/v1/onboarding/complete", nil)
@@ -257,4 +316,39 @@ func TestOnboardingCompletePersistsState(t *testing.T) {
 	if response.Data.ShouldShow {
 		t.Fatalf("expected completed onboarding not to show")
 	}
+}
+
+func seedCompleteOnboardingSetup(t *testing.T, db *gorm.DB) {
+	t.Helper()
+
+	configs := []model.Config{
+		{Key: "qbittorrent_host", Value: "http://localhost:8080"},
+		{Key: "qbittorrent_username", Value: "admin"},
+		{Key: "qbittorrent_password", Value: "secret"},
+		{Key: "download_path", Value: t.TempDir()},
+		{Key: "rename_template", Value: "${title}/S${seasonFormat}E${episodeFormat}"},
+	}
+	for _, cfg := range configs {
+		if err := db.Create(&cfg).Error; err != nil {
+			t.Fatalf("failed to seed config %s: %v", cfg.Key, err)
+		}
+	}
+
+	source := model.RSSSource{Name: "Test RSS", BaseURL: "https://example.com/rss.xml", Enabled: true}
+	if err := db.Create(&source).Error; err != nil {
+		t.Fatalf("failed to seed rss source: %v", err)
+	}
+	subscription := model.Subscription{Name: "Test Anime", RssURL: source.BaseURL, Season: 1, Enabled: true, Status: "active", RSSSourceID: &source.ID}
+	if err := db.Create(&subscription).Error; err != nil {
+		t.Fatalf("failed to seed subscription: %v", err)
+	}
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }

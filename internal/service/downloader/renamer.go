@@ -9,6 +9,7 @@ import (
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
+	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
 )
 
@@ -39,14 +40,15 @@ type RenameContext struct {
 
 // GenerateFileName 生成新文件名
 // 支持的模板变量:
-//   ${title}          - 番剧名称
-//   ${season}         - 季度数字 (1, 2, 3)
-//   ${seasonFormat}   - 格式化季度 (01, 02, 03)
-//   ${episode}        - 集数数字 (1, 2, 3)
-//   ${episodeFormat}  - 格式化集数 (01, 02, 03)
-//   ${fansub}         - 字幕组
-//   ${resolution}     - 分辨率 (1080p, 720p)
-//   ${language}       - 语言 (CHS, CHT)
+//
+//	${title}          - 番剧名称
+//	${season}         - 季度数字 (1, 2, 3)
+//	${seasonFormat}   - 格式化季度 (01, 02, 03)
+//	${episode}        - 集数数字 (1, 2, 3)
+//	${episodeFormat}  - 格式化集数 (01, 02, 03)
+//	${fansub}         - 字幕组
+//	${resolution}     - 分辨率 (1080p, 720p)
+//	${language}       - 语言 (CHS, CHT)
 func (r *RenameService) GenerateFileName(ctx *RenameContext) string {
 	template := r.defaultTemplate
 
@@ -60,7 +62,8 @@ func (r *RenameService) GenerateFileName(ctx *RenameContext) string {
 
 	// 替换模板变量
 	result := template
-	result = strings.ReplaceAll(result, "${title}", sanitizeFileName(ctx.Subscription.Name))
+	mediaTitle := subscriptionMediaLibraryTitle(ctx.Subscription)
+	result = strings.ReplaceAll(result, "${title}", sanitizeFileName(mediaTitle))
 	result = strings.ReplaceAll(result, "${season}", fmt.Sprintf("%d", ctx.Subscription.Season))
 	result = strings.ReplaceAll(result, "${seasonFormat}", fmt.Sprintf("%02d", ctx.Subscription.Season))
 	result = strings.ReplaceAll(result, "${episode}", fmt.Sprintf("%d", ctx.Download.Episode))
@@ -137,6 +140,13 @@ func sanitizeFileName(name string) string {
 	result = regexp.MustCompile(`\s+`).ReplaceAllString(result, " ")
 
 	return result
+}
+
+func subscriptionMediaLibraryTitle(subscription *model.Subscription) string {
+	if subscription == nil {
+		return ""
+	}
+	return utils.MediaLibraryTitle(subscription.Name)
 }
 
 // ParseTemplate 解析模板预览（用于前端展示）
@@ -301,8 +311,11 @@ func (r *RenameService) ReorganizeSubscriptionFiles(
 		}
 	}
 	tempService := NewRenameService(renameTemplate)
+	nfoGenerated := false
 
 	for _, download := range downloads {
+		var renamedPath string
+
 		select {
 		case <-ctx.Done():
 			return result, ctx.Err()
@@ -363,6 +376,7 @@ func (r *RenameService) ReorganizeSubscriptionFiles(
 		newDir := filepath.Dir(newRelativePath)
 		newFileName := filepath.Base(newRelativePath)
 		targetLocation := filepath.Join(basePath, newDir)
+		renamedPath = filepath.Join(targetLocation, newFileName)
 
 		// 当前位置
 		currentLocation := torrentInfo.SavePath
@@ -418,6 +432,19 @@ func (r *RenameService) ReorganizeSubscriptionFiles(
 					"new_name", newFilePath)
 			}
 		}
+
+		if renamedPath != "" && !nfoGenerated {
+			if err := ensureTVShowNFOForSubscriptionBasePath(basePath, subscription); err != nil {
+				logger.Warn("Failed to generate tvshow.nfo after file reorganization",
+					"subscription_id", subscription.ID,
+					"download_id", download.ID,
+					"renamed_path", renamedPath,
+					"base_path", basePath,
+					"error", err.Error())
+			} else {
+				nfoGenerated = true
+			}
+		}
 	}
 
 	return result, nil
@@ -447,9 +474,11 @@ func (r *RenameService) RenameSubscriptionFiles(
 		}
 	}
 	tempService := NewRenameService(renameTemplate)
+	nfoGenerated := false
 
 	for i := range downloads {
 		download := &downloads[i]
+		var renamedPath string
 
 		select {
 		case <-ctx.Done():
@@ -521,6 +550,7 @@ func (r *RenameService) RenameSubscriptionFiles(
 		newDir := filepath.Dir(newRelativePath)
 		newFileName := filepath.Base(newRelativePath)
 		targetLocation := filepath.Join(basePath, newDir)
+		renamedPath = filepath.Join(targetLocation, newFileName)
 
 		// 当前位置
 		currentLocation := torrentInfo.SavePath
@@ -578,12 +608,25 @@ func (r *RenameService) RenameSubscriptionFiles(
 		}
 
 		// 更新数据库中的renamed_path
-		download.RenamedPath = filepath.Join(targetLocation, newFileName)
+		download.RenamedPath = renamedPath
 		if err := downloadRepo.Update(download); err != nil {
 			logger.Warn("Failed to update download record",
 				"download_id", download.ID,
 				"error", err.Error())
 			// 不算作错误，因为文件操作已成功
+		}
+
+		if renamedPath != "" && !nfoGenerated {
+			if err := ensureTVShowNFOForSubscriptionBasePath(basePath, subscription); err != nil {
+				logger.Warn("Failed to generate tvshow.nfo after batch rename",
+					"subscription_id", subscription.ID,
+					"download_id", download.ID,
+					"renamed_path", renamedPath,
+					"base_path", basePath,
+					"error", err.Error())
+			} else {
+				nfoGenerated = true
+			}
 		}
 	}
 
@@ -599,4 +642,3 @@ func isVideoFileExt(ext string) bool {
 	}
 	return videoExts[ext]
 }
-

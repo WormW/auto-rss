@@ -5,37 +5,6 @@ import { resolve } from 'path'
 
 export default defineConfig({
   plugins: [vue(), vueJsx()],
-  build: {
-    rollupOptions: {
-      output: {
-        manualChunks(id) {
-          if (!id.includes('node_modules')) {
-            return
-          }
-
-          if (id.includes('/node_modules/vue/') || id.includes('/node_modules/@vue/')) {
-            return 'vendor-vue'
-          }
-
-          if (id.includes('/node_modules/vue-router/')) {
-            return 'vendor-router'
-          }
-
-          if (id.includes('/node_modules/pinia/')) {
-            return 'vendor-pinia'
-          }
-
-          if (id.includes('/node_modules/@vicons/')) {
-            return 'vendor-icons'
-          }
-
-          if (id.includes('/node_modules/axios/')) {
-            return 'vendor-axios'
-          }
-        }
-      }
-    }
-  },
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src')
@@ -47,6 +16,37 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:7892',
         changeOrigin: true
+      }
+    }
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          const normalizedId = id.replace(/\\/g, '/')
+
+          if (!normalizedId.includes('/node_modules/')) {
+            return undefined
+          }
+
+          if (normalizedId.includes('/vue/') || normalizedId.includes('/@vue/')) {
+            return 'vendor-vue'
+          }
+          if (normalizedId.includes('/vue-router/')) {
+            return 'vendor-router'
+          }
+          if (normalizedId.includes('/pinia/')) {
+            return 'vendor-pinia'
+          }
+          if (normalizedId.includes('/@vicons/')) {
+            return 'vendor-icons'
+          }
+          if (normalizedId.includes('/axios/')) {
+            return 'vendor-axios'
+          }
+
+          return undefined
+        }
       }
     }
   }

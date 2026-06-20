@@ -5,6 +5,7 @@ import (
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
+	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
 )
 
@@ -119,7 +120,8 @@ func (e *enricher) populateSubscription(subscription *model.Subscription, subjec
 	subscription.BangumiScore = subject.Score
 	subscription.BangumiSummary = subject.Summary
 
-	// 使用 name_cn 作为番剧名称（如果有的话）
+	// 使用 name_cn 作为番剧名称（如果有的话），但保持订阅名为系列标题；
+	// season 字段和媒体库模板负责表达季度。
 	if subject.NameCN != "" {
 		logger.Info("Using Bangumi name_cn as subscription name",
 			"original_name", subscription.Name,
@@ -157,6 +159,7 @@ func (e *enricher) populateSubscription(subscription *model.Subscription, subjec
 	if subject.Season > 0 {
 		subscription.Season = subject.Season
 	}
+	subscription.Name, subscription.Season = utils.NormalizeMediaTitleAndSeason(subscription.Name, subscription.Season)
 
 	// 如果总集数为0，尝试从Bangumi获取
 	if subscription.TotalEpisodes == 0 && subject.TotalEps > 0 {

@@ -63,53 +63,14 @@ func NewOnboardingHandler(
 func (h *OnboardingHandler) Status(c *gin.Context) {
 	completed := h.boolConfig(onboardingCompletedKey)
 	skipped := h.boolConfig(onboardingSkippedKey)
+	steps, missing, details := h.requiredSetupStatus()
 
-	qb := h.qbittorrentStatus()
-	downloadPath := h.downloadPathStatus(false)
-	rename := h.renameTemplateStatus()
-	rssSourceCount := h.rssSourceCount()
-	subscriptionCount := h.subscriptionCount()
+	qb := details.qbittorrent
+	downloadPath := details.downloadPath
+	rename := details.renameTemplate
+	rssSourceCount := details.rssSourceCount
+	subscriptionCount := details.subscriptionCount
 	notificationCount := h.notificationCount()
-
-	steps := []onboardingStep{
-		{
-			Key:      "qbittorrent",
-			Label:    "qBittorrent",
-			Complete: qb["configured"].(bool),
-			Message:  qb["message"].(string),
-		},
-		{
-			Key:      "download_path",
-			Label:    "下载目录",
-			Complete: downloadPath.Set && downloadPath.Exists && downloadPath.IsDir,
-			Message:  downloadPath.Message(),
-		},
-		{
-			Key:      "rss_source",
-			Label:    "RSS 源",
-			Complete: rssSourceCount > 0,
-			Message:  countMessage(rssSourceCount, "RSS 源"),
-		},
-		{
-			Key:      "subscription",
-			Label:    "订阅",
-			Complete: subscriptionCount > 0,
-			Message:  countMessage(subscriptionCount, "订阅"),
-		},
-		{
-			Key:      "rename_template",
-			Label:    "重命名模板",
-			Complete: rename["configured"].(bool),
-			Message:  rename["message"].(string),
-		},
-	}
-
-	missing := make([]string, 0)
-	for _, step := range steps {
-		if !step.Complete {
-			missing = append(missing, step.Key)
-		}
-	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
@@ -139,6 +100,18 @@ func (h *OnboardingHandler) Skip(c *gin.Context) {
 }
 
 func (h *OnboardingHandler) Complete(c *gin.Context) {
+	_, missing, _ := h.requiredSetupStatus()
+	if len(missing) > 0 {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"code":    422,
+			"message": "向导必需配置尚未完成",
+			"data": gin.H{
+				"missing": missing,
+			},
+		})
+		return
+	}
+
 	if err := h.configRepo.Set(onboardingCompletedKey, "true"); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "保存向导完成状态失败"})
 		return
@@ -183,6 +156,70 @@ func (h *OnboardingHandler) boolConfig(key string) bool {
 	}
 	value := strings.TrimSpace(strings.ToLower(cfg.Value))
 	return value == "true" || value == "1" || value == "yes"
+}
+
+type onboardingStatusDetails struct {
+	qbittorrent       gin.H
+	downloadPath      downloadPathStatus
+	renameTemplate    gin.H
+	rssSourceCount    int64
+	subscriptionCount int64
+}
+
+func (h *OnboardingHandler) requiredSetupStatus() ([]onboardingStep, []string, onboardingStatusDetails) {
+	qb := h.qbittorrentStatus()
+	downloadPath := h.downloadPathStatus(true)
+	rename := h.renameTemplateStatus()
+	rssSourceCount := h.rssSourceCount()
+	subscriptionCount := h.subscriptionCount()
+
+	steps := []onboardingStep{
+		{
+			Key:      "qbittorrent",
+			Label:    "qBittorrent",
+			Complete: qb["configured"].(bool),
+			Message:  qb["message"].(string),
+		},
+		{
+			Key:      "download_path",
+			Label:    "下载目录",
+			Complete: downloadPath.Set && downloadPath.Exists && downloadPath.IsDir && downloadPath.Writable,
+			Message:  downloadPath.Message(),
+		},
+		{
+			Key:      "rss_source",
+			Label:    "RSS 源",
+			Complete: rssSourceCount > 0,
+			Message:  countMessage(rssSourceCount, "RSS 源"),
+		},
+		{
+			Key:      "subscription",
+			Label:    "订阅",
+			Complete: subscriptionCount > 0,
+			Message:  countMessage(subscriptionCount, "订阅"),
+		},
+		{
+			Key:      "rename_template",
+			Label:    "重命名模板",
+			Complete: rename["configured"].(bool),
+			Message:  rename["message"].(string),
+		},
+	}
+
+	missing := make([]string, 0)
+	for _, step := range steps {
+		if !step.Complete {
+			missing = append(missing, step.Key)
+		}
+	}
+
+	return steps, missing, onboardingStatusDetails{
+		qbittorrent:       qb,
+		downloadPath:      downloadPath,
+		renameTemplate:    rename,
+		rssSourceCount:    rssSourceCount,
+		subscriptionCount: subscriptionCount,
+	}
 }
 
 func (h *OnboardingHandler) stringConfig(keys ...string) string {

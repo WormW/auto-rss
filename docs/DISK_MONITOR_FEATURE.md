@@ -28,7 +28,8 @@
 
 ### 3. 保护机制
 
-- **正在观看保护**：可选保留最近有播放记录的番剧（需 Plex/Jellyfin 集成）
+- **正在观看保护**：`disk.cleanup_protect_watching=true` 时，清理会查询 Jellyfin/Emby 或 Plex 的正在播放和最近播放路径，跳过仍在观看或最近播放的文件
+- **保守失败策略**：保护开启但媒体库未配置、配置不完整或连接失败时，清理会跳过候选项，避免误删可能仍在使用的媒体文件
 - **状态恢复**：空间恢复后自动恢复下载
 
 ## 配置方式
@@ -61,18 +62,27 @@ GET /api/v1/disk/info
 POST /api/v1/disk/cleanup
 {
   "strategy": "age",
-  "keep_days": 30
+  "keep_days": 30,
+  "keep_gb": 50
 }
 
+# 查询磁盘采样和清理历史
+GET /api/v1/disk/history?page=1&page_size=20
+
 # 更新磁盘配置
-PUT /api/v1/config
+PUT /api/v1/disk/settings
 {
-  "disk": {
-    "warning_threshold_gb": 10,
-    "auto_cleanup_enabled": true
-  }
+  "enabled": true,
+  "strategy": "hybrid",
+  "retention_days": 30,
+  "min_free_gb": 50,
+  "warning_threshold_gb": 10,
+  "critical_threshold_gb": 5,
+  "protect_watching": true
 }
 ```
+
+手动清理和自动清理复用同一套清理逻辑，只会处理已完成下载记录。响应会返回 `deleted_count`、`skipped_count`、`failed_count`、`failed_paths`、`freed_bytes`、清理前后可用空间、`media_library_status` 和逐项 `items`。每次清理会持久化一条摘要，`/disk/history` 会返回磁盘采样 `samples`、分页清理摘要 `cleanup`、兼容别名 `list`、`total`、`page` 和 `page_size`。
 
 ## 工作流程
 
@@ -92,6 +102,31 @@ Critical + 自动清理启用？
     ├─ 是 → 执行清理策略
     └─ 否 → 结束
 ```
+
+清理执行时会按策略筛选候选下载：
+
+1. `age` 删除早于 `keep_days` 的已完成下载。
+2. `space` 按最旧优先删除，直到当前可用空间加已释放空间达到 `keep_gb`。
+3. `hybrid` 同时满足年龄清理和空间补足场景。
+
+清理前会校验路径边界，拒绝删除下载根目录本身、空路径或下载根目录外的文件；这些项目会以 `skipped` 项和失败原因返回，并保留下载记录。
+
+## 媒体库保护
+
+启用 `disk.cleanup_protect_watching` 后，清理会读取以下配置：
+
+```sql
+'media_library.type'              -- jellyfin、emby 或 plex
+'media_library.url'               -- 媒体库服务地址
+'media_library.token'             -- API Token
+'media_library.user_id'           -- Jellyfin/Emby 最近播放查询所需用户 ID，可选
+'media_library.recent_play_hours' -- 最近播放保护窗口，默认 24 小时
+```
+
+- Jellyfin/Emby：查询 `/Sessions` 的 `NowPlayingItem.Path`；配置 `media_library.user_id` 后，还会查询最近播放条目的 `Path` 和 `DatePlayed`。
+- Plex：查询 `/status/sessions` 和 `/status/sessions/history/all`，读取媒体分片 `file` 路径。
+- 保护路径会转换为绝对路径并解析符号链接；候选下载的 `file_path` 和 `renamed_path` 与保护路径相同、互为父子路径时都会跳过。
+- 保护开启但媒体库未配置、配置不完整、类型不支持或请求失败时，本次清理会保守跳过候选项，`media_library_status` 返回 `unconfigured` 或 `failed`。
 
 ## 通知事件
 
@@ -160,14 +195,10 @@ INFO Auto cleanup completed
 
 1. **文件删除不可逆**：自动清理会直接删除文件，请确保已开启保种或不需要原文件
 2. **清理是异步的**：大文件删除可能需要时间，磁盘空间不会立即释放
-3. **保护机制有限**：未集成 Plex/Jellyfin 时，`protect_watching` 不会生效
+3. **保护依赖媒体库路径一致性**：Plex/Jellyfin/Emby 返回的路径需要能与 Auto-RSS 记录的 `file_path` 或 `renamed_path` 对应；容器路径不一致时应配置一致的挂载或路径映射
 4. **跨文件系统**：如果下载路径挂载在不同分区，监控的是该分区的空间
 
 ## 未来扩展
 
-- [ ] Web UI 磁盘状态展示
-- [ ] 磁盘使用趋势图表
-- [ ] 手动清理界面
-- [ ] Plex/Jellyfin 观看状态集成
 - [ ] 多磁盘/分区监控
 - [ ] 云存储（阿里云盘/OneDrive）空间监控

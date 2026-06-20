@@ -165,6 +165,8 @@ export interface Subscription {
   air_timezone?: string
   notify_enabled?: boolean
   notify_before_min?: number
+  smart_fetch_enabled?: boolean | null
+  smart_fetch_override?: 'follow' | 'always' | 'never' | ''
 }
 
 export interface Download {
@@ -178,6 +180,10 @@ export interface Download {
   torrent_hash: string
   file_path: string
   renamed_path: string
+  media_library_path: string
+  media_library_refresh_status: 'pending' | 'disabled' | 'success' | 'failed' | ''
+  media_library_refresh_error: string
+  media_library_refreshed_at?: string
   status: string
   qb_task_id: string
   error_message: string
@@ -190,6 +196,7 @@ export interface Download {
   next_retry_at?: string
   last_error?: string
   retry_reason?: string
+  subscription?: Subscription
 }
 
 export interface SubscriptionPreviewItem {
@@ -376,11 +383,68 @@ export interface OnboardingStatus {
   notification_count: number
 }
 
+export interface SmartFetchStatus {
+  subscription_id: number
+  should_fetch: boolean
+  reason: string
+  explanation: string
+  next_fetch_in: string
+  next_fetch_seconds: number
+  next_fetch_at: string
+  missing_episodes: number[]
+  is_in_active_window: boolean
+  is_completed: boolean
+  smart_fetch_enabled: boolean
+  smart_fetch_override?: 'follow' | 'always' | 'never' | ''
+}
+
+export interface SmartFetchStatusResponse {
+  evaluated_at: string
+  list: SmartFetchStatus[]
+}
+
+export interface SmartFetchConfig {
+  enabled: boolean
+  before_air_day: number
+  after_air_day: number
+  skip_completed: boolean
+  completed_stop_days: number
+  check_local_complete: boolean
+}
+
+export interface MediaLibraryPathMapping {
+  from: string
+  to: string
+}
+
+export interface MediaLibraryConfig {
+  enabled: boolean
+  provider: 'jellyfin' | 'emby' | 'plex'
+  base_url: string
+  token?: string
+  token_configured?: boolean
+  username?: string
+  library_id?: string
+  section_id?: string
+  path_mappings: MediaLibraryPathMapping[]
+  refresh_on_import: boolean
+}
+
+export interface MediaLibraryRefreshResult {
+  enabled: boolean
+  status: 'pending' | 'disabled' | 'success' | 'failed'
+  message: string
+  path: string
+  refreshed_at?: string
+}
+
 export const subscriptionApi = {
   list: (page = 1, pageSize = 20) =>
     api.get('/subscriptions', { params: { page, page_size: pageSize } }),
   getById: (id: number) =>
     api.get(`/subscriptions/${id}`),
+  smartFetchStatus: () =>
+    api.get('/subscriptions/smart-fetch/status'),
   diagnostics: (id: number) =>
     api.get(`/subscriptions/${id}/diagnostics`),
   retryFailed: (id: number) =>
@@ -418,6 +482,19 @@ export const downloadApi = {
     api.delete('/downloads/clear', { params: { status } })
 }
 
+export const mediaLibraryApi = {
+  getConfig: () =>
+    api.get('/media-library/config'),
+  saveConfig: (config: MediaLibraryConfig) =>
+    api.put('/media-library/config', config),
+  testConnection: (config: MediaLibraryConfig) =>
+    api.post('/media-library/test', config),
+  refreshDownload: (id: number) =>
+    api.post(`/media-library/downloads/${id}/refresh`),
+  getSubscriptionStatus: (id: number) =>
+    api.get(`/media-library/subscriptions/${id}/status`)
+}
+
 export const rssApi = {
   refresh: () =>
     api.post('/rss/refresh')
@@ -439,6 +516,10 @@ export const configApi = {
     api.get('/config'),
   update: (key: string, value: string) =>
     api.put('/config', { key, value }),
+  getSmartFetch: () =>
+    api.get('/config/smart-fetch'),
+  updateSmartFetch: (data: Partial<SmartFetchConfig>) =>
+    api.put('/config/smart-fetch', data),
   testQBittorrent: (host: string, username: string, password: string) =>
     api.post('/config/qbittorrent/test', { host, username, password }),
   saveQBittorrent: (host: string, username: string, password: string) =>
@@ -634,11 +715,56 @@ export interface DiskStatus {
   status: 'healthy' | 'warning' | 'critical'
 }
 
+export interface DiskSample extends DiskStatus {
+  created_at: string
+}
+
+export interface DiskCleanupRecord {
+  id: number
+  trigger: 'manual' | 'auto' | string
+  strategy: string
+  download_path: string
+  deleted_count: number
+  skipped_count: number
+  freed_bytes: number
+  before_free_bytes: number
+  after_free_bytes: number
+  media_library_status: 'unconfigured' | 'connected' | 'failed' | string
+  message: string
+  created_at: string
+}
+
+export interface DiskHistory {
+  samples: DiskSample[]
+  cleanup: DiskCleanupRecord[]
+  list: DiskCleanupRecord[]
+  total: number
+  page: number
+}
+
+export interface DiskSettings {
+  enabled: boolean
+  strategy: string
+  retention_days: number
+  min_free_gb: number
+  warning_threshold_gb: number
+  critical_threshold_gb: number
+  protect_watching: boolean
+  media_library_status: 'unconfigured' | 'connected' | 'failed' | string
+  media_library_message: string
+}
+
 export const diskApi = {
   getStatus: () =>
     api.get('/disk/status'),
   getInfo: () =>
-    api.get('/disk/info')
+    api.get('/disk/info'),
+  getSettings: () =>
+    api.get('/disk/settings'),
+  getHistory: (page = 1, pageSize = 20) =>
+    api.get('/disk/history', { params: { page, page_size: pageSize } }),
+  cleanup: (payload: { strategy?: string; keep_days?: number; keep_gb?: number }) =>
+    api.post('/disk/cleanup', payload)
 }
 
 export * from './rss-source'

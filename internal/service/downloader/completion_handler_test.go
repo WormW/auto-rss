@@ -2,6 +2,9 @@ package downloader
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/WormW/auto-rss/internal/model"
@@ -55,6 +58,7 @@ func (m *mockSubscriptionRepo) UpdateInTx(tx *gorm.DB, subscription *model.Subsc
 
 // MockQBittorrentClient for testing
 type mockQBClient struct {
+	getTorrentInfoFunc  func(hash string) (*TorrentInfo, error)
 	getTorrentFilesFunc func(hash string) ([]TorrentFile, error)
 	setLocationFunc     func(hash, location string) error
 	renameFileFunc      func(hash, oldName, newName string) error
@@ -73,6 +77,9 @@ func (m *mockQBClient) GetTorrentsByCategory(category string) ([]*TorrentInfo, e
 }
 
 func (m *mockQBClient) GetTorrentInfo(hash string) (*TorrentInfo, error) {
+	if m.getTorrentInfoFunc != nil {
+		return m.getTorrentInfoFunc(hash)
+	}
 	return nil, nil
 }
 
@@ -166,9 +173,9 @@ func TestCompletionHandler_HandleComplete_SendsNotification(t *testing.T) {
 		SavePath: "/downloads/test",
 	}
 	subscription := &model.Subscription{
-		ID:            1,
-		Name:          "Test Anime",
-		RenameEnabled: false,
+		ID:             1,
+		Name:           "Test Anime",
+		RenameEnabled:  false,
 		CurrentEpisode: 0,
 	}
 
@@ -240,6 +247,7 @@ func TestCompletionHandler_HandleComplete_WithRenameEnabled(t *testing.T) {
 	mockNotify := &mockNotificationService{}
 	mockDownloadRepo := &mockDownloadRepo{}
 	mockSubRepo := &mockSubscriptionRepo{}
+	mediaRoot := t.TempDir()
 	mockQB := &mockQBClient{
 		getTorrentFilesFunc: func(hash string) ([]TorrentFile, error) {
 			return []TorrentFile{
@@ -264,13 +272,14 @@ func TestCompletionHandler_HandleComplete_WithRenameEnabled(t *testing.T) {
 	}
 	torrent := &TorrentInfo{
 		Hash:     "abc123",
-		SavePath: "/downloads/test",
+		SavePath: filepath.Join(mediaRoot, "Test Anime"),
 	}
 	subscription := &model.Subscription{
 		ID:            1,
 		Name:          "Test Anime",
 		RenameEnabled: true,
 		Season:        1,
+		BangumiID:     12345,
 	}
 
 	err := handler.HandleComplete(download, torrent, subscription)
@@ -278,13 +287,24 @@ func TestCompletionHandler_HandleComplete_WithRenameEnabled(t *testing.T) {
 		t.Fatalf("HandleComplete() error = %v", err)
 	}
 
-	// Rename should have been attempted (RenamedPath may or may not be set depending on mock behavior)
+	expectedNFOPath := filepath.Join(mediaRoot, "Test Anime", tvShowNFOFileName)
+	content, err := os.ReadFile(expectedNFOPath)
+	if err != nil {
+		t.Fatalf("expected tvshow.nfo at %s: %v", expectedNFOPath, err)
+	}
+	if !strings.Contains(string(content), "<bangumiid>12345</bangumiid>") {
+		t.Fatalf("tvshow.nfo missing bangumi id: %s", string(content))
+	}
+	if strings.Contains(expectedNFOPath, filepath.Join("Test Anime", "Test Anime")) {
+		t.Fatalf("tvshow.nfo path duplicated show directory: %s", expectedNFOPath)
+	}
 }
 
 func TestCompletionHandler_HandleComplete_CollectionRename(t *testing.T) {
 	mockNotify := &mockNotificationService{}
 	mockDownloadRepo := &mockDownloadRepo{}
 	mockSubRepo := &mockSubscriptionRepo{}
+	mediaRoot := t.TempDir()
 	mockQB := &mockQBClient{
 		getTorrentFilesFunc: func(hash string) ([]TorrentFile, error) {
 			return []TorrentFile{
@@ -307,12 +327,13 @@ func TestCompletionHandler_HandleComplete_CollectionRename(t *testing.T) {
 	}
 	torrent := &TorrentInfo{
 		Hash:     "abc123",
-		SavePath: "/downloads/test",
+		SavePath: filepath.Join(mediaRoot, "Test Anime"),
 	}
 	subscription := &model.Subscription{
 		ID:            1,
 		Name:          "Test Anime",
 		RenameEnabled: true,
+		BangumiID:     54321,
 	}
 
 	err := handler.HandleComplete(download, torrent, subscription)
@@ -320,7 +341,55 @@ func TestCompletionHandler_HandleComplete_CollectionRename(t *testing.T) {
 		t.Fatalf("HandleComplete() error = %v", err)
 	}
 
-	// Collection rename should have been attempted
+	expectedNFOPath := filepath.Join(mediaRoot, "Test Anime", tvShowNFOFileName)
+	content, err := os.ReadFile(expectedNFOPath)
+	if err != nil {
+		t.Fatalf("expected collection tvshow.nfo at %s: %v", expectedNFOPath, err)
+	}
+	if !strings.Contains(string(content), "<bangumiid>54321</bangumiid>") {
+		t.Fatalf("collection tvshow.nfo missing bangumi id: %s", string(content))
+	}
+}
+
+func TestCompletionHandler_HandleComplete_RenameErrorDoesNotCreateNFO(t *testing.T) {
+	mockNotify := &mockNotificationService{}
+	mockDownloadRepo := &mockDownloadRepo{}
+	mockSubRepo := &mockSubscriptionRepo{}
+	mediaRoot := t.TempDir()
+	mockQB := &mockQBClient{
+		getTorrentFilesFunc: func(hash string) ([]TorrentFile, error) {
+			return nil, errors.New("failed to get files")
+		},
+	}
+	renamerSvc := NewRenameService("")
+	handler := NewCompletionHandler(mockSubRepo, mockDownloadRepo, mockNotify, renamerSvc, mockQB, nil)
+
+	download := &model.Download{
+		ID:             1,
+		SubscriptionID: 1,
+		Title:          "Test Episode",
+		Episode:        1,
+		Status:         "downloading",
+	}
+	torrent := &TorrentInfo{
+		Hash:     "abc123",
+		SavePath: filepath.Join(mediaRoot, "Test Anime"),
+	}
+	subscription := &model.Subscription{
+		ID:            1,
+		Name:          "Test Anime",
+		RenameEnabled: true,
+		BangumiID:     12345,
+	}
+
+	if err := handler.HandleComplete(download, torrent, subscription); err != nil {
+		t.Fatalf("HandleComplete() error = %v", err)
+	}
+
+	nfoPath := filepath.Join(mediaRoot, "Test Anime", tvShowNFOFileName)
+	if _, err := os.Stat(nfoPath); !os.IsNotExist(err) {
+		t.Fatalf("tvshow.nfo should not be created after rename failure, stat err = %v", err)
+	}
 }
 
 func TestCompletionHandler_HandleComplete_NoNotificationService(t *testing.T) {
@@ -509,7 +578,6 @@ func TestLastIndexOf(t *testing.T) {
 		})
 	}
 }
-
 
 // 批量操作相关方法（mock实现）
 

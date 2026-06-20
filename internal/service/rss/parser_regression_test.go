@@ -1,6 +1,7 @@
 package rss
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/WormW/auto-rss/internal/pkg/utils"
@@ -121,5 +122,117 @@ func TestExtractInfoHashFromTorrentURL(t *testing.T) {
 	want := "4f9c570f6b9ff86278629d352ba8272633a18c3b"
 	if got != want {
 		t.Fatalf("extractInfoHashFromTorrentURL() = %q, want %q", got, want)
+	}
+}
+
+func TestParsePreservesItemSpecificRSSURL(t *testing.T) {
+	feed := strings.NewReader(`<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Mikan</title>
+    <item>
+      <title>[ANi] Some Anime - 01 [1080P]</title>
+      <link>https://mikanani.me/Home/Bangumi/3026</link>
+      <enclosure url="https://mikanani.me/Download/20260618/58a7526e95fe511b80cbdae8a7ddb7d107be9871.torrent" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>`)
+
+	items, err := NewParser().Parse(feed)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("Parse() returned %d items, want 1", len(items))
+	}
+
+	want := "https://mikanani.me/RSS/Bangumi?bangumiId=3026"
+	if items[0].RssURL != want {
+		t.Fatalf("RssURL = %q, want %q", items[0].RssURL, want)
+	}
+	if items[0].TorrentURL != "https://mikanani.me/Download/20260618/58a7526e95fe511b80cbdae8a7ddb7d107be9871.torrent" {
+		t.Fatalf("TorrentURL = %q", items[0].TorrentURL)
+	}
+}
+
+func TestParseLeavesItemRSSURLEmptyWhenAbsent(t *testing.T) {
+	feed := strings.NewReader(`<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Generic torrents</title>
+    <item>
+      <title>[ANi] Some Anime - 01 [1080P]</title>
+      <link>https://example.com/downloads/episode-01.torrent</link>
+    </item>
+  </channel>
+</rss>`)
+
+	items, err := NewParser().Parse(feed)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("Parse() returned %d items, want 1", len(items))
+	}
+	if items[0].RssURL != "" {
+		t.Fatalf("RssURL = %q, want empty", items[0].RssURL)
+	}
+}
+
+func TestParseGenericFeedUsesChannelSourceFallback(t *testing.T) {
+	feed := strings.NewReader(`<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Generic torrents</title>
+    <link>https://example.com/anime</link>
+    <atom:link xmlns:atom="http://www.w3.org/2005/Atom" href="https://example.com/feeds/season.xml" rel="self" type="application/rss+xml" />
+    <item>
+      <title>Some Anime - 01 [1080p][CHS]</title>
+      <link>magnet:?xt=urn:btih:1111111111111111111111111111111111111111</link>
+      <pubDate>Sun, 24 May 2026 10:00:00 +0800</pubDate>
+    </item>
+    <item>
+      <title>Some Anime - 02 [1080p][CHS]</title>
+      <link>https://example.com/releases/episode-02</link>
+      <enclosure url="https://example.com/downloads/episode-02.torrent" type="application/x-bittorrent" />
+    </item>
+    <item>
+      <title>Some Anime - 03 [1080p][CHS]</title>
+      <link>https://example.com/subscriptions/some-anime/rss</link>
+      <enclosure url="magnet:?xt=urn:btih:3333333333333333333333333333333333333333" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>`)
+
+	items, err := NewParser().Parse(feed)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("Parse() returned %d items, want 3", len(items))
+	}
+
+	if items[0].Title != "Some Anime - 01 [1080p][CHS]" || items[0].Episode != 1 {
+		t.Fatalf("first item title/episode = %q/%d", items[0].Title, items[0].Episode)
+	}
+	if items[0].TorrentURL != "magnet:?xt=urn:btih:1111111111111111111111111111111111111111" {
+		t.Fatalf("first TorrentURL = %q", items[0].TorrentURL)
+	}
+	if items[0].RssURL != "https://example.com/feeds/season.xml" {
+		t.Fatalf("first RssURL = %q", items[0].RssURL)
+	}
+
+	if items[1].TorrentURL != "https://example.com/downloads/episode-02.torrent" {
+		t.Fatalf("second TorrentURL = %q", items[1].TorrentURL)
+	}
+	if items[1].RssURL != "https://example.com/feeds/season.xml" {
+		t.Fatalf("second RssURL = %q", items[1].RssURL)
+	}
+
+	if items[2].TorrentURL != "magnet:?xt=urn:btih:3333333333333333333333333333333333333333" {
+		t.Fatalf("third TorrentURL = %q", items[2].TorrentURL)
+	}
+	if items[2].RssURL != "https://example.com/subscriptions/some-anime/rss" {
+		t.Fatalf("third RssURL = %q", items[2].RssURL)
 	}
 }
