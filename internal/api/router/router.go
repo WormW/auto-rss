@@ -130,6 +130,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	rssHandler := handler.NewRSSHandler(rssScheduler)
 	configHandler := handler.NewConfigHandler(configRepo)
 	rssSourceHandler := handler.NewRSSSourceHandler(rssSourceRepo, configRepo, rssParser)
+	onboardingHandler := handler.NewOnboardingHandler(configRepo, rssSourceRepo, subscriptionRepo, db, cfg)
 	mikanHandler := handler.NewMikanHandler(configRepo, subscriptionRepo)
 	bangumiHandler := handler.NewBangumiHandler(configRepo)
 	logHandler := handler.NewLogHandler(logRepo)
@@ -265,6 +266,14 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			configs.GET("/rename/template", configHandler.GetRenameTemplate)
 			configs.POST("/rename/template", configHandler.SaveRenameTemplate)
 			configs.POST("/rename/preview", configHandler.PreviewRenameTemplate)
+		}
+
+		onboarding := protected.Group("/onboarding")
+		{
+			onboarding.GET("/status", onboardingHandler.Status)
+			onboarding.POST("/skip", onboardingHandler.Skip)
+			onboarding.POST("/complete", onboardingHandler.Complete)
+			onboarding.POST("/download-path/validate", onboardingHandler.ValidateDownloadPath)
 		}
 
 		// 日志管理
