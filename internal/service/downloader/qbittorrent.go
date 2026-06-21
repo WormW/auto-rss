@@ -36,8 +36,10 @@ type QBittorrentClient interface {
 	SetLocation(hash string, location string) error
 	// RenameTorrentFile 重命名种子文件
 	RenameTorrentFile(hash string, oldPath string, newPath string) error
-	// DeleteTorrent 删除种子任务
-	DeleteTorrent(hash string, deleteFiles bool) error
+	// RemoveTorrentTask 仅删除 qBittorrent 任务，不删除已下载文件
+	RemoveTorrentTask(hash string) error
+	// DeleteTorrentWithPayload 删除 qBittorrent 任务及其已下载文件
+	DeleteTorrentWithPayload(hash string) error
 	// GetTorrentFiles 获取种子文件列表
 	GetTorrentFiles(hash string) ([]TorrentFile, error)
 	// GetVersion 获取qBittorrent版本信息
@@ -306,8 +308,17 @@ func getInt64Value(m map[string]interface{}, key string) int64 {
 	return 0
 }
 
-// DeleteTorrent 删除种子任务
-func (c *qbittorrentClient) DeleteTorrent(hash string, deleteFiles bool) error {
+// RemoveTorrentTask 仅删除 qBittorrent 任务，不删除已下载文件。
+func (c *qbittorrentClient) RemoveTorrentTask(hash string) error {
+	return c.deleteTorrent(hash, false)
+}
+
+// DeleteTorrentWithPayload 删除 qBittorrent 任务及其已下载文件。
+func (c *qbittorrentClient) DeleteTorrentWithPayload(hash string) error {
+	return c.deleteTorrent(hash, true)
+}
+
+func (c *qbittorrentClient) deleteTorrent(hash string, deleteFiles bool) error {
 	resp, err := c.client.R().
 		SetFormData(map[string]string{
 			"hashes":      hash,
