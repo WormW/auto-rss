@@ -263,7 +263,12 @@ func (h *DownloadHandler) Delete(c *gin.Context) {
 
 	// 如果有 hash 且 qbClient 可用，从 qBittorrent 删除种子
 	if download.TorrentHash != "" && h.qbClient != nil {
-		if err := h.qbClient.DeleteTorrent(download.TorrentHash, true); err != nil {
+		logger.Info("Deleting qBittorrent torrent with payload",
+			"download_id", id,
+			"hash", download.TorrentHash,
+			"file_path", download.FilePath,
+			"renamed_path", download.RenamedPath)
+		if err := h.qbClient.DeleteTorrentWithPayload(download.TorrentHash); err != nil {
 			logger.Warn("Failed to delete torrent from qBittorrent",
 				"download_id", id,
 				"hash", download.TorrentHash,
@@ -315,8 +320,10 @@ func (h *DownloadHandler) Retry(c *gin.Context) {
 	if download.TorrentHash != "" && h.qbClient != nil {
 		logger.Info("Deleting old torrent for retry",
 			"download_id", id,
-			"hash", download.TorrentHash)
-		if err := h.qbClient.DeleteTorrent(download.TorrentHash, true); err != nil {
+			"hash", download.TorrentHash,
+			"file_path", download.FilePath,
+			"renamed_path", download.RenamedPath)
+		if err := h.qbClient.DeleteTorrentWithPayload(download.TorrentHash); err != nil {
 			logger.Warn("Failed to delete old torrent from qBittorrent (ignoring)",
 				"download_id", id,
 				"hash", download.TorrentHash,
@@ -431,13 +438,18 @@ func (h *DownloadHandler) BatchDelete(c *gin.Context) {
 		download, err := h.repo.GetByID(id)
 		if err == nil && download.TorrentHash != "" {
 			hashes = append(hashes, download.TorrentHash)
+			logger.Info("Queued qBittorrent torrent payload deletion for batch delete",
+				"download_id", id,
+				"hash", download.TorrentHash,
+				"file_path", download.FilePath,
+				"renamed_path", download.RenamedPath)
 		}
 	}
 
 	// 从 qBittorrent 删除种子
 	if len(hashes) > 0 && h.qbClient != nil {
 		for _, hash := range hashes {
-			if err := h.qbClient.DeleteTorrent(hash, true); err != nil {
+			if err := h.qbClient.DeleteTorrentWithPayload(hash); err != nil {
 				logger.Warn("Failed to delete torrent from qBittorrent",
 					"hash", hash,
 					"error", err.Error())
@@ -490,7 +502,12 @@ func (h *DownloadHandler) Clear(c *gin.Context) {
 		deletedCount := 0
 		for _, download := range downloads {
 			if download.TorrentHash != "" {
-				if err := h.qbClient.DeleteTorrent(download.TorrentHash, true); err != nil {
+				logger.Info("Deleting qBittorrent torrent with payload during clear",
+					"download_id", download.ID,
+					"hash", download.TorrentHash,
+					"file_path", download.FilePath,
+					"renamed_path", download.RenamedPath)
+				if err := h.qbClient.DeleteTorrentWithPayload(download.TorrentHash); err != nil {
 					logger.Warn("Failed to delete torrent from qBittorrent",
 						"hash", download.TorrentHash,
 						"error", err.Error())

@@ -732,7 +732,13 @@ func (h *SubscriptionDiagnosticsHandler) buildActions(subscription *model.Subscr
 
 func (h *SubscriptionDiagnosticsHandler) retryDownload(subscription *model.Subscription, download *model.Download) error {
 	if download.TorrentHash != "" && h.qbClient != nil {
-		if err := h.qbClient.DeleteTorrent(download.TorrentHash, true); err != nil {
+		logger.Info("Deleting old qBittorrent torrent with payload before subscription retry",
+			"download_id", download.ID,
+			"hash", download.TorrentHash,
+			"file_path", download.FilePath,
+			"renamed_path", download.RenamedPath,
+			"configured_download_path", h.resolveBaseDownloadPath())
+		if err := h.qbClient.DeleteTorrentWithPayload(download.TorrentHash); err != nil {
 			logger.Warn("Failed to delete old torrent before subscription retry",
 				"download_id", download.ID,
 				"hash", download.TorrentHash,

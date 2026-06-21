@@ -104,7 +104,11 @@ func (m *mockQBClient) SetLocation(hash, location string) error {
 	return nil
 }
 
-func (m *mockQBClient) DeleteTorrent(hash string, deleteFiles bool) error {
+func (m *mockQBClient) RemoveTorrentTask(hash string) error {
+	return nil
+}
+
+func (m *mockQBClient) DeleteTorrentWithPayload(hash string) error {
 	return nil
 }
 

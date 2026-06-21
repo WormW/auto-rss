@@ -11,14 +11,14 @@ import (
 
 // MockQBittorrentClient mock实现
 type mockQBClient struct {
-	addTorrentFunc        func(url, savePath, category string) (string, error)
-	addTorrentFileFunc    func(filename string, content []byte, savePath, category string) (string, error)
-	getTorrentsFunc       func(category string) ([]*downloader.TorrentInfo, error)
-	downloadTorrentFunc   func(url string) ([]byte, error)
-	setProxyFunc          func(proxy string) error
+	addTorrentFunc      func(url, savePath, category string) (string, error)
+	addTorrentFileFunc  func(filename string, content []byte, savePath, category string) (string, error)
+	getTorrentsFunc     func(category string) ([]*downloader.TorrentInfo, error)
+	downloadTorrentFunc func(url string) ([]byte, error)
+	setProxyFunc        func(proxy string) error
 }
 
-func (m *mockQBClient) Login(host, username, password string) error { return nil }
+func (m *mockQBClient) Login(host, username, password string) error          { return nil }
 func (m *mockQBClient) TestConnection(host, username, password string) error { return nil }
 func (m *mockQBClient) AddTorrent(url, savePath, category string) (string, error) {
 	if m.addTorrentFunc != nil {
@@ -39,11 +39,14 @@ func (m *mockQBClient) GetTorrentsByCategory(category string) ([]*downloader.Tor
 	}
 	return nil, nil
 }
-func (m *mockQBClient) SetCategory(hash, category string) error { return nil }
-func (m *mockQBClient) SetLocation(hash, location string) error { return nil }
+func (m *mockQBClient) SetCategory(hash, category string) error               { return nil }
+func (m *mockQBClient) SetLocation(hash, location string) error               { return nil }
 func (m *mockQBClient) RenameTorrentFile(hash, oldPath, newPath string) error { return nil }
-func (m *mockQBClient) DeleteTorrent(hash string, deleteFiles bool) error { return nil }
-func (m *mockQBClient) GetTorrentFiles(hash string) ([]downloader.TorrentFile, error) { return nil, nil }
+func (m *mockQBClient) RemoveTorrentTask(hash string) error                   { return nil }
+func (m *mockQBClient) DeleteTorrentWithPayload(hash string) error            { return nil }
+func (m *mockQBClient) GetTorrentFiles(hash string) ([]downloader.TorrentFile, error) {
+	return nil, nil
+}
 func (m *mockQBClient) GetVersion() (string, error) { return "", nil }
 func (m *mockQBClient) SetProxy(proxy string) error {
 	if m.setProxyFunc != nil {
@@ -73,7 +76,7 @@ func (m *mockDownloadRepo) Create(download *model.Download) error {
 	return nil
 }
 func (m *mockDownloadRepo) Update(download *model.Download) error { return nil }
-func (m *mockDownloadRepo) Delete(id uint) error                   { return nil }
+func (m *mockDownloadRepo) Delete(id uint) error                  { return nil }
 func (m *mockDownloadRepo) GetByID(id uint) (*model.Download, error) {
 	for _, d := range m.downloads {
 		if d.ID == id {
@@ -438,9 +441,9 @@ func (m *mockConfigRepoWithProxy) Get(key string) (*model.Config, error) {
 	return nil, nil
 }
 func (m *mockConfigRepoWithProxy) GetCached(key string) (string, error) { return "", nil }
-func (m *mockConfigRepoWithProxy) Set(key, value string) error           { return nil }
-func (m *mockConfigRepoWithProxy) Delete(key string) error               { return nil }
-func (m *mockConfigRepoWithProxy) GetAll() ([]model.Config, error)       { return nil, nil }
+func (m *mockConfigRepoWithProxy) Set(key, value string) error          { return nil }
+func (m *mockConfigRepoWithProxy) Delete(key string) error              { return nil }
+func (m *mockConfigRepoWithProxy) GetAll() ([]model.Config, error)      { return nil, nil }
 
 func TestCollectionDownloader_Download_SkipsIfRecordExists(t *testing.T) {
 	mockQB := &mockQBClient{

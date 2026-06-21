@@ -18,20 +18,33 @@ import (
 
 // mockQBittorrentClient 模拟 qBittorrent 客户端
 type mockQBittorrentClient struct {
-	deleteTorrentFunc func(hash string, deleteFiles bool) error
-	addTorrentFunc    func(torrentURL, downloadPath, category string) (string, error)
-	deleteCalled      bool
-	addCalled         bool
-	deletedHash       string
-	addedURL          string
-	addedPath         string
+	deleteTorrentFunc       func(hash string, deleteFiles bool) error
+	addTorrentFunc          func(torrentURL, downloadPath, category string) (string, error)
+	removeTaskCalled        bool
+	deleteWithPayloadCalled bool
+	addCalled               bool
+	deletedHash             string
+	lastDeleteFiles         bool
+	addedURL                string
+	addedPath               string
 }
 
-func (m *mockQBittorrentClient) DeleteTorrent(hash string, deleteFiles bool) error {
-	m.deleteCalled = true
+func (m *mockQBittorrentClient) RemoveTorrentTask(hash string) error {
+	m.removeTaskCalled = true
 	m.deletedHash = hash
+	m.lastDeleteFiles = false
 	if m.deleteTorrentFunc != nil {
-		return m.deleteTorrentFunc(hash, deleteFiles)
+		return m.deleteTorrentFunc(hash, false)
+	}
+	return nil
+}
+
+func (m *mockQBittorrentClient) DeleteTorrentWithPayload(hash string) error {
+	m.deleteWithPayloadCalled = true
+	m.deletedHash = hash
+	m.lastDeleteFiles = true
+	if m.deleteTorrentFunc != nil {
+		return m.deleteTorrentFunc(hash, true)
 	}
 	return nil
 }
@@ -211,9 +224,13 @@ func TestRetryHandler_CallsDeleteTorrentWhenHashExists(t *testing.T) {
 		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Verify DeleteTorrent was called
-	if !mockQB.deleteCalled {
-		t.Error("expected DeleteTorrent to be called")
+	// Verify explicit payload deletion was called.
+	if !mockQB.deleteWithPayloadCalled {
+		t.Error("expected DeleteTorrentWithPayload to be called")
+	}
+
+	if !mockQB.lastDeleteFiles {
+		t.Error("expected retry to request payload deletion")
 	}
 
 	if mockQB.deletedHash != "test-hash-abc123" {
@@ -578,8 +595,12 @@ func TestRetryHandler_DeleteTorrentError_Ignored(t *testing.T) {
 		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Verify retry still proceeded
-	if !mockQB.deleteCalled {
-		t.Error("expected DeleteTorrent to be called")
+	// Verify retry still proceeded after explicit payload deletion failed.
+	if !mockQB.deleteWithPayloadCalled {
+		t.Error("expected DeleteTorrentWithPayload to be called")
+	}
+
+	if !mockQB.lastDeleteFiles {
+		t.Error("expected retry to request payload deletion")
 	}
 }

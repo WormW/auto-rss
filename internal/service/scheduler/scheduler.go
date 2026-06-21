@@ -360,7 +360,16 @@ func (s *scheduler) checkRSSFeeds() {
 
 						// 如果旧任务有 qBittorrent hash，尝试删除种子（数据库记录在 processDownloadItem 事务中处理）
 						if existingEpisode.TorrentHash != "" {
-							if err := s.qbClient.DeleteTorrent(existingEpisode.TorrentHash, true); err != nil {
+							logger.Info("Deleting old qBittorrent torrent with payload for replacement",
+								"task_action", "replace_old_task_delete_payload",
+								"subscription_id", sub.ID,
+								"download_id", existingEpisode.ID,
+								"episode", item.Episode,
+								"torrent_hash_prefix", utils.HashPrefix(existingEpisode.TorrentHash),
+								"file_path", existingEpisode.FilePath,
+								"renamed_path", existingEpisode.RenamedPath,
+								"trigger_context", "scheduler_rss_check")
+							if err := s.qbClient.DeleteTorrentWithPayload(existingEpisode.TorrentHash); err != nil {
 								logger.Error("Failed to delete old torrent from qBittorrent",
 									"task_action", "replace_old_task_delete_torrent",
 									"subscription_id", sub.ID,
