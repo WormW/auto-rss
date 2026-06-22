@@ -35,12 +35,16 @@ type mockDownloadRepo struct {
 	getByRetryCountFunc       func(minRetries, maxRetries int) ([]model.Download, error)
 	createInTxFunc            func(tx *gorm.DB, download *model.Download) error
 	updateInTxFunc            func(tx *gorm.DB, download *model.Download) error
+	getDownloadHistoryFunc    func(filter *repository.DownloadHistoryFilter, offset, limit int) ([]model.Download, int64, error)
+	getDownloadStatisticsFunc func(days int) (*repository.DownloadStatistics, error)
 
 	// Tracking fields
-	listCalls    int
-	getByIDCalls int
-	updateCalls  int
-	deleteCalls  int
+	listCalls                  int
+	getByIDCalls               int
+	updateCalls                int
+	deleteCalls                int
+	getDownloadHistoryCalls    int
+	getDownloadStatisticsCalls int
 }
 
 func (m *mockDownloadRepo) Create(download *model.Download) error {
@@ -174,10 +178,18 @@ func (m *mockDownloadRepo) UpdateInTx(tx *gorm.DB, download *model.Download) err
 }
 
 func (m *mockDownloadRepo) GetDownloadHistory(filter *repository.DownloadHistoryFilter, offset, limit int) ([]model.Download, int64, error) {
+	m.getDownloadHistoryCalls++
+	if m.getDownloadHistoryFunc != nil {
+		return m.getDownloadHistoryFunc(filter, offset, limit)
+	}
 	return nil, 0, nil
 }
 
 func (m *mockDownloadRepo) GetDownloadStatistics(days int) (*repository.DownloadStatistics, error) {
+	m.getDownloadStatisticsCalls++
+	if m.getDownloadStatisticsFunc != nil {
+		return m.getDownloadStatisticsFunc(days)
+	}
 	return nil, nil
 }
 
