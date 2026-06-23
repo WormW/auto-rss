@@ -275,6 +275,8 @@ ws://localhost:7892/ws/notifications?token=<access_token>
 }
 ```
 
+标签 API 已有 handler 级测试覆盖。路由级集成验证仍作为独立后续任务跟踪。
+
 ### 下载
 
 | 方法 | 路径 | 说明 |
@@ -289,7 +291,7 @@ ws://localhost:7892/ws/notifications?token=<access_token>
 | `GET` | `/downloads/history` | 下载历史 |
 | `GET` | `/downloads/statistics` | 下载统计 |
 
-列表支持 `page`、`page_size`、`status` 查询参数。当前没有 `POST /api/v1/downloads` 手动创建下载任务路由；新增下载主要由 RSS 刷新、订阅采集和合集种子流程产生。
+列表支持 `page`、`page_size`、`status` 查询参数。`/downloads/history` 额外支持 `subscription_id`、`status`、`start_date`、`end_date`、`page`、`page_size`；`/downloads/statistics` 支持 `days`。当前没有 `POST /api/v1/downloads` 手动创建下载任务路由；新增下载主要由 RSS 刷新、订阅采集和合集种子流程产生。
 
 批量删除请求：
 
@@ -315,7 +317,7 @@ DELETE /api/v1/downloads/clear?status=failed
 | `GET` | `/rss/dead` | 获取疑似失效 RSS |
 | `POST` | `/rss/health-check` | 手动触发 RSS 健康检查 |
 
-当前没有单个订阅的 `/rss/refresh/:subscription_id` 路由。单订阅补剧请使用 `/subscriptions/:id/collect-episodes`。
+当前没有单个订阅的 `/rss/refresh/:subscription_id` 路由，也没有 `/rss/health/cached` 路由。单订阅补剧请使用 `/subscriptions/:id/collect-episodes`。
 
 ### 配置
 
