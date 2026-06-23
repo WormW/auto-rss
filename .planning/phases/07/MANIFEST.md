@@ -2,7 +2,7 @@
 
 ## Summary
 
-Successfully implemented API layer for tag system, download history/statistics, and RSS health check.
+Successfully implemented API layer for tag system, download history/statistics, and RSS health check. Handler-level tests for those areas were later published through WOR-139 / PR #38, WOR-140 / PR #39, and WOR-141 / PR #40.
 
 ## Files Created
 
@@ -14,6 +14,9 @@ Successfully implemented API layer for tag system, download history/statistics, 
 ### Tests Updated
 - `internal/api/handler/download_test.go` - Added mock methods for new interface
 - `internal/api/handler/subscription_test.go` - Added mock methods for tag methods
+- `internal/api/handler/tag_test.go` - Handler tests for tag CRUD and subscription tag association
+- `internal/api/handler/download_history_test.go` - Handler tests for history filters, pagination, and statistics
+- `internal/api/handler/rss_health_test.go` - Handler tests for single/all health checks, dead subscriptions, and async trigger behavior
 
 ## Files Modified
 
@@ -45,7 +48,6 @@ GET  /api/v1/rss/health                    - Check all subscriptions
 GET  /api/v1/rss/health/:subscription_id   - Check single subscription
 GET  /api/v1/rss/dead                      - Get dead subscriptions
 POST /api/v1/rss/health-check              - Trigger async check
-GET  /api/v1/rss/health/cached             - Get cached results
 ```
 
 ## Build Status
@@ -54,9 +56,9 @@ GET  /api/v1/rss/health/cached             - Get cached results
 
 ## Test Status
 
-- Existing tests updated with new mock methods
-- Some pre-existing test failures unrelated to new code (database constraint issues)
-- Core handler tests passing
+- Handler-level tests exist for tag, download history/statistics, and RSS health endpoints.
+- PRs #38/#39/#40 were published for the Phase 7 API test completion flow tracked by WOR-138.
+- Router-level integration/API validation remains a separate follow-up in 07-07.
 
 ## Implementation Notes
 
@@ -66,5 +68,4 @@ GET  /api/v1/rss/health/cached             - Get cached results
 
 ## Remaining Work (Optional)
 
-- Dedicated unit tests for new handlers (tag_test.go, download_history_test.go, rss_health_test.go)
-- Integration tests for end-to-end API validation
+- Router-level integration tests for end-to-end API validation

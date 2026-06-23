@@ -22,11 +22,11 @@ Auto-RSS 后端已具备以下基础设施：
 
 ## Success Criteria
 
-- [ ] 标签系统 API 完整可用（创建/更新/删除/列表/订阅关联）
-- [ ] 下载历史 API 支持筛选和分页
-- [ ] 下载统计 API 返回各状态数量和趋势数据
-- [ ] RSS 健康检查 API 可检查单个/全部订阅
-- [ ] 所有 API 都有对应的测试覆盖
+- [x] 标签系统 API 完整可用（创建/更新/删除/列表/订阅关联）
+- [x] 下载历史 API 支持筛选和分页
+- [x] 下载统计 API 返回各状态数量和趋势数据
+- [x] RSS 健康检查 API 可检查单个/全部订阅
+- [x] 新增 handler 已有对应的 handler 级测试覆盖
 - [ ] API 文档（通过代码注释）完整
 
 ## Plans
@@ -158,10 +158,10 @@ Auto-RSS 后端已具备以下基础设施：
 
 ## Plan Checklist
 
-- [ ] Plan 07-01: 标签系统 Handler 和路由
-- [ ] Plan 07-02: 下载历史和统计 Handler 和路由
-- [ ] Plan 07-03: RSS 健康检查 Handler 和路由
-- [ ] Plan 07-04: 标签系统 Handler 测试
-- [ ] Plan 07-05: 下载历史和统计 Handler 测试
-- [ ] Plan 07-06: RSS 健康检查 Handler 测试
-- [ ] Plan 07-07: 集成测试和 API 验证
+- [x] Plan 07-01: 标签系统 Handler 和路由 — completed 2026-04-12
+- [x] Plan 07-02: 下载历史和统计 Handler 和路由 — completed 2026-04-12
+- [x] Plan 07-03: RSS 健康检查 Handler 和路由 — completed 2026-04-12
+- [x] Plan 07-04: 标签系统 Handler 测试 — published 2026-06-22 via WOR-139 / PR #38
+- [x] Plan 07-05: 下载历史和统计 Handler 测试 — published 2026-06-22 via WOR-140 / PR #39
+- [x] Plan 07-06: RSS 健康检查 Handler 测试 — published 2026-06-22 via WOR-141 / PR #40
+- [ ] Plan 07-07: 路由级集成测试和 API 验证 — separate follow-up, not part of completed handler test work

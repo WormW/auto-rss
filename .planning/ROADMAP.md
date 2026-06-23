@@ -4,6 +4,7 @@
 
 - **v1.0 技术债务清理** — Phases 1-3 (shipped 2026-04-05) — [详情](milestones/v1.0-ROADMAP.md)
 - **v1.1 基础设施增强** — Phases 5-6 (shipped 2026-04-06) — [详情](milestones/v1.1-ROADMAP.md)
+- **v1.2 API层功能增强** — Phase 7 handler/API test work (published 2026-06-22) — PR #38/#39/#40
 
 ---
 
@@ -56,17 +57,17 @@
 
 ## Current Phase
 
-### Phase 7: API层功能增强 (v1.2) — IN PROGRESS
+### Phase 7: API层功能增强 (v1.2) — API AND HANDLER TESTS PUBLISHED
 
 实现标签系统、下载历史/统计、RSS健康检查的完整API层。
 
 - [x] 07-01: 标签系统 Handler 和路由 — completed 2026-04-12
 - [x] 07-02: 下载历史和统计 Handler 和路由 — completed 2026-04-12
 - [x] 07-03: RSS 健康检查 Handler 和路由 — completed 2026-04-12
-- [ ] 07-04: 标签系统 Handler 测试
-- [ ] 07-05: 下载历史和统计 Handler 测试
-- [ ] 07-06: RSS 健康检查 Handler 测试
-- [ ] 07-07: 集成测试和 API 验证
+- [x] 07-04: 标签系统 Handler 测试 — published 2026-06-22 via WOR-139 / PR #38
+- [x] 07-05: 下载历史和统计 Handler 测试 — published 2026-06-22 via WOR-140 / PR #39
+- [x] 07-06: RSS 健康检查 Handler 测试 — published 2026-06-22 via WOR-141 / PR #40
+- [ ] 07-07: 路由级集成测试和 API 验证 — follow-up only; not required to avoid recreating completed handler test work
 
 ---
 
@@ -79,7 +80,7 @@
 | 3. 性能与测试     | v1.0      | 5/5            | Complete    | 2025-04-05 |
 | 5. API 限流       | v1.1      | 3/3            | Complete    | 2026-04-06 |
 | 6. WebSocket 自动重连 | v1.1  | 3/3            | Complete    | 2026-04-06 |
-| 7. API层功能增强  | v1.2      | 3/7            | In Progress | 2026-04-12 |
+| 7. API层功能增强  | v1.2      | 6/7            | API + handler tests published | 2026-06-22 |
 
 ---
-*Last updated: 2026-04-12 after Phase 7 Wave 1 completion (handlers implemented)*
+*Last updated: 2026-06-23 after Phase 7 handler test PRs #38/#39/#40 were published; 07-07 remains a separate router-level validation follow-up.*
