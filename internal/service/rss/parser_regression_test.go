@@ -3,6 +3,7 @@ package rss
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/WormW/auto-rss/internal/pkg/utils"
 	ext "github.com/mmcdole/gofeed/extensions"
@@ -176,6 +177,50 @@ func TestParseLeavesItemRSSURLEmptyWhenAbsent(t *testing.T) {
 	}
 	if items[0].RssURL != "" {
 		t.Fatalf("RssURL = %q, want empty", items[0].RssURL)
+	}
+}
+
+func TestParseGenericEnclosureFeedExtractsItemFields(t *testing.T) {
+	feed := strings.NewReader(`<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Generic seasonal torrents</title>
+    <link>https://feeds.example.test/shows</link>
+    <item>
+      <title>Space Show S02E08 1080p WEB-DL</title>
+      <guid isPermaLink="false">space-show-s02e08</guid>
+      <link>https://feeds.example.test/releases/space-show-s02e08</link>
+      <pubDate>Wed, 24 Jun 2026 12:30:00 +0000</pubDate>
+      <enclosure url="https://cdn.example.test/torrents/space-show-s02e08.torrent" type="application/x-bittorrent" length="123456" />
+    </item>
+  </channel>
+</rss>`)
+
+	items, err := NewParser().Parse(feed)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("Parse() returned %d items, want 1", len(items))
+	}
+
+	item := items[0]
+	if item.Title != "Space Show S02E08 1080p WEB-DL" {
+		t.Fatalf("Title = %q", item.Title)
+	}
+	if item.Episode != 8 {
+		t.Fatalf("Episode = %d, want 8", item.Episode)
+	}
+	if item.TorrentURL != "https://cdn.example.test/torrents/space-show-s02e08.torrent" {
+		t.Fatalf("TorrentURL = %q", item.TorrentURL)
+	}
+	if item.PubDate != "Wed, 24 Jun 2026 12:30:00 +0000" {
+		t.Fatalf("PubDate = %q", item.PubDate)
+	}
+
+	wantPubTime := time.Date(2026, 6, 24, 12, 30, 0, 0, time.UTC)
+	if !item.PubTime.Equal(wantPubTime) {
+		t.Fatalf("PubTime = %s, want %s", item.PubTime.Format(time.RFC3339), wantPubTime.Format(time.RFC3339))
 	}
 }
 
