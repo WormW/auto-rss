@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/WormW/auto-rss/internal/api/handler"
 	"github.com/WormW/auto-rss/internal/app"
 	"github.com/WormW/auto-rss/internal/config"
 	"github.com/WormW/auto-rss/internal/model"
@@ -40,6 +42,8 @@ func newTestDB(t *testing.T) *gorm.DB {
 	}
 	if err := db.AutoMigrate(
 		&model.Subscription{},
+		&model.SubscriptionTag{},
+		&model.SubscriptionTagRelation{},
 		&model.Download{},
 		&model.Config{},
 		&model.DiskSample{},
@@ -198,6 +202,179 @@ func TestSetup_AuthDisabledKeepsLocalRoutesAccessible(t *testing.T) {
 	}
 }
 
+func TestSetup_RoutesTagValidationThroughAPIGroup(t *testing.T) {
+	r, _, db := setupRouterForTestWithDB(t, false)
+
+	createRecorder := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/tags", bytes.NewBufferString(`{"name":"router-tag","description":"from router"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(createRecorder, createReq)
+	if createRecorder.Code != http.StatusOK {
+		t.Fatalf("expected router tag create to succeed, got %d: %s", createRecorder.Code, createRecorder.Body.String())
+	}
+
+	var createResponse struct {
+		Code int `json:"code"`
+		Data struct {
+			ID          uint   `json:"id"`
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(createRecorder.Body.Bytes(), &createResponse); err != nil {
+		t.Fatalf("failed to parse tag create response: %v", err)
+	}
+	if createResponse.Code != 0 || createResponse.Data.Name != "router-tag" || createResponse.Data.Description != "from router" {
+		t.Fatalf("unexpected tag create response: %#v", createResponse)
+	}
+
+	duplicateRecorder := httptest.NewRecorder()
+	duplicateReq := httptest.NewRequest(http.MethodPost, "/api/v1/tags", bytes.NewBufferString(`{"name":"router-tag"}`))
+	duplicateReq.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(duplicateRecorder, duplicateReq)
+	if duplicateRecorder.Code != http.StatusConflict {
+		t.Fatalf("expected duplicate tag to be rejected through router, got %d: %s", duplicateRecorder.Code, duplicateRecorder.Body.String())
+	}
+
+	missingNameRecorder := httptest.NewRecorder()
+	missingNameReq := httptest.NewRequest(http.MethodPost, "/api/v1/tags", bytes.NewBufferString(`{"description":"missing name"}`))
+	missingNameReq.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(missingNameRecorder, missingNameReq)
+	if missingNameRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected tag validation error through router, got %d: %s", missingNameRecorder.Code, missingNameRecorder.Body.String())
+	}
+
+	var tag model.SubscriptionTag
+	if err := db.First(&tag, createResponse.Data.ID).Error; err != nil {
+		t.Fatalf("expected created tag to persist: %v", err)
+	}
+}
+
+func TestSetup_RoutesDownloadHistoryAndStatisticsValidationThroughAPIGroup(t *testing.T) {
+	r, _, db := setupRouterForTestWithDB(t, false)
+
+	subscription := model.Subscription{Name: "Router History Anime", RssURL: "https://example.com/router-history.xml", Season: 1, Enabled: true, Status: "active"}
+	if err := db.Create(&subscription).Error; err != nil {
+		t.Fatalf("failed to seed subscription: %v", err)
+	}
+	if err := db.Create(&model.Download{
+		SubscriptionID: subscription.ID,
+		Title:          "Router History Episode",
+		Episode:        1,
+		TorrentURL:     "https://example.com/router-history.torrent",
+		TorrentHash:    "router-history-hash",
+		Status:         model.DownloadStatusCompleted,
+	}).Error; err != nil {
+		t.Fatalf("failed to seed download: %v", err)
+	}
+
+	historyRecorder := httptest.NewRecorder()
+	historyReq := httptest.NewRequest(http.MethodGet, "/api/v1/downloads/history?page=1&page_size=10&status=completed&subscription_id="+strconv.FormatUint(uint64(subscription.ID), 10), nil)
+	r.ServeHTTP(historyRecorder, historyReq)
+	if historyRecorder.Code != http.StatusOK {
+		t.Fatalf("expected download history route to succeed, got %d: %s", historyRecorder.Code, historyRecorder.Body.String())
+	}
+
+	var historyResponse struct {
+		Code int `json:"code"`
+		Data struct {
+			List     []model.Download `json:"list"`
+			Total    int64            `json:"total"`
+			Page     int              `json:"page"`
+			PageSize int              `json:"page_size"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(historyRecorder.Body.Bytes(), &historyResponse); err != nil {
+		t.Fatalf("failed to parse history response: %v", err)
+	}
+	if historyResponse.Code != 0 || historyResponse.Data.Total != 1 || len(historyResponse.Data.List) != 1 {
+		t.Fatalf("unexpected history response: %#v", historyResponse)
+	}
+	if historyResponse.Data.Page != 1 || historyResponse.Data.PageSize != 10 {
+		t.Fatalf("expected router query params to reach history handler, got page=%d page_size=%d", historyResponse.Data.Page, historyResponse.Data.PageSize)
+	}
+
+	invalidDateRecorder := httptest.NewRecorder()
+	invalidDateReq := httptest.NewRequest(http.MethodGet, "/api/v1/downloads/history?start_date=2026/06/01", nil)
+	r.ServeHTTP(invalidDateRecorder, invalidDateReq)
+	if invalidDateRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid date validation error through router, got %d: %s", invalidDateRecorder.Code, invalidDateRecorder.Body.String())
+	}
+
+	statisticsRecorder := httptest.NewRecorder()
+	statisticsReq := httptest.NewRequest(http.MethodGet, "/api/v1/downloads/statistics?days=0", nil)
+	r.ServeHTTP(statisticsRecorder, statisticsReq)
+	if statisticsRecorder.Code != http.StatusOK {
+		t.Fatalf("expected download statistics route to succeed, got %d: %s", statisticsRecorder.Code, statisticsRecorder.Body.String())
+	}
+
+	var statisticsResponse struct {
+		Code int                           `json:"code"`
+		Data repository.DownloadStatistics `json:"data"`
+	}
+	if err := json.Unmarshal(statisticsRecorder.Body.Bytes(), &statisticsResponse); err != nil {
+		t.Fatalf("failed to parse statistics response: %v", err)
+	}
+	if statisticsResponse.Code != 0 || statisticsResponse.Data.TotalCount != 1 || statisticsResponse.Data.CompletedCount != 1 {
+		t.Fatalf("unexpected statistics response: %#v", statisticsResponse)
+	}
+}
+
+func TestSetup_RoutesRSSHealthValidationThroughAPIGroup(t *testing.T) {
+	r, _, db := setupRouterForTestWithDB(t, false)
+	feed := newRouterRSSFeedServer(t, http.StatusOK, routerValidRSSFeed("Router Healthy Anime"))
+
+	subscription := model.Subscription{Name: "Router Healthy Anime", RssURL: feed.URL, Season: 1, Enabled: true, Status: "active"}
+	if err := db.Create(&subscription).Error; err != nil {
+		t.Fatalf("failed to seed subscription: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/rss/health/"+strconv.FormatUint(uint64(subscription.ID), 10), nil)
+	r.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected rss health route to succeed, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Code int                   `json:"code"`
+		Data rss.HealthCheckResult `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to parse rss health response: %v", err)
+	}
+	if response.Code != 0 || response.Data.SubscriptionID != subscription.ID || response.Data.Status != rss.HealthStatusHealthy {
+		t.Fatalf("unexpected rss health response: %#v", response)
+	}
+
+	badIDRecorder := httptest.NewRecorder()
+	badIDReq := httptest.NewRequest(http.MethodGet, "/api/v1/rss/health/not-a-number", nil)
+	r.ServeHTTP(badIDRecorder, badIDReq)
+	if badIDRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid subscription id validation error through router, got %d: %s", badIDRecorder.Code, badIDRecorder.Body.String())
+	}
+
+	allRecorder := httptest.NewRecorder()
+	allReq := httptest.NewRequest(http.MethodGet, "/api/v1/rss/health", nil)
+	r.ServeHTTP(allRecorder, allReq)
+	if allRecorder.Code != http.StatusOK {
+		t.Fatalf("expected aggregate rss health route to succeed, got %d: %s", allRecorder.Code, allRecorder.Body.String())
+	}
+
+	var allResponse struct {
+		Code int `json:"code"`
+		Data struct {
+			Summary handler.HealthCheckSummary `json:"summary"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(allRecorder.Body.Bytes(), &allResponse); err != nil {
+		t.Fatalf("failed to parse aggregate rss health response: %v", err)
+	}
+	if allResponse.Code != 0 || allResponse.Data.Summary.Total != 1 || allResponse.Data.Summary.Healthy != 1 {
+		t.Fatalf("unexpected aggregate rss health response: %#v", allResponse)
+	}
+}
+
 func TestOnboardingStatusReportsMissingSetup(t *testing.T) {
 	r, _ := setupRouterForTest(t, false)
 
@@ -351,4 +528,29 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func newRouterRSSFeedServer(t *testing.T, status int, body string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func routerValidRSSFeed(title string) string {
+	return `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>` + title + `</title>
+    <item>
+      <title>Episode 1</title>
+      <link>https://example.test/episode-1</link>
+      <pubDate>Mon, 02 Jan 2006 15:04:05 GMT</pubDate>
+    </item>
+  </channel>
+</rss>`
 }
