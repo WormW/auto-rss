@@ -205,10 +205,7 @@ func TestSetup_AuthDisabledKeepsLocalRoutesAccessible(t *testing.T) {
 func TestSetup_RoutesTagValidationThroughAPIGroup(t *testing.T) {
 	r, _, db := setupRouterForTestWithDB(t, false)
 
-	createRecorder := httptest.NewRecorder()
-	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/tags", bytes.NewBufferString(`{"name":"router-tag","description":"from router"}`))
-	createReq.Header.Set("Content-Type", "application/json")
-	r.ServeHTTP(createRecorder, createReq)
+	createRecorder := performRouterJSONRequest(r, http.MethodPost, "/api/v1/tags", `{"name":"router-tag","description":"from router"}`)
 	if createRecorder.Code != http.StatusOK {
 		t.Fatalf("expected router tag create to succeed, got %d: %s", createRecorder.Code, createRecorder.Body.String())
 	}
@@ -228,25 +225,149 @@ func TestSetup_RoutesTagValidationThroughAPIGroup(t *testing.T) {
 		t.Fatalf("unexpected tag create response: %#v", createResponse)
 	}
 
-	duplicateRecorder := httptest.NewRecorder()
-	duplicateReq := httptest.NewRequest(http.MethodPost, "/api/v1/tags", bytes.NewBufferString(`{"name":"router-tag"}`))
-	duplicateReq.Header.Set("Content-Type", "application/json")
-	r.ServeHTTP(duplicateRecorder, duplicateReq)
+	listRecorder := performRouterRequest(r, http.MethodGet, "/api/v1/tags", nil)
+	if listRecorder.Code != http.StatusOK {
+		t.Fatalf("expected router tag list to succeed, got %d: %s", listRecorder.Code, listRecorder.Body.String())
+	}
+	var listResponse struct {
+		Code int `json:"code"`
+		Data []struct {
+			ID   uint   `json:"id"`
+			Name string `json:"name"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(listRecorder.Body.Bytes(), &listResponse); err != nil {
+		t.Fatalf("failed to parse tag list response: %v", err)
+	}
+	if listResponse.Code != 0 || len(listResponse.Data) != 1 || listResponse.Data[0].ID != createResponse.Data.ID {
+		t.Fatalf("unexpected tag list response: %#v", listResponse)
+	}
+
+	updateRecorder := performRouterJSONRequest(r, http.MethodPut, "/api/v1/tags/"+strconv.FormatUint(uint64(createResponse.Data.ID), 10), `{"name":"router-tag-updated","color":"#abcdef","description":"updated by router"}`)
+	if updateRecorder.Code != http.StatusOK {
+		t.Fatalf("expected router tag update to succeed, got %d: %s", updateRecorder.Code, updateRecorder.Body.String())
+	}
+	var updateResponse struct {
+		Code int `json:"code"`
+		Data struct {
+			ID          uint   `json:"id"`
+			Name        string `json:"name"`
+			Color       string `json:"color"`
+			Description string `json:"description"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(updateRecorder.Body.Bytes(), &updateResponse); err != nil {
+		t.Fatalf("failed to parse tag update response: %v", err)
+	}
+	if updateResponse.Code != 0 || updateResponse.Data.ID != createResponse.Data.ID || updateResponse.Data.Name != "router-tag-updated" || updateResponse.Data.Color != "#abcdef" {
+		t.Fatalf("unexpected tag update response: %#v", updateResponse)
+	}
+
+	duplicateRecorder := performRouterJSONRequest(r, http.MethodPost, "/api/v1/tags", `{"name":"router-tag-updated"}`)
 	if duplicateRecorder.Code != http.StatusConflict {
 		t.Fatalf("expected duplicate tag to be rejected through router, got %d: %s", duplicateRecorder.Code, duplicateRecorder.Body.String())
 	}
 
-	missingNameRecorder := httptest.NewRecorder()
-	missingNameReq := httptest.NewRequest(http.MethodPost, "/api/v1/tags", bytes.NewBufferString(`{"description":"missing name"}`))
-	missingNameReq.Header.Set("Content-Type", "application/json")
-	r.ServeHTTP(missingNameRecorder, missingNameReq)
+	missingNameRecorder := performRouterJSONRequest(r, http.MethodPost, "/api/v1/tags", `{"description":"missing name"}`)
 	if missingNameRecorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected tag validation error through router, got %d: %s", missingNameRecorder.Code, missingNameRecorder.Body.String())
+	}
+
+	badUpdateIDRecorder := performRouterJSONRequest(r, http.MethodPut, "/api/v1/tags/not-a-number", `{"name":"bad"}`)
+	if badUpdateIDRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid tag update id through router, got %d: %s", badUpdateIDRecorder.Code, badUpdateIDRecorder.Body.String())
 	}
 
 	var tag model.SubscriptionTag
 	if err := db.First(&tag, createResponse.Data.ID).Error; err != nil {
 		t.Fatalf("expected created tag to persist: %v", err)
+	}
+	if tag.Name != "router-tag-updated" || tag.Color != "#abcdef" {
+		t.Fatalf("expected updated tag to persist, got %#v", tag)
+	}
+
+	deleteRecorder := performRouterRequest(r, http.MethodDelete, "/api/v1/tags/"+strconv.FormatUint(uint64(createResponse.Data.ID), 10), nil)
+	if deleteRecorder.Code != http.StatusOK {
+		t.Fatalf("expected router tag delete to succeed, got %d: %s", deleteRecorder.Code, deleteRecorder.Body.String())
+	}
+
+	badDeleteIDRecorder := performRouterRequest(r, http.MethodDelete, "/api/v1/tags/not-a-number", nil)
+	if badDeleteIDRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid tag delete id through router, got %d: %s", badDeleteIDRecorder.Code, badDeleteIDRecorder.Body.String())
+	}
+}
+
+func TestSetup_RoutesSubscriptionTagValidationThroughAPIGroup(t *testing.T) {
+	r, _, db := setupRouterForTestWithDB(t, false)
+
+	subscription := model.Subscription{Name: "Router Tagged Anime", RssURL: "https://example.com/router-tagged.xml", Season: 1, Enabled: true, Status: "active"}
+	if err := db.Create(&subscription).Error; err != nil {
+		t.Fatalf("failed to seed subscription: %v", err)
+	}
+	tagOne := model.SubscriptionTag{Name: "router-sub-tag-one", Color: "#111111", SortOrder: 20}
+	tagTwo := model.SubscriptionTag{Name: "router-sub-tag-two", Color: "#222222", SortOrder: 10}
+	if err := db.Create(&tagOne).Error; err != nil {
+		t.Fatalf("failed to seed first tag: %v", err)
+	}
+	if err := db.Create(&tagTwo).Error; err != nil {
+		t.Fatalf("failed to seed second tag: %v", err)
+	}
+
+	subscriptionPath := "/api/v1/subscriptions/" + strconv.FormatUint(uint64(subscription.ID), 10) + "/tags"
+	addRecorder := performRouterJSONRequest(r, http.MethodPost, subscriptionPath, `{"tag_ids":[`+strconv.FormatUint(uint64(tagOne.ID), 10)+`,`+strconv.FormatUint(uint64(tagTwo.ID), 10)+`]}`)
+	if addRecorder.Code != http.StatusOK {
+		t.Fatalf("expected router subscription tag add to succeed, got %d: %s", addRecorder.Code, addRecorder.Body.String())
+	}
+
+	listRecorder := performRouterRequest(r, http.MethodGet, subscriptionPath, nil)
+	if listRecorder.Code != http.StatusOK {
+		t.Fatalf("expected router subscription tag list to succeed, got %d: %s", listRecorder.Code, listRecorder.Body.String())
+	}
+	var listResponse struct {
+		Code int `json:"code"`
+		Data []struct {
+			ID   uint   `json:"id"`
+			Name string `json:"name"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(listRecorder.Body.Bytes(), &listResponse); err != nil {
+		t.Fatalf("failed to parse subscription tag list response: %v", err)
+	}
+	if listResponse.Code != 0 || len(listResponse.Data) != 2 || listResponse.Data[0].ID != tagTwo.ID || listResponse.Data[1].ID != tagOne.ID {
+		t.Fatalf("unexpected subscription tag list response: %#v", listResponse)
+	}
+
+	emptyIDsRecorder := performRouterJSONRequest(r, http.MethodPost, subscriptionPath, `{"tag_ids":[]}`)
+	if emptyIDsRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected empty tag ids validation through router, got %d: %s", emptyIDsRecorder.Code, emptyIDsRecorder.Body.String())
+	}
+
+	badSubscriptionIDRecorder := performRouterJSONRequest(r, http.MethodPost, "/api/v1/subscriptions/not-a-number/tags", `{"tag_ids":[1]}`)
+	if badSubscriptionIDRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid subscription id validation through router, got %d: %s", badSubscriptionIDRecorder.Code, badSubscriptionIDRecorder.Body.String())
+	}
+
+	notFoundRecorder := performRouterRequest(r, http.MethodGet, "/api/v1/subscriptions/99999/tags", nil)
+	if notFoundRecorder.Code != http.StatusNotFound {
+		t.Fatalf("expected missing subscription validation through router, got %d: %s", notFoundRecorder.Code, notFoundRecorder.Body.String())
+	}
+
+	removeRecorder := performRouterRequest(r, http.MethodDelete, subscriptionPath+"/"+strconv.FormatUint(uint64(tagOne.ID), 10), nil)
+	if removeRecorder.Code != http.StatusOK {
+		t.Fatalf("expected router subscription tag remove to succeed, got %d: %s", removeRecorder.Code, removeRecorder.Body.String())
+	}
+
+	badTagIDRecorder := performRouterRequest(r, http.MethodDelete, subscriptionPath+"/not-a-number", nil)
+	if badTagIDRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid tag id validation through router, got %d: %s", badTagIDRecorder.Code, badTagIDRecorder.Body.String())
+	}
+
+	var relationCount int64
+	if err := db.Model(&model.SubscriptionTagRelation{}).Where("subscription_id = ?", subscription.ID).Count(&relationCount).Error; err != nil {
+		t.Fatalf("failed to count subscription tag relations: %v", err)
+	}
+	if relationCount != 1 {
+		t.Fatalf("expected one subscription tag relation after removal, got %d", relationCount)
 	}
 }
 
@@ -528,6 +649,24 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func performRouterRequest(r http.Handler, method, target string, body *bytes.Buffer) *httptest.ResponseRecorder {
+	recorder := httptest.NewRecorder()
+	if body == nil {
+		body = bytes.NewBuffer(nil)
+	}
+	req := httptest.NewRequest(method, target, body)
+	r.ServeHTTP(recorder, req)
+	return recorder
+}
+
+func performRouterJSONRequest(r http.Handler, method, target, body string) *httptest.ResponseRecorder {
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(method, target, bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(recorder, req)
+	return recorder
 }
 
 func newRouterRSSFeedServer(t *testing.T, status int, body string) *httptest.Server {
