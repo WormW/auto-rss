@@ -202,6 +202,37 @@ func TestSetup_AuthDisabledKeepsLocalRoutesAccessible(t *testing.T) {
 	}
 }
 
+func TestSetup_AuthEnabledProtectsPhase7Routes(t *testing.T) {
+	r, _ := setupRouterForTest(t, true)
+
+	routes := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "tag list", method: http.MethodGet, path: "/api/v1/tags"},
+		{name: "tag create", method: http.MethodPost, path: "/api/v1/tags"},
+		{name: "download history", method: http.MethodGet, path: "/api/v1/downloads/history"},
+		{name: "download statistics", method: http.MethodGet, path: "/api/v1/downloads/statistics"},
+		{name: "rss health aggregate", method: http.MethodGet, path: "/api/v1/rss/health"},
+		{name: "rss health single", method: http.MethodGet, path: "/api/v1/rss/health/1"},
+		{name: "rss dead", method: http.MethodGet, path: "/api/v1/rss/dead"},
+		{name: "rss health trigger", method: http.MethodPost, path: "/api/v1/rss/health-check"},
+	}
+
+	for _, route := range routes {
+		t.Run(route.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			req := httptest.NewRequest(route.method, route.path, nil)
+			r.ServeHTTP(recorder, req)
+
+			if recorder.Code != http.StatusUnauthorized {
+				t.Fatalf("expected unauthenticated %s %s to return 401, got %d: %s", route.method, route.path, recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestSetup_RoutesTagValidationThroughAPIGroup(t *testing.T) {
 	r, _, db := setupRouterForTestWithDB(t, false)
 
