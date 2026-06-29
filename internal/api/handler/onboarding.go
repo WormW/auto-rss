@@ -63,7 +63,7 @@ func NewOnboardingHandler(
 func (h *OnboardingHandler) Status(c *gin.Context) {
 	completed := h.boolConfig(onboardingCompletedKey)
 	skipped := h.boolConfig(onboardingSkippedKey)
-	steps, missing, details := h.requiredSetupStatus()
+	steps, missing, details := h.requiredSetupStatus(false)
 
 	qb := details.qbittorrent
 	downloadPath := details.downloadPath
@@ -100,7 +100,7 @@ func (h *OnboardingHandler) Skip(c *gin.Context) {
 }
 
 func (h *OnboardingHandler) Complete(c *gin.Context) {
-	_, missing, _ := h.requiredSetupStatus()
+	_, missing, _ := h.requiredSetupStatus(true)
 	if len(missing) > 0 {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{
 			"code":    422,
@@ -166,9 +166,9 @@ type onboardingStatusDetails struct {
 	subscriptionCount int64
 }
 
-func (h *OnboardingHandler) requiredSetupStatus() ([]onboardingStep, []string, onboardingStatusDetails) {
+func (h *OnboardingHandler) requiredSetupStatus(testWrite bool) ([]onboardingStep, []string, onboardingStatusDetails) {
 	qb := h.qbittorrentStatus()
-	downloadPath := h.downloadPathStatus(true)
+	downloadPath := h.downloadPathStatus(testWrite)
 	rename := h.renameTemplateStatus()
 	rssSourceCount := h.rssSourceCount()
 	subscriptionCount := h.subscriptionCount()
