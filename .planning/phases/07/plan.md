@@ -27,7 +27,8 @@ Auto-RSS 后端已具备以下基础设施：
 - [x] 下载统计 API 返回各状态数量和趋势数据
 - [x] RSS 健康检查 API 可检查单个/全部订阅
 - [x] 新增 handler 已有对应的 handler 级测试覆盖
-- [ ] API 文档（通过代码注释）完整
+- [x] 路由级集成/API 验证覆盖 Phase 7 路由注册、鉴权保护、请求参数和响应格式
+- [x] API 文档记录当前 Phase 7 路由状态
 
 ## Plans
 
@@ -145,12 +146,12 @@ Auto-RSS 后端已具备以下基础设施：
 ### Plan 07-07: 集成测试和 API 验证
 
 **Files to modify/create:**
-- `test/api/integration_test.go` (modify/add cases)
+- `internal/api/router/router_test.go` (modify/add cases)
 
 **Requirements:**
-- 端到端测试新增 API
-- 验证路由正确注册
-- 验证响应格式统一
+- 通过 `router.Setup` 测试新增 API 的路由边界
+- 验证 Phase 7 路由正确注册并受鉴权保护
+- 验证标签、下载历史/统计、RSS 健康检查的请求参数、错误场景和响应格式
 
 **Validation:**
 - 所有集成测试通过
@@ -164,4 +165,4 @@ Auto-RSS 后端已具备以下基础设施：
 - [x] Plan 07-04: 标签系统 Handler 测试 — published 2026-06-22 via WOR-139 / PR #38
 - [x] Plan 07-05: 下载历史和统计 Handler 测试 — published 2026-06-22 via WOR-140 / PR #39
 - [x] Plan 07-06: RSS 健康检查 Handler 测试 — published 2026-06-22 via WOR-141 / PR #40
-- [ ] Plan 07-07: 路由级集成测试和 API 验证 — separate follow-up, not part of completed handler test work
+- [x] Plan 07-07: 路由级集成测试和 API 验证 — published 2026-06-25 through 2026-06-28 via WOR-159/WOR-164/WOR-169/WOR-174 and PR #43/#44/#45/#46
