@@ -275,7 +275,7 @@ ws://localhost:7892/ws/notifications?token=<access_token>
 }
 ```
 
-标签 API 已有 handler 级测试覆盖。路由级集成验证仍作为独立后续任务跟踪。
+标签 API 已有 handler 级测试覆盖，路由级集成验证也已通过 Phase 7 的 07-07 工作发布。相关覆盖包括真实 `/api/v1` 路由下的创建、列表、更新、删除、订阅标签关联，以及重复标签、无效 ID、空 tag_ids、缺失订阅等错误响应。
 
 ### 下载
 
@@ -292,6 +292,8 @@ ws://localhost:7892/ws/notifications?token=<access_token>
 | `GET` | `/downloads/statistics` | 下载统计 |
 
 列表支持 `page`、`page_size`、`status` 查询参数。`/downloads/history` 额外支持 `subscription_id`、`status`、`start_date`、`end_date`、`page`、`page_size`；`/downloads/statistics` 支持 `days`。当前没有 `POST /api/v1/downloads` 手动创建下载任务路由；新增下载主要由 RSS 刷新、订阅采集和合集种子流程产生。
+
+下载历史和统计 API 已有 handler 级测试和路由级集成验证，覆盖状态/订阅/日期筛选、分页参数和统计响应格式。
 
 批量删除请求：
 
@@ -318,6 +320,8 @@ DELETE /api/v1/downloads/clear?status=failed
 | `POST` | `/rss/health-check` | 手动触发 RSS 健康检查 |
 
 当前没有单个订阅的 `/rss/refresh/:subscription_id` 路由，也没有 `/rss/health/cached` 路由。单订阅补剧请使用 `/subscriptions/:id/collect-episodes`。
+
+RSS 健康 API 已有 handler 级测试和路由级集成验证，覆盖单订阅检查、全量汇总、失效订阅列表、异步健康检查触发，以及鉴权开启时的路由保护。
 
 ### 配置
 
@@ -417,7 +421,7 @@ DELETE /api/v1/downloads/clear?status=failed
 }
 ```
 
-`subscription_id` 可省略，省略时扫描全部订阅。`dry_run=false` 会尝试写入修复结果。
+`subscription_id` 可省略，省略时扫描全部订阅。`dry_run=true` 只生成修复计划，不应写入生产 SQLite，也不应移动或删除下载/媒体文件。`dry_run=false` 会尝试写入修复结果，属于 mutation-oriented apply 行为；生产环境执行前需要单独的人类批准。
 
 ### 通知
 
