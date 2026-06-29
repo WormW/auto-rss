@@ -703,6 +703,46 @@ func TestOnboardingStatusRequiresUsableDownloadDirectory(t *testing.T) {
 	}
 }
 
+func TestOnboardingStatusDoesNotProbeDownloadDirectoryWriteAccess(t *testing.T) {
+	r, _, db := setupRouterForTestWithDB(t, false)
+	downloadPath := t.TempDir()
+	seedCompleteOnboardingSetupWithDownloadPath(t, db, downloadPath)
+
+	beforeEntries, err := os.ReadDir(downloadPath)
+	if err != nil {
+		t.Fatalf("failed to read download path before status request: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/onboarding/status", nil)
+	r.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected onboarding status to succeed, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	afterEntries, err := os.ReadDir(downloadPath)
+	if err != nil {
+		t.Fatalf("failed to read download path after status request: %v", err)
+	}
+	if len(afterEntries) != len(beforeEntries) {
+		t.Fatalf("expected onboarding status not to create write probe files, before=%d after=%d", len(beforeEntries), len(afterEntries))
+	}
+
+	var response struct {
+		Data struct {
+			DownloadPath struct {
+				Writable bool `json:"writable"`
+			} `json:"download_path"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to parse onboarding response: %v", err)
+	}
+	if !response.Data.DownloadPath.Writable {
+		t.Fatalf("expected existing directory to remain usable in status response")
+	}
+}
+
 func TestOnboardingCompleteRejectsIncompleteSetup(t *testing.T) {
 	r, _ := setupRouterForTest(t, false)
 
@@ -752,12 +792,17 @@ func TestOnboardingCompletePersistsStateWhenRequiredSetupComplete(t *testing.T) 
 
 func seedCompleteOnboardingSetup(t *testing.T, db *gorm.DB) {
 	t.Helper()
+	seedCompleteOnboardingSetupWithDownloadPath(t, db, t.TempDir())
+}
+
+func seedCompleteOnboardingSetupWithDownloadPath(t *testing.T, db *gorm.DB, downloadPath string) {
+	t.Helper()
 
 	configs := []model.Config{
 		{Key: "qbittorrent_host", Value: "http://localhost:8080"},
 		{Key: "qbittorrent_username", Value: "admin"},
 		{Key: "qbittorrent_password", Value: "secret"},
-		{Key: "download_path", Value: t.TempDir()},
+		{Key: "download_path", Value: downloadPath},
 		{Key: "rename_template", Value: "${title}/S${seasonFormat}E${episodeFormat}"},
 	}
 	for _, cfg := range configs {
