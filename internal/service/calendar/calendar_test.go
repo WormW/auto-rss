@@ -239,6 +239,62 @@ func TestNewCalendarAcceptsDownloadRepoParameter(t *testing.T) {
 	assert.NotNil(t, calendar)
 }
 
+func TestGetWeekScheduleSkipsCompletedSubscriptions(t *testing.T) {
+	mockSubRepo := new(MockSubscriptionRepository)
+	mockDownloadRepo := new(MockDownloadRepository)
+
+	now := time.Now()
+	weekday := int(now.Weekday())
+	airDay := string(rune('0' + weekday))
+
+	subscriptions := []model.Subscription{
+		{
+			ID:             1,
+			Name:           "Completed Anime",
+			AirDay:         airDay,
+			AirTime:        "10:00",
+			CurrentEpisode: 12,
+			TotalEpisodes:  12,
+		},
+		{
+			ID:             2,
+			Name:           "Ongoing Anime",
+			AirDay:         airDay,
+			AirTime:        "11:00",
+			CurrentEpisode: 5,
+			TotalEpisodes:  12,
+		},
+		{
+			ID:             3,
+			Name:           "Unknown Total Anime",
+			AirDay:         airDay,
+			AirTime:        "12:00",
+			CurrentEpisode: 99,
+			TotalEpisodes:  0,
+		},
+	}
+
+	mockSubRepo.On("GetActiveSubscriptions").Return(subscriptions, nil)
+	mockDownloadRepo.On("GetBySubscriptionAndEpisode", uint(2), 6).Return(nil, errors.New("not found"))
+	mockDownloadRepo.On("GetBySubscriptionAndEpisode", uint(3), 100).Return(nil, errors.New("not found"))
+
+	calendar := NewCalendar(mockSubRepo, mockDownloadRepo)
+	schedule, err := calendar.GetWeekSchedule(0)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, schedule)
+	assert.Len(t, schedule.Days[0].Items, 2)
+	assert.Equal(t, "Ongoing Anime", schedule.Days[0].Items[0].Name)
+	assert.Equal(t, 6, schedule.Days[0].Items[0].Episode)
+	assert.False(t, schedule.Days[0].Items[0].IsCompleted)
+	assert.Equal(t, "Unknown Total Anime", schedule.Days[0].Items[1].Name)
+	assert.Equal(t, 100, schedule.Days[0].Items[1].Episode)
+	assert.False(t, schedule.Days[0].Items[1].IsCompleted)
+
+	mockSubRepo.AssertExpectations(t)
+	mockDownloadRepo.AssertExpectations(t)
+}
+
 func TestIsDownloadedTrueWhenStatusCompleted(t *testing.T) {
 	mockSubRepo := new(MockSubscriptionRepository)
 	mockDownloadRepo := new(MockDownloadRepository)
@@ -249,12 +305,12 @@ func TestIsDownloadedTrueWhenStatusCompleted(t *testing.T) {
 
 	subscriptions := []model.Subscription{
 		{
-			ID:              1,
-			Name:            "Test Anime",
-			AirDay:          string(rune('0' + weekday)),
-			AirTime:         "12:00",
-			CurrentEpisode:  5,
-			TotalEpisodes:   12,
+			ID:                1,
+			Name:              "Test Anime",
+			AirDay:            string(rune('0' + weekday)),
+			AirTime:           "12:00",
+			CurrentEpisode:    5,
+			TotalEpisodes:     12,
 			BangumiCoverLocal: "/covers/test.jpg",
 		},
 	}
@@ -302,12 +358,12 @@ func TestIsDownloadedFalseWhenNoDownloadFound(t *testing.T) {
 
 	subscriptions := []model.Subscription{
 		{
-			ID:              1,
-			Name:            "Test Anime",
-			AirDay:          string(rune('0' + weekday)),
-			AirTime:         "12:00",
-			CurrentEpisode:  5,
-			TotalEpisodes:   12,
+			ID:                1,
+			Name:              "Test Anime",
+			AirDay:            string(rune('0' + weekday)),
+			AirTime:           "12:00",
+			CurrentEpisode:    5,
+			TotalEpisodes:     12,
 			BangumiCoverLocal: "/covers/test.jpg",
 		},
 	}
@@ -349,12 +405,12 @@ func TestIsDownloadedFalseWhenStatusDownloading(t *testing.T) {
 
 	subscriptions := []model.Subscription{
 		{
-			ID:              1,
-			Name:            "Test Anime",
-			AirDay:          string(rune('0' + weekday)),
-			AirTime:         "12:00",
-			CurrentEpisode:  5,
-			TotalEpisodes:   12,
+			ID:                1,
+			Name:              "Test Anime",
+			AirDay:            string(rune('0' + weekday)),
+			AirTime:           "12:00",
+			CurrentEpisode:    5,
+			TotalEpisodes:     12,
 			BangumiCoverLocal: "/covers/test.jpg",
 		},
 	}
@@ -402,12 +458,12 @@ func TestIsDownloadedFalseWhenStatusFailed(t *testing.T) {
 
 	subscriptions := []model.Subscription{
 		{
-			ID:              1,
-			Name:            "Test Anime",
-			AirDay:          string(rune('0' + weekday)),
-			AirTime:         "12:00",
-			CurrentEpisode:  5,
-			TotalEpisodes:   12,
+			ID:                1,
+			Name:              "Test Anime",
+			AirDay:            string(rune('0' + weekday)),
+			AirTime:           "12:00",
+			CurrentEpisode:    5,
+			TotalEpisodes:     12,
 			BangumiCoverLocal: "/covers/test.jpg",
 		},
 	}
@@ -455,12 +511,12 @@ func TestIsDownloadedFalseWhenStatusPending(t *testing.T) {
 
 	subscriptions := []model.Subscription{
 		{
-			ID:              1,
-			Name:            "Test Anime",
-			AirDay:          string(rune('0' + weekday)),
-			AirTime:         "12:00",
-			CurrentEpisode:  5,
-			TotalEpisodes:   12,
+			ID:                1,
+			Name:              "Test Anime",
+			AirDay:            string(rune('0' + weekday)),
+			AirTime:           "12:00",
+			CurrentEpisode:    5,
+			TotalEpisodes:     12,
 			BangumiCoverLocal: "/covers/test.jpg",
 		},
 	}
@@ -508,12 +564,12 @@ func TestIsDownloadedFalseWhenStatusStalled(t *testing.T) {
 
 	subscriptions := []model.Subscription{
 		{
-			ID:              1,
-			Name:            "Test Anime",
-			AirDay:          string(rune('0' + weekday)),
-			AirTime:         "12:00",
-			CurrentEpisode:  5,
-			TotalEpisodes:   12,
+			ID:                1,
+			Name:              "Test Anime",
+			AirDay:            string(rune('0' + weekday)),
+			AirTime:           "12:00",
+			CurrentEpisode:    5,
+			TotalEpisodes:     12,
 			BangumiCoverLocal: "/covers/test.jpg",
 		},
 	}
@@ -550,7 +606,6 @@ func TestIsDownloadedFalseWhenStatusStalled(t *testing.T) {
 	mockSubRepo.AssertExpectations(t)
 	mockDownloadRepo.AssertExpectations(t)
 }
-
 
 // 批量操作相关方法（mock实现）
 
