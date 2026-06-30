@@ -121,6 +121,9 @@ func (c *Calendar) GetWeekSchedule(weekOffset int) (*WeekSchedule, error) {
 		if sub.AirDay == "" {
 			continue // 没有设置播出时间
 		}
+		if isSubscriptionCompleted(sub) {
+			continue // 日历仅展示未完结作品
+		}
 
 		// 检查是否已下载 - 查询下一集的下载状态
 		isDownloaded := false
@@ -140,7 +143,7 @@ func (c *Calendar) GetWeekSchedule(weekOffset int) (*WeekSchedule, error) {
 			CurrentEpisode: sub.CurrentEpisode,
 			TotalEpisodes:  sub.TotalEpisodes,
 			IsDownloaded:   isDownloaded,
-			IsCompleted:    sub.TotalEpisodes > 0 && sub.CurrentEpisode >= sub.TotalEpisodes,
+			IsCompleted:    false,
 			Cover:          sub.BangumiCoverLocal,
 		}
 
@@ -206,6 +209,9 @@ func (c *Calendar) CheckUpcomingAiring() ([]CalendarItem, error) {
 		if !sub.NotifyEnabled || sub.AirDay != weekday {
 			continue
 		}
+		if isSubscriptionCompleted(sub) {
+			continue
+		}
 
 		// 解析播出时间
 		if sub.AirTime == "" {
@@ -240,7 +246,8 @@ func (c *Calendar) CheckUpcomingAiring() ([]CalendarItem, error) {
 				AirTime:        sub.AirTime,
 				AirDay:         sub.AirDay,
 				CurrentEpisode: sub.CurrentEpisode,
-				IsCompleted:    sub.TotalEpisodes > 0 && sub.CurrentEpisode >= sub.TotalEpisodes,
+				TotalEpisodes:  sub.TotalEpisodes,
+				IsCompleted:    false,
 			})
 		}
 	}
@@ -265,6 +272,10 @@ func (c *Calendar) SendAiringReminders() {
 	for _, item := range upcoming {
 		c.sendAiringNotification(item)
 	}
+}
+
+func isSubscriptionCompleted(sub model.Subscription) bool {
+	return sub.TotalEpisodes > 0 && sub.CurrentEpisode >= sub.TotalEpisodes
 }
 
 // sendAiringNotification 发送播出通知
