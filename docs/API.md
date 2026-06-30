@@ -353,6 +353,7 @@ RSS 健康 API 已有 handler 级测试和路由级集成验证，覆盖单订�
 | `qbittorrent_username` | qBittorrent 用户名 |
 | `qbittorrent_password` | qBittorrent 密码 |
 | `download_path` | 下载根目录 |
+| `min_torrent_size_bytes` | 自动 RSS 下载的最小种子载荷大小，默认 `52428800`（50 MiB），设为 `0` 可关闭该保护；RSS 未提供大小时不会按此规则跳过 |
 | `system_proxy` | 外部请求代理 |
 | `rename_template` | 重命名模板 |
 | `disk.warning_threshold_gb` | 磁盘警告阈值 |

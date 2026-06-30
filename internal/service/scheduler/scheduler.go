@@ -342,6 +342,12 @@ func (s *scheduler) checkRSSFeeds() {
 				skipReason = reason
 				replaceDownloadID = replaceID
 
+				minSizeBytes := minTorrentSizeBytes(s.configRepo)
+				if shouldSkipSmallTorrent(&item, minSizeBytes) {
+					s.logSmallTorrentSkip(&sub, &item, minSizeBytes)
+					continue
+				}
+
 				// 如果需要替换现有下载（更高版本），先在 qBittorrent 中删除旧种子
 				// 数据库记录将在 processDownloadItem 的事务中删除
 				if replaceDownloadID > 0 {
@@ -506,6 +512,12 @@ func (s *scheduler) processDownloadItem(sub *model.Subscription, item *rss.RSSIt
 		return false, nil
 	}
 
+	minSizeBytes := minTorrentSizeBytes(s.configRepo)
+	if shouldSkipSmallTorrent(item, minSizeBytes) {
+		s.logSmallTorrentSkip(sub, item, minSizeBytes)
+		return false, nil
+	}
+
 	// 创建下载任务
 	download := &model.Download{
 		SubscriptionID: sub.ID,
@@ -597,6 +609,20 @@ func (s *scheduler) processDownloadItem(sub *model.Subscription, item *rss.RSSIt
 	}
 
 	return true, nil
+}
+
+func (s *scheduler) logSmallTorrentSkip(sub *model.Subscription, item *rss.RSSItem, minSizeBytes int64) {
+	logger.Info("Skipping torrent below minimum size threshold",
+		"task_action", "skip_small_torrent",
+		"subscription", sub.Name,
+		"subscription_id", sub.ID,
+		"title", item.Title,
+		"episode", item.Episode,
+		"torrent_url", item.TorrentURL,
+		"reason", smallTorrentSkipMessage(item, minSizeBytes),
+		"size_bytes", item.SizeBytes,
+		"min_size_bytes", minSizeBytes,
+		"trigger_context", "scheduler_rss_check")
 }
 
 // updateSubscriptionCheckTime 更新订阅的检查时间（带事务）

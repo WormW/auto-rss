@@ -143,7 +143,7 @@ cp .env.example .env
 | `RATE_LIMIT_MAX_ENTRIES` | `10000` | 限流客户端缓存上限 |
 | `RATE_LIMIT_TTL` | `1h` | 限流客户端不活跃清理时间 |
 
-运行时配置也可通过 Web UI 或 `/api/v1/config` 写入数据库，例如 qBittorrent 连接、下载路径、代理、重命名模板、磁盘阈值和通知渠道。
+运行时配置也可通过 Web UI 或 `/api/v1/config` 写入数据库，例如 qBittorrent 连接、下载路径、代理、重命名模板、磁盘阈值和通知渠道。自动 RSS 下载会跳过 RSS enclosure 明确标注小于 `min_torrent_size_bytes` 的条目，默认值为 `52428800`（50 MiB），设置为 `0` 可关闭该保护；RSS 未提供大小时会继续按原流程处理。
 
 ---
 
