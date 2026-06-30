@@ -14,6 +14,11 @@ const (
 	defaultMinTorrentSizeBytes   = int64(50 * 1024 * 1024)
 )
 
+// MinTorrentSizeBytes returns the configured small-torrent threshold.
+func MinTorrentSizeBytes(configRepo repository.ConfigRepository) int64 {
+	return minTorrentSizeBytes(configRepo)
+}
+
 func minTorrentSizeBytes(configRepo repository.ConfigRepository) int64 {
 	if configRepo == nil {
 		return defaultMinTorrentSizeBytes
@@ -37,8 +42,18 @@ func minTorrentSizeBytes(configRepo repository.ConfigRepository) int64 {
 	return parsed
 }
 
+// SmallTorrentSkipMessage describes why a known-size RSS item was skipped.
+func SmallTorrentSkipMessage(item *rss.RSSItem, minSizeBytes int64) string {
+	return smallTorrentSkipMessage(item, minSizeBytes)
+}
+
 func smallTorrentSkipMessage(item *rss.RSSItem, minSizeBytes int64) string {
 	return fmt.Sprintf("skipped because torrent payload size %d bytes is below minimum %d bytes", item.SizeBytes, minSizeBytes)
+}
+
+// ShouldSkipSmallTorrent reports whether a known-size RSS item is below the configured threshold.
+func ShouldSkipSmallTorrent(item *rss.RSSItem, minSizeBytes int64) bool {
+	return shouldSkipSmallTorrent(item, minSizeBytes)
 }
 
 func shouldSkipSmallTorrent(item *rss.RSSItem, minSizeBytes int64) bool {
