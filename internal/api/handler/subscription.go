@@ -1263,6 +1263,21 @@ func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Tas
 			continue
 		}
 
+		minSizeBytes := scheduler.MinTorrentSizeBytes(h.configRepo)
+		if scheduler.ShouldSkipSmallTorrent(&item, minSizeBytes) {
+			logger.Info("Skipping small torrent from manual collection",
+				"subscription", subscription.Name,
+				"subscription_id", id,
+				"episode", item.Episode,
+				"title", item.Title,
+				"torrent_url", item.TorrentURL,
+				"reason", scheduler.SmallTorrentSkipMessage(&item, minSizeBytes),
+				"size_bytes", item.SizeBytes,
+				"min_size_bytes", minSizeBytes,
+				"trigger_context", "manual_collect")
+			continue
+		}
+
 		existingDownload, exists := episodeMap[item.Episode]
 
 		if exists && !processedEpisodes[item.Episode] {

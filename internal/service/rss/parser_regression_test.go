@@ -214,6 +214,9 @@ func TestParseGenericEnclosureFeedExtractsItemFields(t *testing.T) {
 	if item.TorrentURL != "https://cdn.example.test/torrents/space-show-s02e08.torrent" {
 		t.Fatalf("TorrentURL = %q", item.TorrentURL)
 	}
+	if item.SizeBytes != 123456 {
+		t.Fatalf("SizeBytes = %d, want 123456", item.SizeBytes)
+	}
 	if item.PubDate != "Wed, 24 Jun 2026 12:30:00 +0000" {
 		t.Fatalf("PubDate = %q", item.PubDate)
 	}

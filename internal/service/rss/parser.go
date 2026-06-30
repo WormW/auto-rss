@@ -38,6 +38,7 @@ type RSSItem struct {
 	RssURL      string
 	TorrentURL  string
 	TorrentHash string
+	SizeBytes   int64
 	PubDate     string
 	PubTime     time.Time // 解析后的发布时间
 	Fansub      string
@@ -148,7 +149,11 @@ func (p *parser) feedItemToRSSItem(item *gofeed.Item) RSSItem {
 
 	// 提取种子链接
 	if item.Enclosures != nil && len(item.Enclosures) > 0 {
-		rssItem.TorrentURL = item.Enclosures[0].URL
+		enclosure := item.Enclosures[0]
+		rssItem.TorrentURL = enclosure.URL
+		if length, err := strconv.ParseInt(strings.TrimSpace(enclosure.Length), 10, 64); err == nil && length > 0 {
+			rssItem.SizeBytes = length
+		}
 	} else if item.Link != "" {
 		rssItem.TorrentURL = item.Link
 	}

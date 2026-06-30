@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/repository"
+	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -416,6 +418,191 @@ func TestSubscriptionHandler_PreviewAppliesRules(t *testing.T) {
 	assert.Equal(t, "download", resp.Data.Items[0].Action)
 	assert.Equal(t, "skip", resp.Data.Items[1].Action)
 	assert.NotEmpty(t, resp.Data.Items[0].RenamePreview)
+}
+
+func TestSubscriptionHandler_CollectEpisodesSmallTorrentGuard(t *testing.T) {
+	const (
+		defaultThreshold = int64(50 * 1024 * 1024)
+		subscriptionID   = uint(1)
+	)
+
+	tests := []struct {
+		name              string
+		sizeBytes         int64
+		configValue       string
+		existingDownloads []model.Download
+		wantCreated       int
+		wantDeleted       int
+		wantQBAdds        int
+	}{
+		{
+			name:        "unknown size continues",
+			sizeBytes:   0,
+			wantCreated: 1,
+			wantQBAdds:  1,
+		},
+		{
+			name:        "under threshold skips with default",
+			sizeBytes:   defaultThreshold - 1,
+			wantCreated: 0,
+			wantQBAdds:  0,
+		},
+		{
+			name:        "over threshold continues",
+			sizeBytes:   defaultThreshold,
+			wantCreated: 1,
+			wantQBAdds:  1,
+		},
+		{
+			name:        "zero config bypasses guard",
+			sizeBytes:   defaultThreshold - 1,
+			configValue: "0",
+			wantCreated: 1,
+			wantQBAdds:  1,
+		},
+		{
+			name:      "under threshold replacement does not delete existing",
+			sizeBytes: defaultThreshold - 1,
+			existingDownloads: []model.Download{
+				{
+					ID:             99,
+					SubscriptionID: subscriptionID,
+					Title:          "Existing Anime 01",
+					Episode:        1,
+					TorrentHash:    "existing-hash",
+					Status:         model.DownloadStatusDownloading,
+				},
+			},
+			wantCreated: 0,
+			wantDeleted: 0,
+			wantQBAdds:  0,
+		},
+		{
+			name:      "over threshold replacement deletes after guard",
+			sizeBytes: defaultThreshold,
+			existingDownloads: []model.Download{
+				{
+					ID:             99,
+					SubscriptionID: subscriptionID,
+					Title:          "Existing Anime 01",
+					Episode:        1,
+					TorrentHash:    "existing-hash",
+					Status:         model.DownloadStatusDownloading,
+				},
+			},
+			wantCreated: 1,
+			wantDeleted: 1,
+			wantQBAdds:  1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			created := 0
+			deleted := 0
+			downloadRepo := &mockDownloadRepo{
+				listBySubIDFunc: func(id uint) ([]model.Download, error) {
+					require.Equal(t, subscriptionID, id)
+					return tt.existingDownloads, nil
+				},
+				createFunc: func(download *model.Download) error {
+					created++
+					download.ID = uint(100 + created)
+					return nil
+				},
+				deleteFunc: func(id uint) error {
+					deleted++
+					return nil
+				},
+			}
+			qbClient := &collectEpisodesSmallTorrentQBClient{}
+			configRepo := &smartFetchConfigRepo{values: map[string]string{}}
+			if tt.configValue != "" {
+				configRepo.values["min_torrent_size_bytes"] = tt.configValue
+			}
+
+			handler := NewSubscriptionHandler(&mockSubscriptionRepo{}, downloadRepo, configRepo, qbClient, t.TempDir())
+			handler.rssParser = &mockRSSParser{items: []rss.RSSItem{
+				{
+					Title:       "Test Anime 01",
+					Episode:     1,
+					Fansub:      "ANi",
+					TorrentURL:  "magnet:?xt=urn:btih:newhash",
+					TorrentHash: "new-hash",
+					SizeBytes:   tt.sizeBytes,
+					PubTime:     time.Now(),
+				},
+			}}
+
+			err := handler.doCollectEpisodes(context.Background(), nil, &model.Subscription{
+				ID:       subscriptionID,
+				Name:     "Test Anime",
+				RssURL:   "https://example.com/rss.xml",
+				Enabled:  true,
+				Fansub:   "ANi",
+				Season:   1,
+				AirDay:   "1",
+				AirTime:  "12:00",
+				Language: string(rss.LangUnknown),
+			})
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantCreated, created)
+			assert.Equal(t, tt.wantDeleted, deleted)
+			assert.Equal(t, tt.wantQBAdds, qbClient.addCalls)
+		})
+	}
+}
+
+type collectEpisodesSmallTorrentQBClient struct {
+	addCalls int
+}
+
+func (m *collectEpisodesSmallTorrentQBClient) Login(host, username, password string) error {
+	return nil
+}
+func (m *collectEpisodesSmallTorrentQBClient) TestConnection(host, username, password string) error {
+	return nil
+}
+func (m *collectEpisodesSmallTorrentQBClient) AddTorrent(torrentURL string, savePath string, category string) (string, error) {
+	m.addCalls++
+	return "added-hash", nil
+}
+func (m *collectEpisodesSmallTorrentQBClient) AddTorrentFile(filename string, fileContent []byte, savePath string, category string) (string, error) {
+	m.addCalls++
+	return "added-file-hash", nil
+}
+func (m *collectEpisodesSmallTorrentQBClient) GetTorrentInfo(hash string) (*downloader.TorrentInfo, error) {
+	return nil, nil
+}
+func (m *collectEpisodesSmallTorrentQBClient) GetTorrentsByCategory(category string) ([]*downloader.TorrentInfo, error) {
+	return nil, nil
+}
+func (m *collectEpisodesSmallTorrentQBClient) SetCategory(hash string, category string) error {
+	return nil
+}
+func (m *collectEpisodesSmallTorrentQBClient) SetLocation(hash string, location string) error {
+	return nil
+}
+func (m *collectEpisodesSmallTorrentQBClient) RenameTorrentFile(hash string, oldPath string, newPath string) error {
+	return nil
+}
+func (m *collectEpisodesSmallTorrentQBClient) RemoveTorrentTask(hash string) error {
+	return nil
+}
+func (m *collectEpisodesSmallTorrentQBClient) DeleteTorrentWithPayload(hash string) error {
+	return nil
+}
+func (m *collectEpisodesSmallTorrentQBClient) GetTorrentFiles(hash string) ([]downloader.TorrentFile, error) {
+	return nil, nil
+}
+func (m *collectEpisodesSmallTorrentQBClient) GetVersion() (string, error) {
+	return "", nil
+}
+func (m *collectEpisodesSmallTorrentQBClient) SetProxy(proxyURL string) error {
+	return nil
+}
+func (m *collectEpisodesSmallTorrentQBClient) DownloadTorrentFile(url string) ([]byte, error) {
+	return []byte("torrent content"), nil
 }
 
 func TestSubscriptionHandler_Create(t *testing.T) {
