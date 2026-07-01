@@ -313,6 +313,19 @@
                         </n-tooltip>
                         <n-tooltip trigger="hover">
                           <template #trigger>
+                            <n-button
+                              text
+                              size="small"
+                              :loading="bangumiEnrichingId === sub.id"
+                              @click="handleEnrichBangumi(sub)"
+                            >
+                              <template #icon><n-icon size="16"><InfoCircleOutlined /></n-icon></template>
+                            </n-button>
+                          </template>
+                          获取 BGM 信息填充
+                        </n-tooltip>
+                        <n-tooltip trigger="hover">
+                          <template #trigger>
                             <n-button text size="small" @click="handleDiagnostics(sub)">
                               <template #icon><n-icon size="16"><ToolOutlined /></n-icon></template>
                             </n-button>
@@ -439,6 +452,19 @@
                       <n-button text size="small" @click="$router.push({ path: '/downloads', query: { sub_id: sub.id } })">
                         <template #icon><n-icon size="16"><FileSearchOutlined /></n-icon></template>
                       </n-button>
+                      <n-tooltip trigger="hover">
+                        <template #trigger>
+                          <n-button
+                            text
+                            size="small"
+                            :loading="bangumiEnrichingId === sub.id"
+                            @click="handleEnrichBangumi(sub)"
+                          >
+                            <template #icon><n-icon size="16"><InfoCircleOutlined /></n-icon></template>
+                          </n-button>
+                        </template>
+                        获取 BGM 信息填充
+                      </n-tooltip>
                       <n-button text size="small" @click="handleScanFolder(sub)">
                         <template #icon><n-icon size="16"><FolderOpenOutlined /></n-icon></template>
                       </n-button>
@@ -1051,6 +1077,7 @@ import {
   PlayCircleOutlined,
   PauseCircleOutlined,
   FolderOpenOutlined,
+  InfoCircleOutlined,
   ToolOutlined
 } from '@vicons/antd'
 import AnimeSearch from '@/components/AnimeSearch.vue'
@@ -1106,6 +1133,7 @@ const diagnosticsData = ref<SubscriptionDiagnostics | null>(null)
 const diagnosticsLoading = ref(false)
 const diagnosticsActionLoading = ref('')
 const diagnosticsActionResult = ref('')
+const bangumiEnrichingId = ref<number | null>(null)
 
 // 星期列表
 const weekList = [
@@ -1393,6 +1421,21 @@ const listColumns = computed<DataTableColumns<Subscription>>(() => [
         <NButton text size="small" onClick={() => handleCollectEpisodes(row.id)}>
           <NIcon size={16}><DownloadOutlined /></NIcon>
         </NButton>
+        <NTooltip trigger="hover">
+          {{
+            trigger: () => (
+              <NButton
+                text
+                size="small"
+                loading={bangumiEnrichingId.value === row.id}
+                onClick={() => handleEnrichBangumi(row)}
+              >
+                <NIcon size={16}><InfoCircleOutlined /></NIcon>
+              </NButton>
+            ),
+            default: () => '获取 BGM 信息填充'
+          }}
+        </NTooltip>
         <NButton text size="small" onClick={() => handleEdit(row)}>
           <NIcon size={16}><EditOutlined /></NIcon>
         </NButton>
@@ -1740,6 +1783,28 @@ const runSubscriptionPreview = async () => {
 const openBangumiPage = (bangumiId: number) => {
   if (bangumiId) {
     window.open(`https://bgm.tv/subject/${bangumiId}`, '_blank')
+  }
+}
+
+const handleEnrichBangumi = async (sub: Subscription) => {
+  if (bangumiEnrichingId.value) return
+
+  bangumiEnrichingId.value = sub.id
+  try {
+    const response: any = await subscriptionApi.enrichBangumi(sub.id)
+    const enriched = response.data as Subscription | undefined
+    if (enriched) {
+      const index = subscriptions.value.findIndex(item => item.id === sub.id)
+      if (index >= 0) {
+        subscriptions.value[index] = { ...subscriptions.value[index], ...enriched }
+      }
+    }
+    message.success('BGM 信息已填充')
+    await loadSubscriptions()
+  } catch (error: any) {
+    message.error(error.response?.data?.message || error.message || '获取 BGM 信息失败')
+  } finally {
+    bangumiEnrichingId.value = null
   }
 }
 
