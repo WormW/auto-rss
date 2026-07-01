@@ -75,6 +75,12 @@ type Subscription struct {
 	RSSSource *RSSSource `json:"rss_source,omitempty" gorm:"foreignKey:RSSSourceID"`
 }
 
+// IsCalendarOnly reports whether the subscription is only used for calendar
+// reminders and should not participate in RSS/download collection.
+func (s Subscription) IsCalendarOnly() bool {
+	return s.SourceType == "calendar" && s.RssURL == "" && s.CollectionTorrent == ""
+}
+
 // SubscriptionGroup 订阅分组模型
 type SubscriptionGroup struct {
 	ID          uint      `json:"id" gorm:"primaryKey"`
