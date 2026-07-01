@@ -461,6 +461,8 @@ export const subscriptionApi = {
     api.post(`/subscriptions/${id}/rename-files`),
   scanFolder: (id: number, data: { folder_path: string; dry_run: boolean; rename_files: boolean }) =>
     api.post(`/subscriptions/${id}/scan-folder`, data),
+  enrichBangumi: (id: number) =>
+    api.post(`/subscriptions/${id}/enrich-bangumi`),
   batchImportFromRSS: (items: Array<{title: string, fansub?: string, rss_url?: string, season?: number, source_id?: number, source_name?: string}>) =>
     api.post('/subscriptions/batch-import-from-rss', { items }),
 }
