@@ -3,12 +3,17 @@ package recovery
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"testing"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/organizer"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 func TestIsSimilarDirectoryName(t *testing.T) {
@@ -184,6 +189,7 @@ func TestSubscriptionScanResultStruct(t *testing.T) {
 		LatestEpisodeOld:  10,
 		LatestEpisodeNew:  12,
 		EpisodesOnDisk:    []int{1, 2, 3},
+		MatchedEpisodes:   []EpisodeFile{{Path: "/a/1.mkv", Episode: 1, Season: 1}},
 		DownloadsToUpdate: []uint{1, 2},
 		DownloadsToCreate: []int{4, 5},
 		DownloadsMissing:  []uint{6},
@@ -191,6 +197,52 @@ func TestSubscriptionScanResultStruct(t *testing.T) {
 	assert.Equal(t, uint(1), sr.SubscriptionID)
 	assert.Equal(t, 12, sr.CurrentEpisodeNew)
 	assert.Len(t, sr.EpisodesOnDisk, 3)
+	assert.Len(t, sr.MatchedEpisodes, 1)
+}
+
+func TestScannerDryRunReportContractWithFixtures(t *testing.T) {
+	db, scanner, sub, existing, missing := newRecoveryScannerFixture(t)
+
+	result, err := scanner.Scan(&ScanRequest{DryRun: true})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	assert.False(t, result.Applied)
+	assert.Empty(t, result.BackupPath)
+	assert.Equal(t, 5, result.ScannedFiles)
+	assert.Equal(t, 4, result.MatchedFiles)
+	require.Len(t, result.OrphanFiles, 1)
+	assert.Equal(t, "Unknown Show S01E01.mkv", filepath.Base(result.OrphanFiles[0]))
+
+	require.Len(t, result.Subscriptions, 1)
+	report := result.Subscriptions[0]
+	assert.Equal(t, sub.ID, report.SubscriptionID)
+	assert.Equal(t, "Fixture Show", report.Name)
+	assert.Equal(t, []int{1, 2, 3}, report.EpisodesOnDisk)
+	assert.Equal(t, 1, report.CurrentEpisodeOld)
+	assert.Equal(t, 3, report.CurrentEpisodeNew)
+	assert.Equal(t, 2, report.LatestEpisodeOld)
+	assert.Equal(t, 3, report.LatestEpisodeNew)
+	assert.Equal(t, []uint{existing.ID}, report.DownloadsToUpdate)
+	assert.Equal(t, []int{1, 3}, report.DownloadsToCreate)
+	assert.Equal(t, []uint{missing.ID}, report.DownloadsMissing)
+
+	require.Len(t, report.MatchedEpisodes, 4)
+	assert.Equal(t, []int{1, 2, 3, 3}, episodeNumbers(report.MatchedEpisodes))
+	assert.Contains(t, basenames(report.MatchedEpisodes), "Fixture Show S01E02.mkv")
+	assert.Contains(t, basenames(report.MatchedEpisodes), "[Fansub] Fixture Show [01][1080p].mkv")
+	assert.Contains(t, basenames(report.MatchedEpisodes), "Fixture Show S01E03.mkv")
+	assert.Contains(t, basenames(report.MatchedEpisodes), "Fixture Show S01E03 duplicate.mkv")
+
+	var afterSub model.Subscription
+	require.NoError(t, db.First(&afterSub, sub.ID).Error)
+	assert.Equal(t, 1, afterSub.CurrentEpisode)
+	assert.Equal(t, 2, afterSub.LatestEpisode)
+
+	var afterExisting model.Download
+	require.NoError(t, db.First(&afterExisting, existing.ID).Error)
+	assert.Equal(t, model.DownloadStatusDownloading, afterExisting.Status)
+	assert.Empty(t, afterExisting.RenamedPath)
 }
 
 func TestScanRequestBinding(t *testing.T) {
@@ -235,4 +287,81 @@ func TestBracketEpisodePattern(t *testing.T) {
 			assert.Equal(t, tc.want, ep)
 		})
 	}
+}
+
+func newRecoveryScannerFixture(t *testing.T) (*gorm.DB, *Scanner, model.Subscription, model.Download, model.Download) {
+	t.Helper()
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Subscription{}, &model.Download{}, &model.Config{}))
+
+	root := t.TempDir()
+	requireFile(t, filepath.Join(root, "Fixture Show", "Season 1", "Fixture Show S01E02.mkv"))
+	requireFile(t, filepath.Join(root, "Fixture Show", "Raw", "[Fansub] Fixture Show [01][1080p].mkv"))
+	requireFile(t, filepath.Join(root, "Fixture Show", "Nested", "Season 1", "Fixture Show S01E03.mkv"))
+	requireFile(t, filepath.Join(root, "Fixture Show", "Nested", "Season 1", "Copy", "Fixture Show S01E03 duplicate.mkv"))
+	requireFile(t, filepath.Join(root, "Unknown Show", "Unknown Show S01E01.mkv"))
+
+	sub := model.Subscription{
+		Name:           "Fixture Show",
+		Season:         1,
+		CurrentEpisode: 1,
+		LatestEpisode:  2,
+		Enabled:        true,
+		Status:         "active",
+	}
+	require.NoError(t, db.Create(&sub).Error)
+
+	existing := model.Download{
+		SubscriptionID: sub.ID,
+		Title:          "Fixture Show 02",
+		Episode:        2,
+		TorrentURL:     "memory://existing",
+		TorrentHash:    "existing-02",
+		Status:         model.DownloadStatusDownloading,
+	}
+	require.NoError(t, db.Create(&existing).Error)
+
+	missing := model.Download{
+		SubscriptionID: sub.ID,
+		Title:          "Fixture Show 04",
+		Episode:        4,
+		TorrentURL:     "memory://missing",
+		TorrentHash:    "missing-04",
+		RenamedPath:    filepath.Join(root, "Fixture Show", "Season 1", "Fixture Show S01E04.mkv"),
+		Status:         model.DownloadStatusCompleted,
+	}
+	require.NoError(t, db.Create(&missing).Error)
+
+	subRepo := repository.NewSubscriptionRepository(db)
+	downloadRepo := repository.NewDownloadRepository(db)
+	configRepo := repository.NewConfigRepository(db)
+	require.NoError(t, configRepo.Set("download_path", root))
+
+	scanner := NewScanner(db, subRepo, downloadRepo, configRepo, nil)
+	return db, scanner, sub, existing, missing
+}
+
+func requireFile(t *testing.T, path string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+	require.NoError(t, os.WriteFile(path, []byte("fixture"), 0644))
+}
+
+func episodeNumbers(files []EpisodeFile) []int {
+	episodes := make([]int, 0, len(files))
+	for _, file := range files {
+		episodes = append(episodes, file.Episode)
+	}
+	return episodes
+}
+
+func basenames(files []EpisodeFile) []string {
+	names := make([]string, 0, len(files))
+	for _, file := range files {
+		names = append(names, filepath.Base(file.Path))
+	}
+	sort.Strings(names)
+	return names
 }

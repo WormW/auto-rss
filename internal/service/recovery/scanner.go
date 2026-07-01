@@ -66,39 +66,40 @@ func NewScanner(
 
 // ScanRequest 扫描请求参数
 type ScanRequest struct {
-	DryRun         bool   `json:"dry_run"`
-	SubscriptionID *uint  `json:"subscription_id,omitempty"`
+	DryRun         bool  `json:"dry_run"`
+	SubscriptionID *uint `json:"subscription_id,omitempty"`
 }
 
 // EpisodeFile 磁盘上匹配到的单集文件信息
 type EpisodeFile struct {
-	Path     string `json:"path"`
-	Episode  int    `json:"episode"`
-	Season   int    `json:"season"`
+	Path    string `json:"path"`
+	Episode int    `json:"episode"`
+	Season  int    `json:"season"`
 }
 
 // SubscriptionScanResult 单个订阅的扫描结果
 type SubscriptionScanResult struct {
-	SubscriptionID        uint          `json:"subscription_id"`
-	Name                  string        `json:"name"`
-	CurrentEpisodeOld     int           `json:"current_episode_old"`
-	CurrentEpisodeNew     int           `json:"current_episode_new"`
-	LatestEpisodeOld      int           `json:"latest_episode_old"`
-	LatestEpisodeNew      int           `json:"latest_episode_new"`
-	EpisodesOnDisk        []int         `json:"episodes_on_disk"`
-	DownloadsToUpdate     []uint        `json:"downloads_to_update"`
-	DownloadsToCreate     []int         `json:"downloads_to_create"`
-	DownloadsMissing      []uint        `json:"downloads_missing"`
+	SubscriptionID    uint          `json:"subscription_id"`
+	Name              string        `json:"name"`
+	CurrentEpisodeOld int           `json:"current_episode_old"`
+	CurrentEpisodeNew int           `json:"current_episode_new"`
+	LatestEpisodeOld  int           `json:"latest_episode_old"`
+	LatestEpisodeNew  int           `json:"latest_episode_new"`
+	EpisodesOnDisk    []int         `json:"episodes_on_disk"`
+	MatchedEpisodes   []EpisodeFile `json:"matched_episodes"`
+	DownloadsToUpdate []uint        `json:"downloads_to_update"`
+	DownloadsToCreate []int         `json:"downloads_to_create"`
+	DownloadsMissing  []uint        `json:"downloads_missing"`
 }
 
 // ScanResult 整体扫描结果
 type ScanResult struct {
-	ScannedFiles     int                      `json:"scanned_files"`
-	MatchedFiles     int                      `json:"matched_files"`
-	OrphanFiles      []string                 `json:"orphan_files"`
-	Subscriptions    []SubscriptionScanResult `json:"subscriptions"`
-	BackupPath       string                   `json:"backup_path,omitempty"`
-	Applied          bool                     `json:"applied"`
+	ScannedFiles  int                      `json:"scanned_files"`
+	MatchedFiles  int                      `json:"matched_files"`
+	OrphanFiles   []string                 `json:"orphan_files"`
+	Subscriptions []SubscriptionScanResult `json:"subscriptions"`
+	BackupPath    string                   `json:"backup_path,omitempty"`
+	Applied       bool                     `json:"applied"`
 }
 
 // Scan 执行扫描与恢复
@@ -215,6 +216,7 @@ func (s *Scanner) Scan(req *ScanRequest) (*ScanResult, error) {
 			CurrentEpisodeNew: sub.CurrentEpisode,
 			LatestEpisodeNew:  sub.LatestEpisode,
 			EpisodesOnDisk:    episodesOnDisk,
+			MatchedEpisodes:   flattenEpisodeFiles(epMap, episodesOnDisk),
 			DownloadsToUpdate: make([]uint, 0),
 			DownloadsToCreate: make([]int, 0),
 			DownloadsMissing:  make([]uint, 0),
@@ -294,6 +296,14 @@ func (s *Scanner) Scan(req *ScanRequest) (*ScanResult, error) {
 	}
 
 	return result, nil
+}
+
+func flattenEpisodeFiles(epMap map[int][]EpisodeFile, episodes []int) []EpisodeFile {
+	files := make([]EpisodeFile, 0)
+	for _, ep := range episodes {
+		files = append(files, epMap[ep]...)
+	}
+	return files
 }
 
 // matchFile 将单个文件匹配到订阅
