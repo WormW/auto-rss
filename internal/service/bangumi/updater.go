@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/repository"
 )
@@ -102,18 +103,6 @@ func (u *BangumiUpdater) updateAllSubscriptions() {
 
 		totalCount++
 
-		// 跳过已完结的订阅
-		if sub.TotalEpisodes > 0 && sub.LatestEpisode >= sub.TotalEpisodes {
-			logger.Debug("Skipping completed subscription",
-				"id", sub.ID,
-				"name", sub.Name,
-				"bangumi_id", sub.BangumiID,
-				"total_episodes", sub.TotalEpisodes,
-				"latest_episode", sub.LatestEpisode)
-			skippedCount++
-			continue
-		}
-
 		// 检查是否是更新日
 		if sub.UpdateDay != "" {
 			updateDay, err := strconv.Atoi(sub.UpdateDay)
@@ -190,7 +179,7 @@ func (u *BangumiUpdater) updateAllSubscriptions() {
 				"episode_offset", sub.EpisodeOffset,
 				"threshold", threshold)
 			skippedCount++
-		} else if latestEp > sub.LatestEpisode {
+		} else if latestEp > sub.LatestEpisode || shouldCorrectFalseCompletion(sub, latestEp) {
 			previous := sub.LatestEpisode
 			sub.LatestEpisode = latestEp
 			if err := u.subscriptionRepo.Update(&sub); err != nil {
@@ -226,4 +215,11 @@ func (u *BangumiUpdater) updateAllSubscriptions() {
 		"success", successCount,
 		"skipped", skippedCount,
 		"failed", failedCount)
+}
+
+func shouldCorrectFalseCompletion(sub model.Subscription, latestEp int) bool {
+	return sub.TotalEpisodes > 0 &&
+		sub.LatestEpisode >= sub.TotalEpisodes &&
+		latestEp > 0 &&
+		latestEp < sub.TotalEpisodes
 }
