@@ -170,15 +170,18 @@ func (e *enricher) populateSubscription(subscription *model.Subscription, subjec
 	if subject.ID > 0 && subject.TotalEps > 0 {
 		// 先尝试通过API获取精确的已播出集数
 		latestEp, err := e.bangumiService.GetLatestEpisode(subject.ID)
-		if err != nil || latestEp == 0 {
-			// API不可用时，使用总集数作为参考
-			// 对于已完结番剧，这就是最终集数
-			// 对于正在播出的，RSS会提供更准确的信息
-			subscription.LatestEpisode = subject.TotalEps
-			logger.Info("Using total episodes as latest episode reference",
+		if err != nil {
+			// API不可用时不把总集数当作最新集数；否则连载中条目会被误判为完结。
+			logger.Info("Keeping existing latest episode because Bangumi episodes API is unavailable",
 				"subscription_name", subscription.Name,
 				"total_episodes", subject.TotalEps,
+				"latest_episode", subscription.LatestEpisode,
 				"reason", "Bangumi episodes API unavailable")
+		} else if latestEp == 0 {
+			logger.Info("Keeping existing latest episode because Bangumi has no aired episodes yet",
+				"subscription_name", subscription.Name,
+				"total_episodes", subject.TotalEps,
+				"latest_episode", subscription.LatestEpisode)
 		} else {
 			// Bangumi 的 episode sort 可能是累计集数（跨季），不能直接作为本季 latest_episode
 			if latestEp > subject.TotalEps+subscription.EpisodeOffset {

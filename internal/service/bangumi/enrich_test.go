@@ -1,10 +1,13 @@
 package bangumi
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // mockConfigRepo 模拟配置仓库
@@ -213,4 +216,60 @@ func TestPopulateSubscription_NoNameCN(t *testing.T) {
 
 	// 名称应该保持不变
 	assert.Equal(t, "Original Name", sub.Name)
+}
+
+func TestEnrichDoesNotMarkAiringSubject607915CompleteWhenEpisodesUnavailable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v0/subjects/607915":
+			_, _ = w.Write([]byte(`{
+				"id": 607915,
+				"type": 2,
+				"name": "Airing Anime",
+				"name_cn": "连载中动画",
+				"eps": 12,
+				"infobox": [
+					{"key": "话数", "value": "12"},
+					{"key": "放送开始", "value": "2026年7月1日"},
+					{"key": "放送星期", "value": "星期三"}
+				]
+			}`))
+		case "/v0/episodes":
+			assert.Equal(t, "607915", r.URL.Query().Get("subject_id"))
+			_, _ = w.Write([]byte(`{"data": [], "total": 0}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	bgService := NewBangumiService()
+	bgService.baseURL = server.URL
+
+	e := NewEnricher(bgService, NewImageService(t.TempDir()), &mockConfigRepo{})
+	sub := &model.Subscription{
+		ID:            1,
+		Name:          "Airing Anime",
+		BangumiID:     607915,
+		LatestEpisode: 5,
+	}
+
+	require.NoError(t, e.Enrich(sub, true))
+
+	assert.Equal(t, 607915, sub.BangumiID)
+	assert.Equal(t, 12, sub.TotalEpisodes)
+	assert.Equal(t, 5, sub.LatestEpisode)
+	assert.NotEqual(t, sub.TotalEpisodes, sub.LatestEpisode)
+}
+
+func TestShouldCorrectFalseCompletion(t *testing.T) {
+	sub := model.Subscription{
+		TotalEpisodes: 12,
+		LatestEpisode: 12,
+	}
+
+	assert.True(t, shouldCorrectFalseCompletion(sub, 5))
+	assert.False(t, shouldCorrectFalseCompletion(sub, 12))
+	assert.False(t, shouldCorrectFalseCompletion(sub, 0))
 }
