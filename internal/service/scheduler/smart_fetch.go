@@ -163,6 +163,15 @@ func (f *SmartFetchFilter) EvaluateSubscription(sub *model.Subscription) (Subscr
 		f.strategy = DefaultSmartFetchStrategy()
 	}
 
+	if sub.IsCalendarOnly() {
+		status.ShouldFetch = false
+		status.SmartFetchEnabled = false
+		status.FetchReason = "calendar_only"
+		status.Explanation = "仅用于追番日历提醒，不执行 RSS 拉取。"
+		status.NextFetchInterval = 24 * time.Hour
+		return status, needsUpdate
+	}
+
 	status.IsCompleted = f.isCompleted(sub)
 	effectiveEnabled := f.isSmartFetchEnabledForSubscription(sub)
 	status.SmartFetchEnabled = effectiveEnabled

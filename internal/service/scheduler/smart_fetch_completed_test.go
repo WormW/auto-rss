@@ -240,6 +240,25 @@ func TestEvaluateSubscription_SubscriptionOverrideNever(t *testing.T) {
 	assert.Equal(t, "smart_fetch_disabled", status.FetchReason)
 }
 
+func TestEvaluateSubscription_CalendarOnlySkipsRSSFetch(t *testing.T) {
+	filter := NewSmartFetchFilter(nil)
+
+	status, needsUpdate := filter.EvaluateSubscription(&model.Subscription{
+		ID:         1,
+		Name:       "追番日历条目",
+		SourceType: "calendar",
+		AirDay:     "3",
+		AirTime:    "23:30",
+		Enabled:    true,
+	})
+
+	assert.False(t, needsUpdate)
+	assert.False(t, status.ShouldFetch)
+	assert.False(t, status.SmartFetchEnabled)
+	assert.Equal(t, "calendar_only", status.FetchReason)
+	assert.NotEmpty(t, status.Explanation)
+}
+
 func TestIsCompleted(t *testing.T) {
 	filter := NewSmartFetchFilter(nil)
 

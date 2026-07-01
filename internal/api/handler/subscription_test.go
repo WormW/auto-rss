@@ -39,8 +39,9 @@ type mockSubscriptionRepo struct {
 }
 
 type mockRSSParser struct {
-	items []rss.RSSItem
-	err   error
+	items      []rss.RSSItem
+	err        error
+	fetchCalls int
 }
 
 type smartFetchConfigRepo struct {
@@ -48,10 +49,12 @@ type smartFetchConfigRepo struct {
 }
 
 func (m *mockRSSParser) FetchAndParse(rssURL string) ([]rss.RSSItem, error) {
+	m.fetchCalls++
 	return m.items, m.err
 }
 
 func (m *mockRSSParser) FetchAndParseWithTimeout(rssURL string, timeout time.Duration) ([]rss.RSSItem, error) {
+	m.fetchCalls++
 	return m.items, m.err
 }
 
@@ -646,6 +649,27 @@ func TestSubscriptionHandler_Create(t *testing.T) {
 			wantCreated: false,
 		},
 		{
+			name: "calendar only subscription",
+			body: map[string]interface{}{
+				"name":           "Calendar Anime",
+				"source_type":    "calendar",
+				"air_day":        "3",
+				"air_time":       "23:30",
+				"total_episodes": 12,
+			},
+			mockCreate: func(sub *model.Subscription) error {
+				require.True(t, sub.IsCalendarOnly())
+				assert.Equal(t, "calendar", sub.SourceType)
+				assert.Equal(t, "never", sub.SmartFetchOverride)
+				assert.Equal(t, "3", sub.AirDay)
+				assert.Equal(t, "23:30", sub.AirTime)
+				sub.ID = 1
+				return nil
+			},
+			wantStatus:  http.StatusOK,
+			wantCreated: true,
+		},
+		{
 			name: "invalid body",
 			body: map[string]interface{}{
 				"name": 123, // wrong type
@@ -683,6 +707,23 @@ func TestSubscriptionHandler_Create(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSubscriptionHandler_CollectEpisodesSkipsCalendarOnly(t *testing.T) {
+	parser := &mockRSSParser{}
+	handler := NewSubscriptionHandler(&mockSubscriptionRepo{}, &mockDownloadRepo{}, nil, nil, "")
+	handler.rssParser = parser
+
+	err := handler.doCollectEpisodes(context.Background(), nil, &model.Subscription{
+		ID:         1,
+		Name:       "Calendar Anime",
+		SourceType: "calendar",
+		Enabled:    true,
+		AirDay:     "3",
+		AirTime:    "23:30",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 0, parser.fetchCalls)
 }
 
 // 批量操作相关方法（mock实现）

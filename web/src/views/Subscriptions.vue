@@ -790,12 +790,32 @@
                 </n-form-item>
               </n-form>
             </n-tab-pane>
+
+            <n-tab-pane name="calendar" tab="追番日历">
+              <n-form label-width="80px">
+                <n-form-item label="番剧名称">
+                  <n-input
+                    v-model:value="formData.name"
+                    placeholder="请输入番剧名称"
+                    :disabled="step2Loading"
+                  />
+                </n-form-item>
+                <n-form-item label="更新日期">
+                  <n-select
+                    v-model:value="formData.air_day"
+                    :options="weekdayOptions"
+                    placeholder="选择更新日"
+                    :disabled="step2Loading"
+                  />
+                </n-form-item>
+              </n-form>
+            </n-tab-pane>
           </n-tabs>
 
           <n-space justify="end" style="margin-top: 16px;">
               <n-button @click="showModal = false" :disabled="step2Loading">取消</n-button>
               <n-button type="primary" @click="handleGetRssData" :loading="step2Loading">
-              下一步并预览
+              {{ activeTab === 'calendar' ? '下一步' : '下一步并预览' }}
             </n-button>
           </n-space>
         </div>
@@ -813,11 +833,12 @@
                   v-model:value="formData.rss_url"
                   type="textarea"
                   :autosize="{ minRows: 2 }"
-                  placeholder="RSS 地址 (与合集种子至少填一个)"
+                  :placeholder="isCalendarOnlyForm ? '不填写 RSS，仅用于日历提醒' : 'RSS 地址 (与合集种子至少填一个)'"
+                  :disabled="isCalendarOnlyForm"
                 />
               </n-form-item>
 
-              <n-form-item label="字幕组">
+              <n-form-item label="字幕组" v-if="!isCalendarOnlyForm">
                 <n-input v-model:value="formData.fansub" placeholder="字幕组名称" />
               </n-form-item>
 
@@ -825,7 +846,7 @@
                 <n-tag type="info">{{ formData.language === 'CHS' ? '简体中文' : formData.language === 'CHT' ? '繁體中文' : formData.language }}</n-tag>
               </n-form-item>
 
-              <n-form-item label="语言偏好">
+              <n-form-item label="语言偏好" v-if="!isCalendarOnlyForm">
                 <n-select
                   v-model:value="formData.language_preference"
                   :options="languagePreferenceOptions"
@@ -902,7 +923,7 @@
                 <n-input-number v-model:value="formData.episode_offset" style="width: 100%;" />
               </n-form-item>
 
-              <n-form-item label="合集种子 (可选)">
+              <n-form-item label="合集种子 (可选)" v-if="!isCalendarOnlyForm">
                 <n-input
                   v-model:value="formData.collection_torrent"
                   type="textarea"
@@ -911,7 +932,7 @@
                 />
               </n-form-item>
 
-              <n-form-item label="过滤规则">
+              <n-form-item label="过滤规则" v-if="!isCalendarOnlyForm">
                 <n-input
                   v-model:value="formData.filter_rules"
                   type="textarea"
@@ -924,7 +945,7 @@
                 <n-switch v-model:value="formData.enabled" />
               </n-form-item>
 
-              <n-form-item label="智能拉取">
+              <n-form-item label="智能拉取" v-if="!isCalendarOnlyForm">
                 <n-radio-group v-model:value="formData.smart_fetch_override" size="small">
                   <n-radio-button
                     v-for="option in smartFetchOverrideOptions"
@@ -936,7 +957,7 @@
               </n-form-item>
             </n-form>
 
-            <div class="rule-preview" v-if="previewResult || previewLoading">
+            <div class="rule-preview" v-if="!isCalendarOnlyForm && (previewResult || previewLoading)">
               <div class="preview-header-line">
                 <div class="preview-title">RSS 预览</div>
                 <n-space size="small" v-if="previewResult">
@@ -978,7 +999,7 @@
           <n-space justify="space-between" style="margin-top: 16px;">
             <n-button @click="showRssStep = true">上一步</n-button>
             <n-space>
-              <n-button @click="runSubscriptionPreview" :loading="previewLoading" :disabled="!formData.rss_url">
+              <n-button @click="runSubscriptionPreview" :loading="previewLoading" :disabled="!formData.rss_url || isCalendarOnlyForm">
                 刷新预览
               </n-button>
               <n-button @click="showModal = false">取消</n-button>
@@ -1430,6 +1451,8 @@ const formData = ref({
   source_type: 'manual'
 })
 
+const isCalendarOnlyForm = computed(() => formData.value.source_type === 'calendar')
+
 // 时间选择器
 const airTimeValue = computed({
   get: () => {
@@ -1712,6 +1735,9 @@ const resetRulePreview = () => {
 }
 
 const runSubscriptionPreview = async () => {
+  if (isCalendarOnlyForm.value) {
+    return
+  }
   if (!formData.value.rss_url) {
     message.warning('请输入 RSS 地址')
     return
@@ -1776,6 +1802,20 @@ const showAddDialog = () => {
   showModal.value = true
 }
 
+const applyCalendarOnlyMode = () => {
+  formData.value.source_type = 'calendar'
+  formData.value.rss_url = ''
+  formData.value.collection_torrent = ''
+  formData.value.filter_rules = ''
+  formData.value.fansub = ''
+  formData.value.language = ''
+  formData.value.language_preference = 'auto'
+  formData.value.rss_source_id = undefined
+  formData.value.smart_fetch_enabled = null
+  formData.value.smart_fetch_override = 'never'
+  resetRulePreview()
+}
+
 const handleSearchSubscribe = (data: {
   title: string
   rss_url: string
@@ -1832,21 +1872,29 @@ const handleEdit = (sub: Subscription) => {
 }
 
 const handleGetRssData = async () => {
-  if (activeTab.value === 'manual') {
+  if (activeTab.value === 'calendar') {
     if (!formData.value.name) {
       message.error('请输入番剧名称')
       return
     }
+    applyCalendarOnlyMode()
+  } else if (activeTab.value === 'manual') {
+    if (!formData.value.name) {
+      message.error('请输入番剧名称')
+      return
+    }
+    formData.value.source_type = 'manual'
   } else {
     if (!formData.value.rss_url) {
       message.error('请输入 RSS 地址')
       return
     }
+    formData.value.source_type = formData.value.rss_source_id ? 'rss_source' : 'manual'
   }
   step2Loading.value = true
   try {
     showRssStep.value = false
-    if (formData.value.rss_url) {
+    if (!isCalendarOnlyForm.value && formData.value.rss_url) {
       await runSubscriptionPreview()
     }
   } finally {
@@ -1859,7 +1907,9 @@ const handleSubmit = async () => {
     message.error('请填写番剧名称')
     return
   }
-  if (!formData.value.rss_url && !formData.value.collection_torrent) {
+  if (isCalendarOnlyForm.value) {
+    applyCalendarOnlyMode()
+  } else if (!formData.value.rss_url && !formData.value.collection_torrent) {
     message.error('请填写 RSS 地址或合集种子地址')
     return
   }

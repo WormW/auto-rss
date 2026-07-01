@@ -273,6 +273,28 @@ func minInt(a, b int) int {
 	return b
 }
 
+func normalizeSubscriptionSource(subscription *model.Subscription) {
+	subscription.RssURL = strings.TrimSpace(subscription.RssURL)
+	subscription.CollectionTorrent = strings.TrimSpace(subscription.CollectionTorrent)
+	subscription.SourceType = strings.TrimSpace(subscription.SourceType)
+
+	if subscription.SourceType == "" {
+		subscription.SourceType = "manual"
+	}
+
+	if subscription.RssURL == "" && subscription.CollectionTorrent == "" {
+		subscription.SourceType = "calendar"
+		subscription.RSSSourceID = nil
+		subscription.SmartFetchOverride = "never"
+		subscription.SmartFetchEnabled = nil
+		return
+	}
+
+	if subscription.SourceType == "calendar" {
+		subscription.SourceType = "manual"
+	}
+}
+
 // Preview 预览订阅规则会匹配到的 RSS 条目
 func (h *SubscriptionHandler) Preview(c *gin.Context) {
 	var req SubscriptionPreviewRequest
@@ -511,6 +533,8 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		"rss_url", subscription.RssURL,
 		"client_ip", c.ClientIP())
 
+	normalizeSubscriptionSource(&subscription)
+
 	// 自动获取Bangumi数据
 	h.enrichWithBangumi(&subscription)
 
@@ -680,8 +704,17 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 		if collectionTorrent != existing.CollectionTorrent && collectionTorrent != "" {
 			shouldDownloadCollection = true
 		}
-		existing.CollectionTorrent = collectionTorrent
+		existing.CollectionTorrent = strings.TrimSpace(collectionTorrent)
 	}
+	if sourceType, ok := updates["source_type"].(string); ok {
+		existing.SourceType = sourceType
+	}
+	if _, exists := updates["rss_source_id"]; exists && updates["rss_source_id"] == nil {
+		existing.RSSSourceID = nil
+	}
+
+	normalizeSubscriptionSource(existing)
+	shouldDownloadCollection = shouldDownloadCollection && !existing.IsCalendarOnly()
 
 	if existing.BangumiCoverLocal == "" {
 		logger.Debug("No cover found, attempting to fetch Bangumi data",
@@ -1114,6 +1147,14 @@ func (h *SubscriptionHandler) CollectEpisodes(c *gin.Context) {
 		"name", subscription.Name,
 		"client_ip", c.ClientIP())
 
+	if subscription.IsCalendarOnly() {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Calendar-only subscriptions do not have RSS collection tasks",
+		})
+		return
+	}
+
 	manager := task.GetManager()
 	taskName := fmt.Sprintf("采集: %s", subscription.Name)
 
@@ -1142,6 +1183,16 @@ func (h *SubscriptionHandler) CollectEpisodes(c *gin.Context) {
 func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Task, subscription *model.Subscription) error {
 	manager := task.GetManager()
 	id := subscription.ID
+
+	if subscription.IsCalendarOnly() {
+		manager.SetResult(gin.H{
+			"collected":       0,
+			"deleted":         0,
+			"total_rss_items": 0,
+			"skipped_reason":  "calendar_only",
+		})
+		return nil
+	}
 
 	select {
 	case <-ctx.Done():
