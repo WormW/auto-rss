@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/WormW/auto-rss/internal/pkg/logger"
@@ -39,8 +40,8 @@ func NewRecoveryHandler(
 
 // ScanRequest 扫描请求
 type ScanRequest struct {
-	DryRun         bool   `json:"dry_run"`
-	SubscriptionID *uint  `json:"subscription_id,omitempty"`
+	DryRun         bool  `json:"dry_run"`
+	SubscriptionID *uint `json:"subscription_id,omitempty"`
 }
 
 // Scan 执行扫描恢复
@@ -60,6 +61,13 @@ func (h *RecoveryHandler) Scan(c *gin.Context) {
 		SubscriptionID: req.SubscriptionID,
 	})
 	if err != nil {
+		if errors.Is(err, recovery.ErrApplyDisabled) {
+			c.JSON(http.StatusForbidden, gin.H{
+				"code":    403,
+				"message": "扫描恢复失败: " + err.Error(),
+			})
+			return
+		}
 		logger.Error("Recovery scan failed", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
