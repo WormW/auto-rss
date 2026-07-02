@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -243,6 +244,41 @@ func TestScannerDryRunReportContractWithFixtures(t *testing.T) {
 	require.NoError(t, db.First(&afterExisting, existing.ID).Error)
 	assert.Equal(t, model.DownloadStatusDownloading, afterExisting.Status)
 	assert.Empty(t, afterExisting.RenamedPath)
+}
+
+func TestScannerRejectsApplyModeByDefault(t *testing.T) {
+	db, scanner, sub, existing, _ := newRecoveryScannerFixture(t)
+	t.Setenv(recoveryApplyEnabledEnv, "")
+
+	result, err := scanner.Scan(&ScanRequest{DryRun: false})
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrApplyDisabled))
+	assert.Nil(t, result)
+
+	var afterSub model.Subscription
+	require.NoError(t, db.First(&afterSub, sub.ID).Error)
+	assert.Equal(t, 1, afterSub.CurrentEpisode)
+	assert.Equal(t, 2, afterSub.LatestEpisode)
+
+	var afterExisting model.Download
+	require.NoError(t, db.First(&afterExisting, existing.ID).Error)
+	assert.Equal(t, model.DownloadStatusDownloading, afterExisting.Status)
+	assert.Empty(t, afterExisting.RenamedPath)
+}
+
+func TestRecoveryApplyEnabled(t *testing.T) {
+	t.Setenv(recoveryApplyEnabledEnv, "")
+	assert.False(t, recoveryApplyEnabled())
+
+	t.Setenv(recoveryApplyEnabledEnv, "false")
+	assert.False(t, recoveryApplyEnabled())
+
+	t.Setenv(recoveryApplyEnabledEnv, "true")
+	assert.True(t, recoveryApplyEnabled())
+
+	t.Setenv(recoveryApplyEnabledEnv, "TRUE")
+	assert.True(t, recoveryApplyEnabled())
 }
 
 func TestScanRequestBinding(t *testing.T) {

@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -33,6 +34,10 @@ var seasonEpisodePattern = regexp.MustCompile(`[Ss](\d{1,2})[Ee](\d{1,3})`)
 
 // bracketEpisodePattern 兜底模式：[01]、[12]
 var bracketEpisodePattern = regexp.MustCompile(`\[(\d{1,3})\]`)
+
+const recoveryApplyEnabledEnv = "AUTO_RSS_ENABLE_RECOVERY_APPLY"
+
+var ErrApplyDisabled = errors.New("recovery apply mode is disabled by default; set AUTO_RSS_ENABLE_RECOVERY_APPLY=true only after explicit human approval")
 
 // Scanner 磁盘扫描恢复服务
 type Scanner struct {
@@ -104,6 +109,10 @@ type ScanResult struct {
 
 // Scan 执行扫描与恢复
 func (s *Scanner) Scan(req *ScanRequest) (*ScanResult, error) {
+	if req != nil && !req.DryRun && !recoveryApplyEnabled() {
+		return nil, ErrApplyDisabled
+	}
+
 	result := &ScanResult{
 		OrphanFiles:   make([]string, 0),
 		Subscriptions: make([]SubscriptionScanResult, 0),
@@ -296,6 +305,10 @@ func (s *Scanner) Scan(req *ScanRequest) (*ScanResult, error) {
 	}
 
 	return result, nil
+}
+
+func recoveryApplyEnabled() bool {
+	return strings.EqualFold(os.Getenv(recoveryApplyEnabledEnv), "true")
 }
 
 func flattenEpisodeFiles(epMap map[int][]EpisodeFile, episodes []int) []EpisodeFile {
