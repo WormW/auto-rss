@@ -438,6 +438,35 @@ export interface MediaLibraryRefreshResult {
   refreshed_at?: string
 }
 
+export interface RecoveryEpisodeFile {
+  path: string
+  episode: number
+  season: number
+}
+
+export interface RecoverySubscriptionScanResult {
+  subscription_id: number
+  name: string
+  current_episode_old: number
+  current_episode_new: number
+  latest_episode_old: number
+  latest_episode_new: number
+  episodes_on_disk: number[]
+  matched_episodes: RecoveryEpisodeFile[]
+  downloads_to_update: number[]
+  downloads_to_create: number[]
+  downloads_missing: number[]
+}
+
+export interface RecoveryScanResult {
+  scanned_files: number
+  matched_files: number
+  orphan_files: string[]
+  subscriptions: RecoverySubscriptionScanResult[]
+  backup_path?: string
+  applied: boolean
+}
+
 export const subscriptionApi = {
   list: (page = 1, pageSize = 20) =>
     api.get('/subscriptions', { params: { page, page_size: pageSize } }),
@@ -495,6 +524,11 @@ export const mediaLibraryApi = {
     api.post(`/media-library/downloads/${id}/refresh`),
   getSubscriptionStatus: (id: number) =>
     api.get(`/media-library/subscriptions/${id}/status`)
+}
+
+export const recoveryApi = {
+  scanDryRun: () =>
+    api.post('/recovery/scan', { dry_run: true })
 }
 
 export const rssApi = {
