@@ -301,11 +301,23 @@
     <n-card title="恢复扫描预览" class="config-card">
       <div class="recovery-preview">
         <div class="recovery-toolbar">
-          <n-space align="center" wrap>
+          <div class="recovery-controls">
+            <n-select
+              v-model:value="selectedRecoverySubscriptionId"
+              :options="recoverySubscriptionOptions"
+              :loading="recoverySubscriptionsLoading"
+              filterable
+              placeholder="选择扫描范围"
+              class="recovery-scope-select"
+              @update:value="handleRecoveryScopeChange"
+            />
             <n-button type="primary" :loading="recoveryLoading" @click="runRecoveryPreview">
-              生成全局预览
+              生成预览
             </n-button>
+          </div>
+          <n-space align="center" wrap>
             <n-tag type="info">dry-run</n-tag>
+            <n-tag type="default">{{ recoveryScopeLabel }}</n-tag>
             <n-tag v-if="recoveryResult" type="success">
               {{ recoveryResult.applied ? '已应用' : '未应用' }}
             </n-tag>
@@ -346,6 +358,12 @@
                 <strong>{{ recoveryResult.orphan_files.length }}</strong>
               </div>
             </div>
+
+            <n-empty
+              v-if="recoveryResultHasNoSubscriptionMatches"
+              class="recovery-empty-result"
+              :description="recoveryEmptyDescription"
+            />
 
             <div v-if="recoveryResult.subscriptions.length" class="recovery-section">
               <div class="recovery-section-title">订阅对账</div>
@@ -478,9 +496,11 @@ import {
   fileOrganizerApi,
   mediaLibraryApi,
   recoveryApi,
+  subscriptionApi,
   type MediaLibraryConfig,
   type RecoveryScanResult,
   type RecoverySubscriptionScanResult,
+  type Subscription,
   type SmartFetchConfig
 } from '@/api'
 
@@ -552,7 +572,24 @@ const previewPath = ref('')
 const previewSample = ref('葬送的芙莉莲 S01E03')
 
 const recoveryLoading = ref(false)
+const recoverySubscriptionsLoading = ref(false)
+const selectedRecoverySubscriptionId = ref(0)
+const recoverySubscriptions = ref<Subscription[]>([])
 const recoveryResult = ref<RecoveryScanResult | null>(null)
+
+const recoverySubscriptionOptions = computed(() => [
+  { label: '全部订阅', value: 0 },
+  ...recoverySubscriptions.value.map((subscription) => ({
+    label: `${subscription.name} · ID ${subscription.id}`,
+    value: subscription.id
+  }))
+])
+
+const recoveryScopeLabel = computed(() => {
+  if (!selectedRecoverySubscriptionId.value) return '全部订阅'
+  const subscription = recoverySubscriptions.value.find((item) => item.id === selectedRecoverySubscriptionId.value)
+  return subscription ? `订阅：${subscription.name}` : `订阅 ID ${selectedRecoverySubscriptionId.value}`
+})
 
 const recoveryChangeCount = computed(() => {
   if (!recoveryResult.value) return 0
@@ -570,6 +607,16 @@ const recoveryMissingCount = computed(() => {
   return recoveryResult.value.subscriptions.reduce((total, subscription) => {
     return total + subscription.downloads_missing.length
   }, 0)
+})
+
+const recoveryResultHasNoSubscriptionMatches = computed(() => {
+  if (!recoveryResult.value) return false
+  return recoveryResult.value.subscriptions.length === 0
+})
+
+const recoveryEmptyDescription = computed(() => {
+  const scope = selectedRecoverySubscriptionId.value ? recoveryScopeLabel.value : '全部订阅'
+  return `${scope}没有匹配到可对账的订阅文件`
 })
 
 // 加载重命名模板预设
@@ -793,6 +840,24 @@ const loadMediaLibraryConfig = async () => {
   }
 }
 
+const loadRecoverySubscriptions = async () => {
+  recoverySubscriptionsLoading.value = true
+  try {
+    const res: any = await subscriptionApi.list()
+    recoverySubscriptions.value = Array.isArray(res.data?.list) ? res.data.list : []
+    if (
+      selectedRecoverySubscriptionId.value &&
+      !recoverySubscriptions.value.some((subscription) => subscription.id === selectedRecoverySubscriptionId.value)
+    ) {
+      selectedRecoverySubscriptionId.value = 0
+    }
+  } catch (error) {
+    message.error('加载订阅范围失败')
+  } finally {
+    recoverySubscriptionsLoading.value = false
+  }
+}
+
 const addPathMapping = () => {
   mediaLibraryConfig.value.path_mappings.push({ from: '', to: '' })
 }
@@ -955,7 +1020,8 @@ const testConnection = async () => {
 const runRecoveryPreview = async () => {
   recoveryLoading.value = true
   try {
-    const response: any = await recoveryApi.scanDryRun()
+    const subscriptionId = selectedRecoverySubscriptionId.value || undefined
+    const response: any = await recoveryApi.scanDryRun(subscriptionId)
     recoveryResult.value = response.data as RecoveryScanResult
     if (recoveryResult.value?.applied) {
       message.warning('恢复扫描返回已应用状态，请检查服务端配置')
@@ -968,6 +1034,10 @@ const runRecoveryPreview = async () => {
   } finally {
     recoveryLoading.value = false
   }
+}
+
+const handleRecoveryScopeChange = () => {
+  recoveryResult.value = null
 }
 
 const episodeChanged = (subscription: RecoverySubscriptionScanResult) => {
@@ -1029,6 +1099,7 @@ onMounted(() => {
   loadMediaLibraryConfig()
   loadRenamePresets()
   loadRenameTemplate()
+  loadRecoverySubscriptions()
 })
 </script>
 
@@ -1075,7 +1146,22 @@ onMounted(() => {
 
 .recovery-toolbar {
   display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
   margin-bottom: 12px;
+}
+
+.recovery-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.recovery-scope-select {
+  width: min(360px, 62vw);
 }
 
 .recovery-safety-note {
@@ -1092,6 +1178,10 @@ onMounted(() => {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 10px;
+}
+
+.recovery-empty-result {
+  padding: 14px 0 4px;
 }
 
 .recovery-summary-item,
@@ -1252,6 +1342,17 @@ onMounted(() => {
   .config-card .n-space .n-button {
     flex: 1;
     min-width: 0;
+  }
+
+  .recovery-toolbar,
+  .recovery-controls {
+    align-items: stretch;
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .recovery-scope-select {
+    width: 100%;
   }
 
   .recovery-subscription-head {

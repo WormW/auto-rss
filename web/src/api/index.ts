@@ -527,8 +527,11 @@ export const mediaLibraryApi = {
 }
 
 export const recoveryApi = {
-  scanDryRun: () =>
-    api.post('/recovery/scan', { dry_run: true })
+  scanDryRun: (subscriptionId?: number | null) =>
+    api.post('/recovery/scan', {
+      dry_run: true,
+      ...(subscriptionId ? { subscription_id: subscriptionId } : {})
+    })
 }
 
 export const rssApi = {
