@@ -13,13 +13,12 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: go run cmd/recovery-scan/main.go <dry-run|apply>")
+	dryRun, err := parseMode(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		printUsage(os.Stderr)
 		os.Exit(1)
 	}
-
-	mode := os.Args[1]
-	dryRun := mode != "apply"
 
 	// 加载配置
 	cfg, err := config.Load()
@@ -50,4 +49,23 @@ func main() {
 
 	pretty, _ := json.MarshalIndent(result, "", "  ")
 	fmt.Println(string(pretty))
+}
+
+func parseMode(args []string) (bool, error) {
+	if len(args) != 1 {
+		return false, fmt.Errorf("expected exactly one mode")
+	}
+
+	switch args[0] {
+	case "dry-run":
+		return true, nil
+	case "apply":
+		return false, nil
+	default:
+		return false, fmt.Errorf("unsupported mode %q", args[0])
+	}
+}
+
+func printUsage(out *os.File) {
+	fmt.Fprintln(out, "Usage: go run cmd/recovery-scan/main.go <dry-run|apply>")
 }
