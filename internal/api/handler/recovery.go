@@ -19,6 +19,7 @@ type RecoveryHandler struct {
 	downloadRepo     repository.DownloadRepository
 	configRepo       repository.ConfigRepository
 	bangumiService   *bangumi.BangumiService
+	downloadPath     string
 }
 
 // NewRecoveryHandler 创建恢复处理器实例
@@ -28,6 +29,7 @@ func NewRecoveryHandler(
 	downloadRepo repository.DownloadRepository,
 	configRepo repository.ConfigRepository,
 	bangumiService *bangumi.BangumiService,
+	downloadPath string,
 ) *RecoveryHandler {
 	return &RecoveryHandler{
 		db:               db,
@@ -35,6 +37,7 @@ func NewRecoveryHandler(
 		downloadRepo:     downloadRepo,
 		configRepo:       configRepo,
 		bangumiService:   bangumiService,
+		downloadPath:     downloadPath,
 	}
 }
 
@@ -55,7 +58,7 @@ func (h *RecoveryHandler) Scan(c *gin.Context) {
 		return
 	}
 
-	scanner := recovery.NewScanner(h.db, h.subscriptionRepo, h.downloadRepo, h.configRepo, h.bangumiService)
+	scanner := recovery.NewScanner(h.db, h.subscriptionRepo, h.downloadRepo, h.configRepo, h.bangumiService, h.downloadPath)
 	result, err := scanner.Scan(&recovery.ScanRequest{
 		DryRun:         req.DryRun,
 		SubscriptionID: req.SubscriptionID,

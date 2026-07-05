@@ -41,7 +41,7 @@ func main() {
 	downloadRepo := repository.NewDownloadRepository(db)
 	configRepo := repository.NewConfigRepository(db)
 
-	scanner := recovery.NewScanner(db, subRepo, downloadRepo, configRepo, nil)
+	scanner := recovery.NewScanner(db, subRepo, downloadRepo, configRepo, nil, cfg.DownloadPath)
 	result, err := scanner.Scan(&recovery.ScanRequest{DryRun: dryRun})
 	if err != nil {
 		log.Fatalf("Scan failed: %v", err)

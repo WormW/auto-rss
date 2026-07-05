@@ -136,6 +136,14 @@
             </n-text>
           </template>
         </n-form-item>
+        <n-form-item label="启动时扫描现有文件">
+          <n-switch v-model:value="fileOrganizerConfig.scanOnStart" :disabled="!fileOrganizerConfig.enabled" />
+          <template #feedback>
+            <n-text depth="3" style="font-size: 12px">
+              外置硬盘或大型媒体库建议关闭，仅在需要补整理历史文件时手动触发
+            </n-text>
+          </template>
+        </n-form-item>
         <n-form-item>
           <n-button type="primary" @click="saveFileOrganizerConfig">保存配置</n-button>
         </n-form-item>
@@ -535,7 +543,8 @@ const systemConfig = ref({
 
 const fileOrganizerConfig = ref({
   enabled: false,
-  dir: ''
+  dir: '',
+  scanOnStart: false
 })
 
 const mediaLibraryConfig = ref<MediaLibraryConfig & { tokenConfigured?: boolean }>({
@@ -796,6 +805,9 @@ const loadConfig = async () => {
         case 'file_organizer_dir':
           fileOrganizerConfig.value.dir = config.value
           break
+        case 'file_organizer_scan_on_start':
+          fileOrganizerConfig.value.scanOnStart = config.value === 'true'
+          break
       }
     })
   } catch (error) {
@@ -981,6 +993,7 @@ const saveFileOrganizerConfig = async () => {
   try {
     await configApi.update('file_organizer_enabled', fileOrganizerConfig.value.enabled.toString())
     await configApi.update('file_organizer_dir', fileOrganizerConfig.value.dir)
+    await configApi.update('file_organizer_scan_on_start', fileOrganizerConfig.value.scanOnStart.toString())
 
     // 重新加载文件整理配置
     try {

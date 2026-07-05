@@ -32,6 +32,9 @@ type FileOrganizer struct {
 	stabilizeTime    time.Duration
 	processing       map[string]bool
 	procMux          sync.RWMutex
+	scanMux          sync.Mutex
+	scanRunning      bool
+	scanOnStart      bool
 	// New service interfaces
 	parser        *FileNameParser
 	matcher       SubscriptionMatcher
@@ -76,6 +79,7 @@ func NewFileOrganizer(
 		stopChan:         make(chan struct{}),
 		stabilizeTime:    5 * time.Second,
 		processing:       make(map[string]bool),
+		scanOnStart:      false,
 		parser:           parser,
 		matcher:          matcher,
 		mover:            mover,
@@ -93,16 +97,22 @@ func (f *FileOrganizer) Start() error {
 	logger.Info("File organizer started",
 		"watch_dir", f.watchDir,
 		"dest_dir", f.destDir,
-		"stabilize_time", f.stabilizeTime)
+		"stabilize_time", f.stabilizeTime,
+		"scan_on_start", f.scanOnStart)
 
 	go f.watchLoop()
-
-	go func() {
-		time.Sleep(2 * time.Second)
-		f.scanExistingFiles()
-	}()
+	if f.scanOnStart {
+		go func() {
+			time.Sleep(2 * time.Second)
+			f.scanExistingFiles()
+		}()
+	}
 
 	return nil
+}
+
+func (f *FileOrganizer) SetScanOnStart(enabled bool) {
+	f.scanOnStart = enabled
 }
 
 // addWatchRecursively 递归添加监控目录
@@ -185,6 +195,12 @@ func (f *FileOrganizer) watchLoop() {
 
 // scanExistingFiles 扫描现有文件
 func (f *FileOrganizer) scanExistingFiles() {
+	if !f.beginScan() {
+		logger.Warn("File scan already running, skipping duplicate trigger", "watch_dir", f.watchDir)
+		return
+	}
+	defer f.endScan()
+
 	logger.Info("Scanning existing files in watch directory")
 
 	err := filepath.Walk(f.watchDir, func(path string, info os.FileInfo, err error) error {
@@ -205,6 +221,22 @@ func (f *FileOrganizer) scanExistingFiles() {
 	} else {
 		logger.Info("Existing files scan completed")
 	}
+}
+
+func (f *FileOrganizer) beginScan() bool {
+	f.scanMux.Lock()
+	defer f.scanMux.Unlock()
+	if f.scanRunning {
+		return false
+	}
+	f.scanRunning = true
+	return true
+}
+
+func (f *FileOrganizer) endScan() {
+	f.scanMux.Lock()
+	f.scanRunning = false
+	f.scanMux.Unlock()
 }
 
 // handleNewFile 处理新文件

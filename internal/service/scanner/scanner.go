@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"github.com/WormW/auto-rss/internal/pkg/constants"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
@@ -31,6 +32,7 @@ type Scanner struct {
 	downloadRepo     repository.DownloadRepository
 	configRepo       repository.ConfigRepository
 	parser           *organizer.FileNameParser
+	defaultRoot      string
 }
 
 // NewScanner 创建扫描服务
@@ -39,13 +41,19 @@ func NewScanner(
 	subscriptionRepo repository.SubscriptionRepository,
 	downloadRepo repository.DownloadRepository,
 	configRepo repository.ConfigRepository,
+	defaultRoot ...string,
 ) *Scanner {
+	root := constants.DefaultDownloadPath
+	if len(defaultRoot) > 0 && strings.TrimSpace(defaultRoot[0]) != "" {
+		root = defaultRoot[0]
+	}
 	return &Scanner{
 		db:               db,
 		subscriptionRepo: subscriptionRepo,
 		downloadRepo:     downloadRepo,
 		configRepo:       configRepo,
 		parser:           organizer.NewFileNameParser(),
+		defaultRoot:      root,
 	}
 }
 
@@ -100,6 +108,10 @@ type Result struct {
 // Scan 扫描指定文件夹
 func (s *Scanner) Scan(sub *model.Subscription, req *Request) (*Result, error) {
 	// 验证路径存在
+	if err := s.validateScanFolder(req.FolderPath); err != nil {
+		return nil, err
+	}
+
 	info, err := os.Stat(req.FolderPath)
 	if err != nil {
 		return nil, fmt.Errorf("文件夹不存在: %w", err)
@@ -280,6 +292,51 @@ func (s *Scanner) Scan(sub *model.Subscription, req *Request) (*Result, error) {
 	}
 
 	return result, nil
+}
+
+func (s *Scanner) validateScanFolder(folderPath string) error {
+	folderPath = strings.TrimSpace(folderPath)
+	if folderPath == "" {
+		return fmt.Errorf("folder_path is required")
+	}
+
+	scanAbs, err := filepath.Abs(folderPath)
+	if err != nil {
+		return fmt.Errorf("invalid folder_path: %w", err)
+	}
+	scanAbs = filepath.Clean(scanAbs)
+	if scanAbs == filepath.Clean(filepath.VolumeName(scanAbs)+string(filepath.Separator)) {
+		return fmt.Errorf("refusing to scan filesystem root; choose a subscription folder")
+	}
+
+	downloadRoot := s.getDownloadPath()
+	rootAbs, err := filepath.Abs(downloadRoot)
+	if err != nil {
+		return fmt.Errorf("invalid download root: %w", err)
+	}
+	rootAbs = filepath.Clean(rootAbs)
+
+	rel, err := filepath.Rel(rootAbs, scanAbs)
+	if err != nil {
+		return fmt.Errorf("invalid scan folder relative to download root: %w", err)
+	}
+	if rel == "." {
+		return fmt.Errorf("refusing to scan download root; choose a subscription folder")
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("folder_path must be inside download_path")
+	}
+
+	return nil
+}
+
+func (s *Scanner) getDownloadPath() string {
+	if s.configRepo != nil {
+		if cfg, err := s.configRepo.Get("download_path"); err == nil && cfg != nil && strings.TrimSpace(cfg.Value) != "" {
+			return cfg.Value
+		}
+	}
+	return s.defaultRoot
 }
 
 type fileEntry struct {

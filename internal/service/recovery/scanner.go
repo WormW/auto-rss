@@ -14,6 +14,7 @@ import (
 	"unicode"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"github.com/WormW/auto-rss/internal/pkg/constants"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
@@ -47,6 +48,7 @@ type Scanner struct {
 	configRepo       repository.ConfigRepository
 	parser           *organizer.FileNameParser
 	matcher          organizer.SubscriptionMatcher
+	defaultRoot      string
 }
 
 // NewScanner 创建扫描恢复服务
@@ -56,9 +58,14 @@ func NewScanner(
 	downloadRepo repository.DownloadRepository,
 	configRepo repository.ConfigRepository,
 	bangumiService *bangumi.BangumiService,
+	defaultRoot ...string,
 ) *Scanner {
 	parser := organizer.NewFileNameParser()
 	matcher := organizer.NewSubscriptionMatcher(parser, subscriptionRepo, bangumiService)
+	root := constants.DefaultDownloadPath
+	if len(defaultRoot) > 0 && strings.TrimSpace(defaultRoot[0]) != "" {
+		root = defaultRoot[0]
+	}
 	return &Scanner{
 		db:               db,
 		subscriptionRepo: subscriptionRepo,
@@ -66,6 +73,7 @@ func NewScanner(
 		configRepo:       configRepo,
 		parser:           parser,
 		matcher:          matcher,
+		defaultRoot:      root,
 	}
 }
 
@@ -137,54 +145,73 @@ func (s *Scanner) Scan(req *ScanRequest) (*ScanResult, error) {
 			}
 		}
 		subscriptions = filtered
+		if len(subscriptions) == 0 {
+			return nil, fmt.Errorf("subscription %d not found", *req.SubscriptionID)
+		}
+	}
+	scanRoots := []string{rootPath}
+	if req != nil && req.SubscriptionID != nil {
+		scanRoots = s.subscriptionScanRoots(rootPath, subscriptions[0])
+		if len(scanRoots) == 0 {
+			logger.Warn("No matching subscription directory found for scoped recovery scan",
+				"subscription_id", subscriptions[0].ID,
+				"name", subscriptions[0].Name,
+				"root", rootPath)
+			return result, nil
+		}
 	}
 
 	// 3. 扫描磁盘文件并匹配
 	diskEpisodes := make(map[uint]map[int][]EpisodeFile) // subscription_id -> episode -> files
 
-	err = filepath.WalkDir(rootPath, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		// 忽略隐藏文件
-		if strings.HasPrefix(filepath.Base(path), ".") {
-			return nil
-		}
-		// 只处理视频文件
-		ext := strings.ToLower(filepath.Ext(path))
-		if !videoExts[ext] {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil || info.Size() == 0 {
-			return nil
-		}
+	for _, scanRoot := range scanRoots {
+		err = filepath.WalkDir(scanRoot, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				if path != scanRoot && strings.HasPrefix(d.Name(), ".") {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			// 忽略隐藏文件
+			if strings.HasPrefix(filepath.Base(path), ".") {
+				return nil
+			}
+			// 只处理视频文件
+			ext := strings.ToLower(filepath.Ext(path))
+			if !videoExts[ext] {
+				return nil
+			}
+			info, err := d.Info()
+			if err != nil || info.Size() == 0 {
+				return nil
+			}
 
-		result.ScannedFiles++
+			result.ScannedFiles++
 
-		sub, episode, season := s.matchFile(path, subscriptions, rootPath)
-		if sub == nil || episode <= 0 {
-			result.OrphanFiles = append(result.OrphanFiles, path)
+			sub, episode, season := s.matchFile(path, subscriptions, rootPath)
+			if sub == nil || episode <= 0 {
+				result.OrphanFiles = append(result.OrphanFiles, path)
+				return nil
+			}
+
+			result.MatchedFiles++
+			if diskEpisodes[sub.ID] == nil {
+				diskEpisodes[sub.ID] = make(map[int][]EpisodeFile)
+			}
+			diskEpisodes[sub.ID][episode] = append(diskEpisodes[sub.ID][episode], EpisodeFile{
+				Path:    path,
+				Episode: episode,
+				Season:  season,
+			})
 			return nil
-		}
-
-		result.MatchedFiles++
-		if diskEpisodes[sub.ID] == nil {
-			diskEpisodes[sub.ID] = make(map[int][]EpisodeFile)
-		}
-		diskEpisodes[sub.ID][episode] = append(diskEpisodes[sub.ID][episode], EpisodeFile{
-			Path:    path,
-			Episode: episode,
-			Season:  season,
 		})
-		return nil
-	})
 
-	if err != nil {
-		return nil, fmt.Errorf("failed to walk directory: %w", err)
+		if err != nil {
+			return nil, fmt.Errorf("failed to walk directory: %w", err)
+		}
 	}
 
 	// 4. 对每个订阅进行对账
@@ -349,6 +376,29 @@ func (s *Scanner) matchFile(filePath string, subscriptions []model.Subscription,
 	}
 
 	return nil, 0, 0
+}
+
+func (s *Scanner) subscriptionScanRoots(rootPath string, sub model.Subscription) []string {
+	entries, err := os.ReadDir(rootPath)
+	if err != nil {
+		logger.Warn("Failed to list recovery scan root",
+			"root", rootPath,
+			"subscription_id", sub.ID,
+			"error", err)
+		return nil
+	}
+
+	sanitized := utils.SanitizeDirectoryName(sub.Name)
+	roots := make([]string, 0, 1)
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		if isSimilarDirectoryName(entry.Name(), sanitized) {
+			roots = append(roots, filepath.Join(rootPath, entry.Name()))
+		}
+	}
+	return roots
 }
 
 // extractEpisode 提取集数和季度
@@ -529,7 +579,7 @@ func (s *Scanner) getDownloadPath() string {
 			}
 		}
 	}
-	return "/downloads"
+	return s.defaultRoot
 }
 
 // isSimilarDirectoryName 复用 organizer_helper 的逻辑

@@ -120,6 +120,7 @@ func (ctx *Context) ReloadFileOrganizer() error {
 		logger.Error("Failed to create file organizer", "error", err)
 		return err
 	}
+	fileOrg.SetScanOnStart(ctx.cfg.FileOrganizerScanOnStart)
 
 	// 启动服务
 	if err := fileOrg.Start(); err != nil {

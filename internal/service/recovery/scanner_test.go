@@ -249,6 +249,41 @@ func TestScannerDryRunReportContractWithFixtures(t *testing.T) {
 	assert.Empty(t, afterExisting.RenamedPath)
 }
 
+func TestScannerScopedScanOnlyWalksSubscriptionDirectory(t *testing.T) {
+	_, scanner, sub, _, _ := newRecoveryScannerFixture(t)
+
+	result, err := scanner.Scan(&ScanRequest{DryRun: true, SubscriptionID: &sub.ID})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	assert.Equal(t, 5, result.ScannedFiles)
+	assert.Equal(t, 4, result.MatchedFiles)
+	require.Len(t, result.OrphanFiles, 1)
+	assert.Equal(t, []string{"Fixture Show bonus footage.mkv"}, basenamesFromPaths(result.OrphanFiles))
+}
+
+func TestScannerScopedScanMissingDirectoryDoesNotWalkDownloadRoot(t *testing.T) {
+	db, scanner, _, _, _ := newRecoveryScannerFixture(t)
+	missingDirSub := model.Subscription{
+		Name:           "No Folder Show",
+		Season:         1,
+		CurrentEpisode: 0,
+		LatestEpisode:  0,
+		Enabled:        true,
+		Status:         "active",
+	}
+	require.NoError(t, db.Create(&missingDirSub).Error)
+
+	result, err := scanner.Scan(&ScanRequest{DryRun: true, SubscriptionID: &missingDirSub.ID})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	assert.Equal(t, 0, result.ScannedFiles)
+	assert.Equal(t, 0, result.MatchedFiles)
+	assert.Empty(t, result.OrphanFiles)
+	assert.Empty(t, result.Subscriptions)
+}
+
 func TestScannerRejectsApplyModeByDefault(t *testing.T) {
 	db, scanner, sub, existing, _ := newRecoveryScannerFixture(t)
 	t.Setenv(recoveryApplyEnabledEnv, "")

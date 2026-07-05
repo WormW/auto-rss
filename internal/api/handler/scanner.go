@@ -17,6 +17,7 @@ type ScannerHandler struct {
 	subscriptionRepo repository.SubscriptionRepository
 	downloadRepo     repository.DownloadRepository
 	configRepo       repository.ConfigRepository
+	downloadPath     string
 }
 
 // NewScannerHandler 创建扫描处理器实例
@@ -25,12 +26,14 @@ func NewScannerHandler(
 	subscriptionRepo repository.SubscriptionRepository,
 	downloadRepo repository.DownloadRepository,
 	configRepo repository.ConfigRepository,
+	downloadPath string,
 ) *ScannerHandler {
 	return &ScannerHandler{
 		db:               db,
 		subscriptionRepo: subscriptionRepo,
 		downloadRepo:     downloadRepo,
 		configRepo:       configRepo,
+		downloadPath:     downloadPath,
 	}
 }
 
@@ -76,7 +79,7 @@ func (h *ScannerHandler) ScanFolder(c *gin.Context) {
 	}
 
 	// 执行扫描
-	svc := scanner.NewScanner(h.db, h.subscriptionRepo, h.downloadRepo, h.configRepo)
+	svc := scanner.NewScanner(h.db, h.subscriptionRepo, h.downloadRepo, h.configRepo, h.downloadPath)
 	result, err := svc.Scan(sub, &req)
 	if err != nil {
 		logger.Error("Folder scan failed", "error", err)
