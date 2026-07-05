@@ -157,7 +157,13 @@ type TransferInfo struct{}
 
 func TestCompletionHandler_HandleComplete_SendsNotification(t *testing.T) {
 	mockNotify := &mockNotificationService{}
-	mockDownloadRepo := &mockDownloadRepo{}
+	var savedDownload *model.Download
+	mockDownloadRepo := &mockDownloadRepo{
+		updateFunc: func(download *model.Download) error {
+			savedDownload = download
+			return nil
+		},
+	}
 	mockSubRepo := &mockSubscriptionRepo{}
 	mockQB := &mockQBClient{}
 	renamerSvc := NewRenameService("")
@@ -201,6 +207,18 @@ func TestCompletionHandler_HandleComplete_SendsNotification(t *testing.T) {
 	// Check FilePath was set
 	if download.FilePath != "/downloads/test" {
 		t.Errorf("Expected FilePath to be '/downloads/test', got %s", download.FilePath)
+	}
+
+	if download.Status != model.DownloadStatusCompleted {
+		t.Errorf("Expected Status to be %q, got %q", model.DownloadStatusCompleted, download.Status)
+	}
+
+	if savedDownload == nil {
+		t.Fatal("Expected completed download to be saved")
+	}
+
+	if savedDownload.Status != model.DownloadStatusCompleted {
+		t.Errorf("Expected saved Status to be %q, got %q", model.DownloadStatusCompleted, savedDownload.Status)
 	}
 }
 

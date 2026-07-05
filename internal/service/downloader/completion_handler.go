@@ -76,6 +76,7 @@ func (h *completionHandler) HandleComplete(download *model.Download, torrent *To
 
 	// 记录下载完成时间
 	now := time.Now()
+	download.Status = model.DownloadStatusCompleted
 	download.DownloadedAt = &now
 	download.FilePath = torrent.SavePath
 
