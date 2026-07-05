@@ -1,0 +1,42 @@
+<evals>
+  <eval id="1">
+    <question>我想知道 Auto-RSS 现在是否健康，并找出最需要处理的下载问题。</question>
+    <expected>Call get_system_overview, then call list_downloads with status "failed" or "stalled" if the overview shows problematic downloads, and summarize the affected IDs and next action.</expected>
+  </eval>
+  <eval id="2">
+    <question>帮我找到“葬送的芙莉莲”的订阅，然后看看最近几次下载有没有失败。</question>
+    <expected>Call list_subscriptions with query "葬送的芙莉莲", then call get_subscription with the matching subscription ID, and report recent failed/stalled downloads if any.</expected>
+  </eval>
+  <eval id="3">
+    <question>暂停 ID 为 12 的订阅，并确认它已经不会继续自动追踪。</question>
+    <expected>Call get_subscription for ID 12, call toggle_subscription with enabled false, then call get_subscription again or use the returned subscription to confirm enabled=false and status is paused when applicable.</expected>
+  </eval>
+  <eval id="4">
+    <question>我想添加一部新番，先在 Mikan 搜“孤独摇滚”，然后给我可订阅的字幕组 RSS。</question>
+    <expected>Call search_mikan with query "孤独摇滚", choose a plausible anime URL from results, then call get_mikan_fansubs and present RSS feed options without creating a subscription yet.</expected>
+  </eval>
+  <eval id="5">
+    <question>用这个 Mikan RSS 创建订阅：名称“测试番剧”，rss_url 为 https://example.com/rss.xml，季度 1，简体中文优先。</question>
+    <expected>Call create_subscription with name, rss_url, season=1, language_preference="chs"; return the created or existing subscription ID and status.</expected>
+  </eval>
+  <eval id="6">
+    <question>下载 ID 44 失败了，帮我重试；如果失败，告诉我下一步该检查什么。</question>
+    <expected>Call get_download for ID 44, then retry_download. If retry_download returns a tool error, explain the qBittorrent or torrent issue and suggest checking credentials/connectivity/logs; otherwise report the new status.</expected>
+  </eval>
+  <eval id="7">
+    <question>立即刷新 RSS，然后看一下日志里有没有 RSS 或下载相关错误。</question>
+    <expected>Call refresh_rss, then call list_logs with level ERROR and module rss or download, and summarize recent errors. If no errors appear, say the refresh was queued and no recent matching errors were found.</expected>
+  </eval>
+  <eval id="8">
+    <question>列出所有下载任务，翻到下一页继续找 failed 的条目。</question>
+    <expected>Call list_downloads with a limit, use next_cursor from the first response to call list_downloads again, and identify failed entries from both pages or explain that a status filter would be more efficient.</expected>
+  </eval>
+  <eval id="9">
+    <question>今天有哪些番要更新？如果磁盘空间紧张，也一起提醒我。</question>
+    <expected>Call get_calendar with today_only=true, call get_disk_status, and combine airing schedule with disk status warning/critical guidance.</expected>
+  </eval>
+  <eval id="10">
+    <question>帮我确认 Bangumi ID 464376 是哪部番，并看看 Auto-RSS 里有没有类似订阅。</question>
+    <expected>Call get_bangumi_subject with ID 464376, then call list_subscriptions with the subject name_cn or name, and report whether a likely matching subscription exists.</expected>
+  </eval>
+</evals>

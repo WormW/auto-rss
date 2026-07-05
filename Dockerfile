@@ -7,7 +7,7 @@ COPY web/ ./
 RUN npx vite build
 
 # 构建后端
-FROM golang:1.23-alpine AS go-builder
+FROM golang:1.25-alpine AS go-builder
 WORKDIR /build
 # 安装构建依赖
 RUN apk add --no-cache gcc musl-dev sqlite-dev

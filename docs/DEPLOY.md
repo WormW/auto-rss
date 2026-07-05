@@ -41,7 +41,7 @@
 - 无其他依赖
 
 **源码部署**:
-- Go 1.21+
+- Go 1.25+
 - Node.js 18+
 - SQLite 3.40+
 
@@ -425,9 +425,9 @@ sudo systemctl restart auto-rss
 ### 环境准备
 
 ```bash
-# 安装 Go 1.21+
-wget https://golang.org/dl/go1.21.linux-amd64.tar.gz
-sudo tar -C /usr/local -xzf go1.21.linux-amd64.tar.gz
+# 安装 Go 1.25+
+wget https://golang.org/dl/go1.25.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.25.linux-amd64.tar.gz
 export PATH=$PATH:/usr/local/go/bin
 
 # 安装 Node.js 18+

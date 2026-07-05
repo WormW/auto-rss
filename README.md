@@ -130,6 +130,9 @@ cp .env.example .env
 | `RSS_INTERVAL` | `30m` | RSS 自动检查间隔 |
 | `LOG_LEVEL` | `info` | 日志级别：`debug`、`info`、`warn`、`error` |
 | `SERVER_PORT` | `7892` | Web 服务端口 |
+| `MCP_ENABLED` | `false` | 是否启用 MCP Streamable HTTP 端点 `/mcp` |
+| `MCP_TOKEN` | `""` | MCP Bearer token，启用 MCP 时必填 |
+| `MCP_ALLOWED_ORIGINS` | `localhost/127.0.0.1` | 允许访问 `/mcp` 的浏览器 Origin，逗号分隔 |
 | `DOWNLOAD_PATH` | `/downloads` | 默认下载路径 |
 | `AUTH_ENABLED` | `false` | 是否启用单用户 JWT 访问保护 |
 | `JWT_SECRET` | 默认占位值 | JWT 签名密钥；启用认证时至少 32 字符且不能使用默认值 |
@@ -144,6 +147,8 @@ cp .env.example .env
 | `RATE_LIMIT_TTL` | `1h` | 限流客户端不活跃清理时间 |
 
 运行时配置也可通过 Web UI 或 `/api/v1/config` 写入数据库，例如 qBittorrent 连接、下载路径、代理、重命名模板、磁盘阈值和通知渠道。自动 RSS 下载会跳过 RSS enclosure 明确标注小于 `min_torrent_size_bytes` 的条目，默认值为 `52428800`（50 MiB），设置为 `0` 可关闭该保护；RSS 未提供大小时会继续按原流程处理。
+
+详细配置说明请参考 [部署文档](docs/DEPLOY.md#配置说明)。MCP 使用说明请参考 [MCP 服务文档](docs/MCP.md)。
 
 ---
 
@@ -169,6 +174,7 @@ cp .env.example .env
 - [磁盘监控说明](docs/DISK_MONITOR_FEATURE.md)
 - [追番日历说明](docs/CALENDAR_FEATURE.md)
 - [字幕组功能设计](docs/FANSUB_DESIGN.md)
+- [MCP 服务文档](docs/MCP.md)
 
 ---
 
@@ -176,7 +182,7 @@ cp .env.example .env
 
 ### 环境要求
 
-- Go 1.21+
+- Go 1.25+
 - Node.js 18+
 - SQLite
 

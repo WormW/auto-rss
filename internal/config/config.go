@@ -45,6 +45,11 @@ type Config struct {
 	// 服务器配置
 	ServerPort int
 
+	// MCP配置
+	MCPEnabled        bool
+	MCPToken          string
+	MCPAllowedOrigins []string
+
 	// 下载配置
 	DownloadPath string
 
@@ -87,6 +92,9 @@ func Load() (*Config, error) {
 		BangumiUpdateInterval:          getEnvAsInt("BANGUMI_UPDATE_INTERVAL", 6), // 默认6小时
 		LogLevel:                       getEnv("LOG_LEVEL", "info"),
 		ServerPort:                     getEnvAsInt("SERVER_PORT", 7892),
+		MCPEnabled:                     getEnv("MCP_ENABLED", "false") == "true",
+		MCPToken:                       getEnv("MCP_TOKEN", ""),
+		MCPAllowedOrigins:              getEnvAsStringSlice("MCP_ALLOWED_ORIGINS", ""),
 		DownloadPath:                   getEnv("DOWNLOAD_PATH", "/downloads"),
 
 		// 文件整理配置
@@ -150,6 +158,15 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("JWT_PASSWORD must be changed from the default when AUTH_ENABLED=true")
 		}
 	}
+	if c.MCPEnabled && c.MCPToken == "" {
+		return fmt.Errorf("MCP_TOKEN is required when MCP_ENABLED=true")
+	}
+	if c.MCPEnabled && len(c.MCPAllowedOrigins) == 0 {
+		c.MCPAllowedOrigins = []string{
+			fmt.Sprintf("http://localhost:%d", c.ServerPort),
+			fmt.Sprintf("http://127.0.0.1:%d", c.ServerPort),
+		}
+	}
 	return nil
 }
 
@@ -189,6 +206,23 @@ func getEnvAsDuration(key string, defaultValue time.Duration) time.Duration {
 		}
 	}
 	return defaultValue
+}
+
+func getEnvAsStringSlice(key, defaultValue string) []string {
+	value := getEnv(key, defaultValue)
+	if value == "" {
+		return nil
+	}
+
+	parts := strings.Split(value, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			values = append(values, part)
+		}
+	}
+	return values
 }
 
 // LoadFromDB 从数据库加载配置并覆盖现有配置

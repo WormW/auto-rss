@@ -16,6 +16,7 @@ import (
 	"github.com/WormW/auto-rss/internal/api/middleware/ratelimit"
 	"github.com/WormW/auto-rss/internal/app"
 	"github.com/WormW/auto-rss/internal/config"
+	"github.com/WormW/auto-rss/internal/mcpserver"
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/pkg/utils"
@@ -381,6 +382,24 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 
 	// WebSocket 端点
 	r.GET("/ws/notifications", notificationHandler.WebSocketHandler)
+
+	if cfg.MCPEnabled {
+		mcpSrv := mcpserver.New(mcpserver.Dependencies{
+			DB:               db,
+			Config:           cfg,
+			SubscriptionRepo: subscriptionRepo,
+			DownloadRepo:     downloadRepo,
+			ConfigRepo:       configRepo,
+			RSSSourceRepo:    rssSourceRepo,
+			LogRepo:          logRepo,
+			Scheduler:        rssScheduler,
+			QBClient:         qbClient,
+		})
+		mcpHandler := mcpSrv.Handler()
+		r.Any("/mcp", func(c *gin.Context) {
+			mcpHandler.ServeHTTP(c.Writer, c.Request)
+		})
+	}
 
 	// 启动后台调度器
 	if err := rssScheduler.Start(); err != nil {

@@ -226,7 +226,7 @@ Auto-RSS 是一个基于 Golang 开发的番剧自动订阅下载工具，旨在
 
 #### 后端技术栈
 ```yaml
-语言: Go 1.21+
+语言: Go 1.25+
 框架与库:
   - Web框架: Gin (轻量高性能)
   - ORM: GORM v2 (SQLite 支持)
