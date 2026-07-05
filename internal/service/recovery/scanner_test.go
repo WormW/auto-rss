@@ -210,22 +210,25 @@ func TestScannerDryRunReportContractWithFixtures(t *testing.T) {
 
 	assert.False(t, result.Applied)
 	assert.Empty(t, result.BackupPath)
-	assert.Equal(t, 5, result.ScannedFiles)
+	assert.Equal(t, 6, result.ScannedFiles)
 	assert.Equal(t, 4, result.MatchedFiles)
-	require.Len(t, result.OrphanFiles, 1)
-	assert.Equal(t, "Unknown Show S01E01.mkv", filepath.Base(result.OrphanFiles[0]))
+	require.Len(t, result.OrphanFiles, 2)
+	assert.Contains(t, basenamesFromPaths(result.OrphanFiles), "Unknown Show S01E01.mkv")
+	assert.Contains(t, basenamesFromPaths(result.OrphanFiles), "Fixture Show bonus footage.mkv")
 
 	require.Len(t, result.Subscriptions, 1)
 	report := result.Subscriptions[0]
 	assert.Equal(t, sub.ID, report.SubscriptionID)
 	assert.Equal(t, "Fixture Show", report.Name)
 	assert.Equal(t, []int{1, 2, 3}, report.EpisodesOnDisk)
+	assert.NotContains(t, report.EpisodesOnDisk, 0)
 	assert.Equal(t, 1, report.CurrentEpisodeOld)
 	assert.Equal(t, 3, report.CurrentEpisodeNew)
 	assert.Equal(t, 2, report.LatestEpisodeOld)
 	assert.Equal(t, 3, report.LatestEpisodeNew)
 	assert.Equal(t, []uint{existing.ID}, report.DownloadsToUpdate)
 	assert.Equal(t, []int{1, 3}, report.DownloadsToCreate)
+	assert.NotContains(t, report.DownloadsToCreate, 0)
 	assert.Equal(t, []uint{missing.ID}, report.DownloadsMissing)
 
 	require.Len(t, report.MatchedEpisodes, 4)
@@ -335,6 +338,7 @@ func newRecoveryScannerFixture(t *testing.T) (*gorm.DB, *Scanner, model.Subscrip
 	root := t.TempDir()
 	requireFile(t, filepath.Join(root, "Fixture Show", "Season 1", "Fixture Show S01E02.mkv"))
 	requireFile(t, filepath.Join(root, "Fixture Show", "Raw", "[Fansub] Fixture Show [01][1080p].mkv"))
+	requireFile(t, filepath.Join(root, "Fixture Show", "Raw", "Fixture Show bonus footage.mkv"))
 	requireFile(t, filepath.Join(root, "Fixture Show", "Nested", "Season 1", "Fixture Show S01E03.mkv"))
 	requireFile(t, filepath.Join(root, "Fixture Show", "Nested", "Season 1", "Copy", "Fixture Show S01E03 duplicate.mkv"))
 	requireFile(t, filepath.Join(root, "Unknown Show", "Unknown Show S01E01.mkv"))
@@ -397,6 +401,15 @@ func basenames(files []EpisodeFile) []string {
 	names := make([]string, 0, len(files))
 	for _, file := range files {
 		names = append(names, filepath.Base(file.Path))
+	}
+	sort.Strings(names)
+	return names
+}
+
+func basenamesFromPaths(paths []string) []string {
+	names := make([]string, 0, len(paths))
+	for _, path := range paths {
+		names = append(names, filepath.Base(path))
 	}
 	sort.Strings(names)
 	return names

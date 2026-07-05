@@ -166,7 +166,7 @@ func (s *Scanner) Scan(req *ScanRequest) (*ScanResult, error) {
 		result.ScannedFiles++
 
 		sub, episode, season := s.matchFile(path, subscriptions, rootPath)
-		if sub == nil {
+		if sub == nil || episode <= 0 {
 			result.OrphanFiles = append(result.OrphanFiles, path)
 			return nil
 		}
