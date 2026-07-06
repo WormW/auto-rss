@@ -305,6 +305,39 @@ func TestScannerRejectsApplyModeByDefault(t *testing.T) {
 	assert.Empty(t, afterExisting.RenamedPath)
 }
 
+func TestScannerApplyStopsWhenBackupFails(t *testing.T) {
+	db, scanner, sub, existing, _ := newRecoveryScannerFixture(t)
+	t.Setenv(recoveryApplyEnabledEnv, "true")
+
+	origWd, err := os.Getwd()
+	require.NoError(t, err)
+	tempWd := t.TempDir()
+	require.NoError(t, os.Chdir(tempWd))
+	t.Cleanup(func() {
+		require.NoError(t, os.Chdir(origWd))
+	})
+
+	result, err := scanner.Scan(&ScanRequest{DryRun: false})
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "failed to backup database")
+	assert.ErrorContains(t, err, "failed to open db for backup")
+	assert.Nil(t, result)
+
+	var afterSub model.Subscription
+	require.NoError(t, db.First(&afterSub, sub.ID).Error)
+	assert.Equal(t, 1, afterSub.CurrentEpisode)
+	assert.Equal(t, 2, afterSub.LatestEpisode)
+
+	var afterExisting model.Download
+	require.NoError(t, db.First(&afterExisting, existing.ID).Error)
+	assert.Equal(t, model.DownloadStatusDownloading, afterExisting.Status)
+	assert.Empty(t, afterExisting.RenamedPath)
+
+	_, statErr := os.Stat(filepath.Join(tempWd, "data"))
+	assert.True(t, errors.Is(statErr, os.ErrNotExist))
+}
+
 func TestRecoveryApplyEnabled(t *testing.T) {
 	t.Setenv(recoveryApplyEnabledEnv, "")
 	assert.False(t, recoveryApplyEnabled())

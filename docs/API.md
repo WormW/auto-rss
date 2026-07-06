@@ -422,7 +422,7 @@ RSS 健康 API 已有 handler 级测试和路由级集成验证，覆盖单订�
 }
 ```
 
-`subscription_id` 可省略，省略时扫描全部订阅。`dry_run=true` 只生成修复计划，不应写入生产 SQLite，也不应移动或删除下载/媒体文件。`dry_run=false` 会尝试写入修复结果，属于 mutation-oriented apply 行为；生产环境执行前需要单独的人类批准。
+`subscription_id` 可省略，省略时扫描全部订阅。`dry_run=true` 只生成修复计划，不应写入生产 SQLite，也不应移动或删除下载/媒体文件。`dry_run=false` 会尝试写入修复结果，属于 mutation-oriented apply 行为；默认会被拒绝，只有在单独获得人类批准后，才允许临时设置 `AUTO_RSS_ENABLE_RECOVERY_APPLY=true` 执行。
 
 ### 通知
 
