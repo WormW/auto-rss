@@ -408,7 +408,7 @@ RSS 健康 API 已有 handler 级测试和路由级集成验证，覆盖单订�
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `POST` | `/recovery/scan` | 扫描下载目录并生成或应用修复计划 |
+| `POST` | `/recovery/scan` | 扫描下载目录并生成 dry-run 修复计划 |
 | `GET` | `/tasks/current` | 获取当前后台任务 |
 | `GET` | `/tasks/history` | 获取任务历史 |
 | `POST` | `/tasks/cancel` | 取消当前任务 |
@@ -422,7 +422,7 @@ RSS 健康 API 已有 handler 级测试和路由级集成验证，覆盖单订�
 }
 ```
 
-`subscription_id` 可省略，省略时扫描全部订阅。`dry_run=true` 只生成修复计划，不应写入生产 SQLite，也不应移动或删除下载/媒体文件。`dry_run=false` 会尝试写入修复结果，属于 mutation-oriented apply 行为；默认会被拒绝，只有在单独获得人类批准后，才允许临时设置 `AUTO_RSS_ENABLE_RECOVERY_APPLY=true` 执行。
+`subscription_id` 可省略，省略时扫描全部订阅。当前 UI 只调用 `dry_run=true`，只生成修复计划，不写入生产 SQLite，也不移动或删除下载/媒体文件。`dry_run=false` 会尝试写入修复结果，属于 mutation-oriented apply 行为；服务默认返回 403 并拒绝执行，只有在单独获得人类批准后，才允许临时设置 `AUTO_RSS_ENABLE_RECOVERY_APPLY=true` 执行。
 
 ### 通知
 
@@ -600,7 +600,7 @@ RSS 健康 API 已有 handler 级测试和路由级集成验证，覆盖单订�
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/backup/export` | 导出完整备份包 |
+| `GET` | `/backup/export` | 导出默认脱敏的备份包 |
 | `POST` | `/backup/preview` | 预览导入差异 |
 | `POST` | `/backup/import` | 执行导入 |
 
@@ -610,7 +610,7 @@ RSS 健康 API 已有 handler 级测试和路由级集成验证，覆盖单订�
 GET /api/v1/backup/export?include_sensitive=false
 ```
 
-默认导出订阅、RSS 源、分组、标签、重命名模板、系统配置和通知配置；密码、Token、通知密钥等敏感字段默认替换为 `__AUTO_RSS_REDACTED__`。
+默认导出订阅、RSS 源、分组、标签、重命名模板、系统配置和通知配置；密码、Token、通知密钥等敏感字段默认替换为 `__AUTO_RSS_REDACTED__`，因此默认备份包不会包含可直接恢复的敏感值。只有显式传入 `include_sensitive=true` 时才会包含敏感字段。
 
 导入预览或执行导入：
 
