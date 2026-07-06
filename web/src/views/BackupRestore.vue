@@ -2,8 +2,8 @@
   <div class="backup-page">
     <div class="page-heading">
       <div>
-        <h2 class="page-title">备份恢复</h2>
-        <p class="page-subtitle">导出完整配置包，预览差异后再恢复或迁移。</p>
+        <h2 class="page-title">备份导入</h2>
+        <p class="page-subtitle">导出默认脱敏的配置包，预览差异后再导入或迁移。</p>
       </div>
       <n-space>
         <n-tooltip>
@@ -21,7 +21,7 @@
     </div>
 
     <n-alert type="info" class="top-alert">
-      默认导出的敏感字段会以占位符保存。恢复时这些占位符会被跳过，不会覆盖本机已有密钥。
+      默认导出的敏感字段会以占位符保存。导入时这些占位符会被跳过，不会覆盖本机已有密钥。
     </n-alert>
 
     <div class="summary-grid">
@@ -42,7 +42,7 @@
         </n-space>
       </n-card>
 
-      <n-card title="恢复策略" class="panel-card">
+      <n-card title="导入策略" class="panel-card">
         <n-form label-placement="top">
           <n-form-item label="来源格式">
             <n-select v-model:value="sourceFormat" :options="sourceOptions" />
@@ -93,7 +93,7 @@
               <template #icon>
                 <n-icon><CloudDownloadOutline /></n-icon>
               </template>
-              执行导入
+              按预览导入
             </n-button>
           </n-space>
         </div>
@@ -320,8 +320,8 @@ const applyImport = () => {
 
   dialog.warning({
     title: '确认导入',
-    content: `将新增 ${plan.value.summary.create} 项，覆盖 ${plan.value.summary.overwrite} 项，合并 ${plan.value.summary.merge} 项。`,
-    positiveText: '执行导入',
+    content: `将按当前预览新增 ${plan.value.summary.create} 项，覆盖 ${plan.value.summary.overwrite} 项，合并 ${plan.value.summary.merge} 项；脱敏占位符会继续跳过。`,
+    positiveText: '按预览导入',
     negativeText: '取消',
     onPositiveClick: async () => {
       importing.value = true
