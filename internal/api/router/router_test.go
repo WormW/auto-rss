@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -344,6 +345,9 @@ func TestSetup_RoutesRecoveryScanRejectsApplyModeByDefault(t *testing.T) {
 	}
 	if response.Code != 403 || response.Message == "" {
 		t.Fatalf("unexpected recovery apply rejection envelope: %#v", response)
+	}
+	if !strings.Contains(response.Message, recovery.ErrApplyDisabled.Error()) {
+		t.Fatalf("expected API rejection to preserve apply gate guidance %q, got %q", recovery.ErrApplyDisabled.Error(), response.Message)
 	}
 
 	var afterSub model.Subscription

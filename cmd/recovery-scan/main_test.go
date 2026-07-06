@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/WormW/auto-rss/internal/service/recovery"
+)
 
 func TestParseModeAcceptsDryRun(t *testing.T) {
 	dryRun, err := parseMode([]string{"dry-run"})
@@ -19,6 +24,15 @@ func TestParseModeAcceptsApply(t *testing.T) {
 	}
 	if dryRun {
 		t.Fatal("expected apply mode to disable dry-run behavior")
+	}
+}
+
+func TestApplyModeRequiresRecoveryApplyGate(t *testing.T) {
+	got := recovery.ErrApplyDisabled.Error()
+	if got == "" ||
+		!strings.Contains(got, "AUTO_RSS_ENABLE_RECOVERY_APPLY=true") ||
+		!strings.Contains(got, "explicit human approval") {
+		t.Fatalf("expected shared apply gate error to name env var and human approval, got %q", got)
 	}
 }
 
