@@ -24,6 +24,7 @@ import (
 	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/WormW/auto-rss/internal/service/scheduler"
 	"github.com/WormW/auto-rss/internal/service/task"
+	"github.com/gin-gonic/gin"
 	"github.com/robfig/cron/v3"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -99,10 +100,17 @@ func setupRouterForTest(t *testing.T, authEnabled bool) (http.Handler, *app.Cont
 }
 
 func setupRouterForTestWithDB(t *testing.T, authEnabled bool) (http.Handler, *app.Context, *gorm.DB) {
+	return setupRouterForTestWithConfig(t, authEnabled, nil)
+}
+
+func setupRouterForTestWithConfig(t *testing.T, authEnabled bool, configure func(*config.Config)) (*gin.Engine, *app.Context, *gorm.DB) {
 	t.Helper()
 
 	db := newTestDB(t)
 	cfg := newRouterTestConfig(authEnabled)
+	if configure != nil {
+		configure(cfg)
+	}
 	qbClient := downloader.NewQBittorrentClient()
 	appCtx := newTestAppContext(db, cfg)
 
@@ -203,6 +211,117 @@ func TestSetup_AuthDisabledKeepsLocalRoutesAccessible(t *testing.T) {
 	r.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected local no-auth route to remain accessible, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestSetup_MCPDisabledByDefaultDoesNotMountEndpoint(t *testing.T) {
+	r, _, _ := setupRouterForTestWithConfig(t, false, nil)
+
+	for _, route := range r.Routes() {
+		if route.Path == "/mcp" {
+			t.Fatalf("expected /mcp route to be absent when MCP is disabled, got route %#v", route)
+		}
+	}
+}
+
+func TestSetup_MCPEnabledRejectsMissingAndInvalidBearerToken(t *testing.T) {
+	r, _, _ := setupRouterForTestWithConfig(t, false, func(cfg *config.Config) {
+		cfg.MCPEnabled = true
+		cfg.MCPToken = "secret-token"
+		cfg.MCPAllowedOrigins = []string{"http://localhost:7892"}
+	})
+
+	for _, tc := range []struct {
+		name          string
+		authorization string
+	}{
+		{name: "missing bearer token"},
+		{name: "invalid bearer token", authorization: "Bearer wrong-token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := performRouterMCPRequest(r, http.MethodPost, "", tc.authorization, mcpInitializeRequestBody())
+
+			if recorder.Code != http.StatusUnauthorized {
+				t.Fatalf("expected unauthorized MCP request to return 401, got %d: %s", recorder.Code, recorder.Body.String())
+			}
+			if got := recorder.Header().Get("WWW-Authenticate"); got != `Bearer realm="auto-rss-mcp"` {
+				t.Fatalf("WWW-Authenticate = %q, want MCP bearer challenge", got)
+			}
+		})
+	}
+}
+
+func TestSetup_MCPEnabledRejectsDisallowedBrowserOrigin(t *testing.T) {
+	r, _, _ := setupRouterForTestWithConfig(t, false, func(cfg *config.Config) {
+		cfg.MCPEnabled = true
+		cfg.MCPToken = "secret-token"
+		cfg.MCPAllowedOrigins = []string{"http://localhost:7892"}
+	})
+
+	recorder := performRouterMCPRequest(r, http.MethodPost, "http://evil.example", "Bearer secret-token", mcpInitializeRequestBody())
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected disallowed MCP origin to return 403, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Header().Get("Access-Control-Allow-Origin"), "evil.example") {
+		t.Fatalf("disallowed origin was echoed in CORS headers: %q", recorder.Header().Get("Access-Control-Allow-Origin"))
+	}
+}
+
+func TestSetup_MCPEnabledAllowsConfiguredOriginPreflight(t *testing.T) {
+	r, _, _ := setupRouterForTestWithConfig(t, false, func(cfg *config.Config) {
+		cfg.MCPEnabled = true
+		cfg.MCPToken = "secret-token"
+		cfg.MCPAllowedOrigins = []string{"http://localhost:7892"}
+	})
+
+	recorder := performRouterMCPRequest(r, http.MethodOptions, "http://localhost:7892", "Bearer secret-token", "")
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("expected allowed MCP preflight to return 204, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:7892" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want configured origin", got)
+	}
+	if got := recorder.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(got, http.MethodPost) || !strings.Contains(got, http.MethodOptions) {
+		t.Fatalf("Access-Control-Allow-Methods = %q, want POST and OPTIONS", got)
+	}
+	if got := recorder.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(got, "Authorization") || !strings.Contains(got, "MCP-Protocol-Version") {
+		t.Fatalf("Access-Control-Allow-Headers = %q, want MCP auth/protocol headers", got)
+	}
+	if got := recorder.Header().Get("Vary"); got != "Origin" {
+		t.Fatalf("Vary = %q, want Origin", got)
+	}
+}
+
+func TestSetup_MCPEnabledRoutesAuthorizedInitializeRequest(t *testing.T) {
+	r, _, _ := setupRouterForTestWithConfig(t, false, func(cfg *config.Config) {
+		cfg.MCPEnabled = true
+		cfg.MCPToken = "secret-token"
+		cfg.MCPAllowedOrigins = []string{"http://localhost:7892"}
+	})
+
+	recorder := performRouterMCPRequest(r, http.MethodPost, "http://localhost:7892", "Bearer secret-token", mcpInitializeRequestBody())
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected authorized MCP initialize request to reach handler, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Result struct {
+			ProtocolVersion string `json:"protocolVersion"`
+			ServerInfo      struct {
+				Name string `json:"name"`
+			} `json:"serverInfo"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to parse MCP initialize response: %v; body=%s", err, recorder.Body.String())
+	}
+	if response.Result.ServerInfo.Name != "auto-rss" || response.Result.ProtocolVersion == "" {
+		t.Fatalf("unexpected MCP initialize response: %#v", response)
+	}
+	if got := recorder.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:7892" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want configured origin", got)
 	}
 }
 
@@ -1066,6 +1185,25 @@ func performRouterJSONRequest(r http.Handler, method, target, body string) *http
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(recorder, req)
 	return recorder
+}
+
+func performRouterMCPRequest(r http.Handler, method, origin, authorization, body string) *httptest.ResponseRecorder {
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(method, "/mcp", bytes.NewBufferString(body))
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Content-Type", "application/json")
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
+	}
+	r.ServeHTTP(recorder, req)
+	return recorder
+}
+
+func mcpInitializeRequestBody() string {
+	return `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`
 }
 
 func newRouterRSSFeedServer(t *testing.T, status int, body string) *httptest.Server {
