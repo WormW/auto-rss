@@ -462,6 +462,10 @@ func (s *Server) retryDownload(ctx context.Context, req *mcp.CallToolRequest, in
 		return nil, RetryDownloadOutput{}, fmt.Errorf("download %d was not found", input.ID)
 	}
 
+	if err := validateRetryDownloadPreconditions(download); err != nil {
+		return nil, RetryDownloadOutput{}, err
+	}
+
 	if download.TorrentHash != "" && s.qbClient != nil {
 		if err := s.qbClient.DeleteTorrentWithPayload(download.TorrentHash); err != nil {
 			logger.Warn("MCP retry could not delete old qBittorrent torrent", "download_id", input.ID, "hash", download.TorrentHash, "error", err.Error())
@@ -507,6 +511,16 @@ func (s *Server) retryDownload(ctx context.Context, req *mcp.CallToolRequest, in
 		Message:  "download retry was queued",
 	}
 	return resultWithText(out)
+}
+
+func validateRetryDownloadPreconditions(download *model.Download) error {
+	if download.Status != model.DownloadStatusFailed && download.Status != model.DownloadStatusStalled {
+		return fmt.Errorf("download %d cannot be retried while status is %q; only failed or stalled downloads can be retried", download.ID, download.Status)
+	}
+	if strings.TrimSpace(download.TorrentURL) == "" {
+		return fmt.Errorf("download %d cannot be retried because it has no torrent URL", download.ID)
+	}
+	return nil
 }
 
 func (s *Server) refreshRSS(ctx context.Context, req *mcp.CallToolRequest, input RefreshRSSInput) (*mcp.CallToolResult, RefreshRSSOutput, error) {
