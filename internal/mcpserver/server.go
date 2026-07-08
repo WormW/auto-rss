@@ -467,8 +467,8 @@ func (s *Server) retryDownload(ctx context.Context, req *mcp.CallToolRequest, in
 	}
 
 	if download.TorrentHash != "" && s.qbClient != nil {
-		if err := s.qbClient.DeleteTorrentWithPayload(download.TorrentHash); err != nil {
-			logger.Warn("MCP retry could not delete old qBittorrent torrent", "download_id", input.ID, "hash", download.TorrentHash, "error", err.Error())
+		if err := s.qbClient.RemoveTorrentTask(download.TorrentHash); err != nil {
+			logger.Warn("MCP retry could not remove old qBittorrent task", "download_id", input.ID, "hash", download.TorrentHash, "error", err.Error())
 		}
 	}
 

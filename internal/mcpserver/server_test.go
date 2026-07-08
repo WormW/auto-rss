@@ -95,8 +95,8 @@ func TestMCPRetryDownloadRejectsNonFailedOrStalledWithoutMutation(t *testing.T) 
 			if repo.updateCalls != 0 {
 				t.Fatalf("Update calls = %d, want 0", repo.updateCalls)
 			}
-			if qb.addCalls != 0 || qb.deleteWithPayloadCalls != 0 {
-				t.Fatalf("qBittorrent calls add=%d delete=%d, want 0", qb.addCalls, qb.deleteWithPayloadCalls)
+			if qb.addCalls != 0 || qb.removeTaskCalls != 0 || qb.deleteWithPayloadCalls != 0 {
+				t.Fatalf("qBittorrent calls add=%d remove=%d delete=%d, want 0", qb.addCalls, qb.removeTaskCalls, qb.deleteWithPayloadCalls)
 			}
 			if got := repo.mustGet(t, 1); got.Status != status || got.TorrentHash != "existing-hash" {
 				t.Fatalf("download mutated: status=%q hash=%q", got.Status, got.TorrentHash)
@@ -140,8 +140,8 @@ func TestMCPRetryDownloadRejectsMissingTorrentURLWithoutMutation(t *testing.T) {
 			if repo.updateCalls != 0 {
 				t.Fatalf("Update calls = %d, want 0", repo.updateCalls)
 			}
-			if qb.addCalls != 0 || qb.deleteWithPayloadCalls != 0 {
-				t.Fatalf("qBittorrent calls add=%d delete=%d, want 0", qb.addCalls, qb.deleteWithPayloadCalls)
+			if qb.addCalls != 0 || qb.removeTaskCalls != 0 || qb.deleteWithPayloadCalls != 0 {
+				t.Fatalf("qBittorrent calls add=%d remove=%d delete=%d, want 0", qb.addCalls, qb.removeTaskCalls, qb.deleteWithPayloadCalls)
 			}
 			got := repo.mustGet(t, 1)
 			if got.Status != tt.status || got.RetryCount != 4 || got.LastError != "previous error" || got.TorrentHash != "existing-hash" {
@@ -166,8 +166,8 @@ func TestMCPRetryDownloadRejectsMissingRecordWithoutMutation(t *testing.T) {
 	if repo.updateCalls != 0 {
 		t.Fatalf("Update calls = %d, want 0", repo.updateCalls)
 	}
-	if qb.addCalls != 0 || qb.deleteWithPayloadCalls != 0 {
-		t.Fatalf("qBittorrent calls add=%d delete=%d, want 0", qb.addCalls, qb.deleteWithPayloadCalls)
+	if qb.addCalls != 0 || qb.removeTaskCalls != 0 || qb.deleteWithPayloadCalls != 0 {
+		t.Fatalf("qBittorrent calls add=%d remove=%d delete=%d, want 0", qb.addCalls, qb.removeTaskCalls, qb.deleteWithPayloadCalls)
 	}
 }
 
@@ -191,8 +191,11 @@ func TestMCPRetryDownloadRecordsQBAddFailureState(t *testing.T) {
 	if !strings.Contains(err.Error(), "qBittorrent could not add the torrent") {
 		t.Fatalf("error = %q, want qBittorrent add failure", err.Error())
 	}
-	if qb.deleteWithPayloadCalls != 1 {
-		t.Fatalf("DeleteTorrentWithPayload calls = %d, want 1", qb.deleteWithPayloadCalls)
+	if qb.removeTaskCalls != 1 || qb.removedHash != "old-hash" {
+		t.Fatalf("RemoveTorrentTask calls=%d hash=%q, want one old-hash removal", qb.removeTaskCalls, qb.removedHash)
+	}
+	if qb.deleteWithPayloadCalls != 0 {
+		t.Fatalf("DeleteTorrentWithPayload calls = %d, want 0", qb.deleteWithPayloadCalls)
 	}
 	if qb.addCalls != 1 {
 		t.Fatalf("AddTorrent calls = %d, want 1", qb.addCalls)
@@ -238,8 +241,11 @@ func TestMCPRetryDownloadSuccessResetsFieldsAndUsesFakeQB(t *testing.T) {
 	if out.Message != "download retry was queued" {
 		t.Fatalf("Message = %q, want queued", out.Message)
 	}
-	if qb.deleteWithPayloadCalls != 1 || qb.deletedHash != "old-hash" {
-		t.Fatalf("delete calls=%d hash=%q, want one old-hash deletion", qb.deleteWithPayloadCalls, qb.deletedHash)
+	if qb.removeTaskCalls != 1 || qb.removedHash != "old-hash" {
+		t.Fatalf("remove calls=%d hash=%q, want one old-hash task removal", qb.removeTaskCalls, qb.removedHash)
+	}
+	if qb.deleteWithPayloadCalls != 0 {
+		t.Fatalf("DeleteTorrentWithPayload calls = %d, want 0", qb.deleteWithPayloadCalls)
 	}
 	if qb.addCalls != 1 || qb.addedURL != "magnet:?xt=urn:btih:test" {
 		t.Fatalf("add calls=%d url=%q, want one fake add with torrent URL", qb.addCalls, qb.addedURL)
@@ -395,8 +401,10 @@ type fakeMCPQBClient struct {
 	addHash                string
 	addErr                 error
 	addCalls               int
+	removeTaskCalls        int
 	deleteWithPayloadCalls int
 	addedURL               string
+	removedHash            string
 	deletedHash            string
 }
 
@@ -445,6 +453,8 @@ func (c *fakeMCPQBClient) RenameTorrentFile(hash string, oldPath string, newPath
 }
 
 func (c *fakeMCPQBClient) RemoveTorrentTask(hash string) error {
+	c.removeTaskCalls++
+	c.removedHash = hash
 	return nil
 }
 
