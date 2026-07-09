@@ -178,6 +178,7 @@ const fileName = ref('')
 const importData = ref<unknown | null>(null)
 const plan = ref<BackupImportPlan | null>(null)
 const lastExportSummary = ref<BackupPackageSummary | null>(null)
+const importFileGeneration = ref(0)
 
 type PreviewedImport = {
   data: unknown
@@ -288,6 +289,8 @@ const exportBackup = async () => {
 }
 
 const handleFileChange = async ({ file }: { file: UploadFileInfo }) => {
+  const generation = ++importFileGeneration.value
+
   if (!file.file) {
     clearImportState()
     return
@@ -299,14 +302,22 @@ const handleFileChange = async ({ file }: { file: UploadFileInfo }) => {
 
   try {
     const text = await file.file.text()
-    importData.value = JSON.parse(text)
+    const parsed = JSON.parse(text)
+    if (generation !== importFileGeneration.value) {
+      return
+    }
+    importData.value = parsed
   } catch {
+    if (generation !== importFileGeneration.value) {
+      return
+    }
     clearImportState()
     message.error('备份文件不是有效的 JSON')
   }
 }
 
 const clearImportState = () => {
+  importFileGeneration.value += 1
   fileName.value = ''
   importData.value = null
   invalidateImportPreview()
