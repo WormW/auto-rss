@@ -3,8 +3,11 @@ package mcpserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +16,7 @@ import (
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/downloader"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -268,6 +272,76 @@ func TestMCPRetryDownloadSuccessResetsFieldsAndUsesFakeQB(t *testing.T) {
 	}
 }
 
+func TestMCPPreviewRecoveryScanAlwaysDryRunAndBoundsOutput(t *testing.T) {
+	t.Setenv("AUTO_RSS_ENABLE_RECOVERY_APPLY", "true")
+	server, db, sub, existing, missing := newMCPRecoveryFixture(t, 12)
+
+	_, out, err := server.previewRecoveryScan(context.Background(), nil, PreviewRecoveryInput{})
+	if err != nil {
+		t.Fatalf("previewRecoveryScan returned error: %v", err)
+	}
+
+	if !out.DryRun || !out.PreviewOnly || out.Applied {
+		t.Fatalf("preview flags = dry_run %v preview_only %v applied %v, want true true false", out.DryRun, out.PreviewOnly, out.Applied)
+	}
+	if out.ScannedFiles != 17 || out.MatchedFiles != 4 {
+		t.Fatalf("scan counts = scanned %d matched %d, want 17 and 4", out.ScannedFiles, out.MatchedFiles)
+	}
+	if out.OrphanFileCount != 13 || len(out.OrphanFileSamples) != recoveryPreviewSampleLimit || out.OrphanFileOmittedCount != 3 {
+		t.Fatalf("orphan summary = count %d samples %d omitted %d, want 13 samples capped at %d omitted 3", out.OrphanFileCount, len(out.OrphanFileSamples), out.OrphanFileOmittedCount, recoveryPreviewSampleLimit)
+	}
+	if out.SubscriptionCount != 1 || len(out.Subscriptions) != 1 {
+		t.Fatalf("subscription summary count=%d len=%d, want 1", out.SubscriptionCount, len(out.Subscriptions))
+	}
+
+	preview := out.Subscriptions[0]
+	if preview.SubscriptionID != sub.ID || preview.Name != "Fixture Show" {
+		t.Fatalf("subscription preview = id %d name %q, want fixture subscription", preview.SubscriptionID, preview.Name)
+	}
+	if preview.DownloadsToUpdateCount != 1 || preview.DownloadsToCreateCount != 2 || preview.DownloadsMissingCount != 1 {
+		t.Fatalf("subscription candidate counts = update %d create %d missing %d, want 1, 2, 1", preview.DownloadsToUpdateCount, preview.DownloadsToCreateCount, preview.DownloadsMissingCount)
+	}
+	if out.DownloadsToUpdateCount != 1 || out.DownloadsToCreateCount != 2 || out.DownloadsMissingCount != 1 {
+		t.Fatalf("total candidate counts = update %d create %d missing %d, want 1, 2, 1", out.DownloadsToUpdateCount, out.DownloadsToCreateCount, out.DownloadsMissingCount)
+	}
+
+	var afterSub model.Subscription
+	if err := db.First(&afterSub, sub.ID).Error; err != nil {
+		t.Fatalf("reload subscription: %v", err)
+	}
+	if afterSub.CurrentEpisode != 1 || afterSub.LatestEpisode != 2 {
+		t.Fatalf("subscription was mutated by preview: current=%d latest=%d", afterSub.CurrentEpisode, afterSub.LatestEpisode)
+	}
+
+	var afterExisting model.Download
+	if err := db.First(&afterExisting, existing.ID).Error; err != nil {
+		t.Fatalf("reload existing download: %v", err)
+	}
+	if afterExisting.Status != model.DownloadStatusDownloading || afterExisting.RenamedPath != "" {
+		t.Fatalf("existing download was mutated by preview: status=%q renamed_path=%q", afterExisting.Status, afterExisting.RenamedPath)
+	}
+
+	var afterMissing model.Download
+	if err := db.First(&afterMissing, missing.ID).Error; err != nil {
+		t.Fatalf("reload missing download: %v", err)
+	}
+	if afterMissing.Status != model.DownloadStatusCompleted || afterMissing.RenamedPath == "" {
+		t.Fatalf("missing download was unexpectedly changed: status=%q renamed_path=%q", afterMissing.Status, afterMissing.RenamedPath)
+	}
+}
+
+func TestMCPPreviewRecoveryScanRejectsInvalidSubscriptionID(t *testing.T) {
+	server, _, _, _, _ := newMCPRecoveryFixture(t, 0)
+
+	_, _, err := server.previewRecoveryScan(context.Background(), nil, PreviewRecoveryInput{SubscriptionID: 999})
+	if err == nil {
+		t.Fatal("expected invalid subscription_id to return an error")
+	}
+	if !strings.Contains(err.Error(), "subscription 999 not found") {
+		t.Fatalf("error = %q, want subscription not found", err.Error())
+	}
+}
+
 type fakeMCPDownloadRepo struct {
 	downloads   map[uint]model.Download
 	updateCalls int
@@ -481,3 +555,90 @@ func (c *fakeMCPQBClient) DownloadTorrentFile(url string) ([]byte, error) {
 }
 
 var errUnusedMCPFakeMethod = errors.New("unused fake MCP repository method")
+
+func newMCPRecoveryFixture(t *testing.T, orphanCount int) (*Server, *gorm.DB, model.Subscription, model.Download, model.Download) {
+	t.Helper()
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}, &model.Config{}); err != nil {
+		t.Fatalf("auto migrate: %v", err)
+	}
+
+	root := t.TempDir()
+	requireMCPFile(t, filepath.Join(root, "Fixture Show", "Season 1", "Fixture Show S01E02.mkv"))
+	requireMCPFile(t, filepath.Join(root, "Fixture Show", "Raw", "[Fansub] Fixture Show [01][1080p].mkv"))
+	requireMCPFile(t, filepath.Join(root, "Fixture Show", "Raw", "Fixture Show bonus footage.mkv"))
+	requireMCPFile(t, filepath.Join(root, "Fixture Show", "Nested", "Season 1", "Fixture Show S01E03.mkv"))
+	requireMCPFile(t, filepath.Join(root, "Fixture Show", "Nested", "Season 1", "Copy", "Fixture Show S01E03 duplicate.mkv"))
+	for i := 0; i < orphanCount; i++ {
+		requireMCPFile(t, filepath.Join(root, "Unknown Show", "Unknown Show S01E"+leftPadMCP(i+1)+".mkv"))
+	}
+
+	sub := model.Subscription{
+		Name:           "Fixture Show",
+		Season:         1,
+		CurrentEpisode: 1,
+		LatestEpisode:  2,
+		Enabled:        true,
+		Status:         "active",
+	}
+	if err := db.Create(&sub).Error; err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+
+	existing := model.Download{
+		SubscriptionID: sub.ID,
+		Title:          "Fixture Show 02",
+		Episode:        2,
+		TorrentURL:     "memory://existing",
+		TorrentHash:    "existing-02",
+		Status:         model.DownloadStatusDownloading,
+	}
+	if err := db.Create(&existing).Error; err != nil {
+		t.Fatalf("create existing download: %v", err)
+	}
+
+	missing := model.Download{
+		SubscriptionID: sub.ID,
+		Title:          "Fixture Show 04",
+		Episode:        4,
+		TorrentURL:     "memory://missing",
+		TorrentHash:    "missing-04",
+		RenamedPath:    filepath.Join(root, "Fixture Show", "Season 1", "Fixture Show S01E04.mkv"),
+		Status:         model.DownloadStatusCompleted,
+	}
+	if err := db.Create(&missing).Error; err != nil {
+		t.Fatalf("create missing download: %v", err)
+	}
+
+	configRepo := repository.NewConfigRepository(db)
+	if err := configRepo.Set("download_path", root); err != nil {
+		t.Fatalf("set download_path: %v", err)
+	}
+
+	server := &Server{
+		cfg:              &config.Config{DownloadPath: root},
+		db:               db,
+		subscriptionRepo: repository.NewSubscriptionRepository(db),
+		downloadRepo:     repository.NewDownloadRepository(db),
+		configRepo:       configRepo,
+	}
+	return server, db, sub, existing, missing
+}
+
+func requireMCPFile(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("mkdir fixture path: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("fixture"), 0644); err != nil {
+		t.Fatalf("write fixture file: %v", err)
+	}
+}
+
+func leftPadMCP(n int) string {
+	return fmt.Sprintf("%02d", n)
+}
