@@ -86,7 +86,7 @@
             </n-button>
             <n-button
               type="primary"
-              :disabled="!plan || importableCount === 0"
+              :disabled="!previewedImport || importableCount === 0"
               :loading="importing"
               @click="applyImport"
             >
@@ -125,7 +125,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, ref } from 'vue'
+import { computed, h, ref, watch } from 'vue'
 import {
   NAlert,
   NButton,
@@ -178,6 +178,16 @@ const fileName = ref('')
 const importData = ref<unknown | null>(null)
 const plan = ref<BackupImportPlan | null>(null)
 const lastExportSummary = ref<BackupPackageSummary | null>(null)
+const importFileGeneration = ref(0)
+
+type PreviewedImport = {
+  data: unknown
+  sourceFormat: string
+  strategy: 'skip' | 'overwrite' | 'merge'
+  plan: BackupImportPlan
+}
+
+const previewedImport = ref<PreviewedImport | null>(null)
 
 const sourceOptions = [
   { label: '自动识别', value: 'auto' },
@@ -206,6 +216,13 @@ const importableCount = computed(() => {
   if (!plan.value) return 0
   return plan.value.summary.create + plan.value.summary.overwrite + plan.value.summary.merge
 })
+
+const invalidateImportPreview = () => {
+  plan.value = null
+  previewedImport.value = null
+}
+
+watch([sourceFormat, strategy], invalidateImportPreview)
 
 const columns: DataTableColumns<BackupImportItem> = [
   {
@@ -272,26 +289,38 @@ const exportBackup = async () => {
 }
 
 const handleFileChange = async ({ file }: { file: UploadFileInfo }) => {
+  const generation = ++importFileGeneration.value
+
   if (!file.file) {
     clearImportState()
     return
   }
 
+  fileName.value = file.name
+  importData.value = null
+  invalidateImportPreview()
+
   try {
     const text = await file.file.text()
-    importData.value = JSON.parse(text)
-    fileName.value = file.name
-    plan.value = null
+    const parsed = JSON.parse(text)
+    if (generation !== importFileGeneration.value) {
+      return
+    }
+    importData.value = parsed
   } catch {
+    if (generation !== importFileGeneration.value) {
+      return
+    }
     clearImportState()
     message.error('备份文件不是有效的 JSON')
   }
 }
 
 const clearImportState = () => {
+  importFileGeneration.value += 1
   fileName.value = ''
   importData.value = null
-  plan.value = null
+  invalidateImportPreview()
 }
 
 const previewImport = async () => {
@@ -302,8 +331,28 @@ const previewImport = async () => {
 
   previewing.value = true
   try {
-    const res: any = await backupApi.preview(importData.value, sourceFormat.value, strategy.value)
-    plan.value = res.data as BackupImportPlan
+    const previewData = importData.value
+    const previewSourceFormat = sourceFormat.value
+    const previewStrategy = strategy.value
+    const res: any = await backupApi.preview(previewData, previewSourceFormat, previewStrategy)
+    if (
+      importData.value !== previewData ||
+      sourceFormat.value !== previewSourceFormat ||
+      strategy.value !== previewStrategy
+    ) {
+      invalidateImportPreview()
+      message.warning('导入参数已变化，请重新预览')
+      return
+    }
+
+    const nextPlan = res.data as BackupImportPlan
+    plan.value = nextPlan
+    previewedImport.value = {
+      data: previewData,
+      sourceFormat: previewSourceFormat,
+      strategy: previewStrategy,
+      plan: nextPlan
+    }
     message.success('导入预览已生成')
   } catch (error: any) {
     const errorMsg = error?.response?.data?.message || '预览导入失败'
@@ -314,20 +363,36 @@ const previewImport = async () => {
 }
 
 const applyImport = () => {
-  if (!importData.value || !plan.value) {
+  const preview = previewedImport.value
+  if (!preview) {
     return
   }
 
   dialog.warning({
     title: '确认导入',
-    content: `将按当前预览新增 ${plan.value.summary.create} 项，覆盖 ${plan.value.summary.overwrite} 项，合并 ${plan.value.summary.merge} 项；脱敏占位符会继续跳过。`,
+    content: `将按当前预览新增 ${preview.plan.summary.create} 项，覆盖 ${preview.plan.summary.overwrite} 项，合并 ${preview.plan.summary.merge} 项；脱敏占位符会继续跳过。`,
     positiveText: '按预览导入',
     negativeText: '取消',
     onPositiveClick: async () => {
       importing.value = true
       try {
-        const res: any = await backupApi.import(importData.value, sourceFormat.value, strategy.value)
-        plan.value = res.data as BackupImportPlan
+        const res: any = await backupApi.import(preview.data, preview.sourceFormat, preview.strategy)
+        const importedPlan = res.data as BackupImportPlan
+        if (
+          importData.value !== preview.data ||
+          sourceFormat.value !== preview.sourceFormat ||
+          strategy.value !== preview.strategy
+        ) {
+          invalidateImportPreview()
+          message.success('导入完成')
+          return
+        }
+
+        plan.value = importedPlan
+        previewedImport.value = {
+          ...preview,
+          plan: importedPlan
+        }
         message.success('导入完成')
       } catch (error: any) {
         const errorMsg = error?.response?.data?.message || '导入失败'
