@@ -293,11 +293,13 @@ const handleFileChange = async ({ file }: { file: UploadFileInfo }) => {
     return
   }
 
+  fileName.value = file.name
+  importData.value = null
+  invalidateImportPreview()
+
   try {
     const text = await file.file.text()
     importData.value = JSON.parse(text)
-    fileName.value = file.name
-    invalidateImportPreview()
   } catch {
     clearImportState()
     message.error('备份文件不是有效的 JSON')
