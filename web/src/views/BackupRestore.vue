@@ -164,6 +164,10 @@ import {
   type BackupPackage,
   type BackupPackageSummary
 } from '@/api'
+import {
+  isPreviewedImportCurrent,
+  type PreviewedImport
+} from '@/utils/backupImportPreview'
 
 const message = useMessage()
 const dialog = useDialog()
@@ -180,14 +184,7 @@ const plan = ref<BackupImportPlan | null>(null)
 const lastExportSummary = ref<BackupPackageSummary | null>(null)
 const importFileGeneration = ref(0)
 
-type PreviewedImport = {
-  data: unknown
-  sourceFormat: string
-  strategy: 'skip' | 'overwrite' | 'merge'
-  plan: BackupImportPlan
-}
-
-const previewedImport = ref<PreviewedImport | null>(null)
+const previewedImport = ref<PreviewedImport<BackupImportPlan> | null>(null)
 
 const sourceOptions = [
   { label: '自动识别', value: 'auto' },
@@ -221,6 +218,12 @@ const invalidateImportPreview = () => {
   plan.value = null
   previewedImport.value = null
 }
+
+const currentImportInputSnapshot = () => ({
+  data: importData.value,
+  sourceFormat: sourceFormat.value,
+  strategy: strategy.value
+})
 
 watch([sourceFormat, strategy], invalidateImportPreview)
 
@@ -335,11 +338,11 @@ const previewImport = async () => {
     const previewSourceFormat = sourceFormat.value
     const previewStrategy = strategy.value
     const res: any = await backupApi.preview(previewData, previewSourceFormat, previewStrategy)
-    if (
-      importData.value !== previewData ||
-      sourceFormat.value !== previewSourceFormat ||
-      strategy.value !== previewStrategy
-    ) {
+    if (!isPreviewedImportCurrent({
+      data: previewData,
+      sourceFormat: previewSourceFormat,
+      strategy: previewStrategy
+    }, currentImportInputSnapshot())) {
       invalidateImportPreview()
       message.warning('导入参数已变化，请重新预览')
       return
@@ -368,21 +371,29 @@ const applyImport = () => {
     return
   }
 
+  if (!isPreviewedImportCurrent(preview, currentImportInputSnapshot())) {
+    invalidateImportPreview()
+    message.warning('导入参数已变化，请重新预览')
+    return
+  }
+
   dialog.warning({
     title: '确认导入',
     content: `将按当前预览新增 ${preview.plan.summary.create} 项，覆盖 ${preview.plan.summary.overwrite} 项，合并 ${preview.plan.summary.merge} 项；脱敏占位符会继续跳过。`,
     positiveText: '按预览导入',
     negativeText: '取消',
     onPositiveClick: async () => {
+      if (!isPreviewedImportCurrent(preview, currentImportInputSnapshot())) {
+        invalidateImportPreview()
+        message.warning('导入参数已变化，请重新预览')
+        return
+      }
+
       importing.value = true
       try {
         const res: any = await backupApi.import(preview.data, preview.sourceFormat, preview.strategy)
         const importedPlan = res.data as BackupImportPlan
-        if (
-          importData.value !== preview.data ||
-          sourceFormat.value !== preview.sourceFormat ||
-          strategy.value !== preview.strategy
-        ) {
+        if (!isPreviewedImportCurrent(preview, currentImportInputSnapshot())) {
           invalidateImportPreview()
           message.success('导入完成')
           return
