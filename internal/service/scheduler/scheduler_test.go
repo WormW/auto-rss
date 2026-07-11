@@ -256,6 +256,59 @@ func TestProcessDownloadItemCreateFailureReleasesOnlyMatchingClaim(t *testing.T)
 	assert.Equal(t, otherResource.Hash, otherAfter.ActiveTorrentHash)
 }
 
+func TestProcessDownloadItemAttachFailureRollsBackDownloadAndReleasesClaim(t *testing.T) {
+	fx := newSchedulerLedgerFixture(t, nil)
+	sub := fx.createSubscription(t)
+	item := schedulerRSSItem(7, "attach-failure-hash", time.Now().UTC())
+	resource := model.EpisodeResource{Hash: item.TorrentHash, URL: item.TorrentURL, Title: item.Title}
+	decision, err := fx.episodeService.EvaluateRSSItem(t.Context(), &sub, episode.RSSResource{
+		OriginalEpisode: item.Episode,
+		Resource:        resource,
+	}, false)
+	require.NoError(t, err)
+	require.Equal(t, episode.DecisionDownload, decision.Action)
+	require.NotZero(t, decision.EpisodeID)
+
+	require.NoError(t, fx.db.Exec(`
+		CREATE TRIGGER block_episode_download_attach
+		BEFORE UPDATE OF active_download_id ON subscription_episodes
+		WHEN NEW.active_download_id IS NOT NULL
+		BEGIN
+			SELECT RAISE(ABORT, 'attach blocked');
+		END;
+	`).Error)
+
+	created, err := fx.scheduler.processDownloadItem(&sub, &item, decision.EpisodeID)
+	require.ErrorContains(t, err, "failed to attach download to episode")
+	require.ErrorContains(t, err, "attach blocked")
+	assert.False(t, created)
+	assert.Zero(t, fx.qb.addCalls)
+
+	var downloadCount int64
+	require.NoError(t, fx.db.Model(&model.Download{}).
+		Where("torrent_hash = ?", item.TorrentHash).
+		Count(&downloadCount).Error)
+	assert.Zero(t, downloadCount, "download create must roll back with attach failure")
+
+	ledger, err := fx.episodeRepo.GetBySubscriptionAndEpisode(sub.ID, item.Episode)
+	require.NoError(t, err)
+	assert.Equal(t, model.EpisodeStatusMissing, ledger.Status)
+	assert.Nil(t, ledger.ActiveDownloadID)
+	assert.Empty(t, ledger.ActiveTorrentHash)
+	assert.Empty(t, ledger.ActiveTorrentURL)
+	assert.Empty(t, ledger.ActiveTitle)
+
+	require.NoError(t, fx.db.Exec("DROP TRIGGER block_episode_download_attach").Error)
+	reclaimed, claimed, err := fx.episodeRepo.ClaimForDownload(sub.ID, item.Episode, resource)
+	require.NoError(t, err)
+	require.True(t, claimed, "same resource must be claimable after attach rollback")
+	require.NoError(t, fx.episodeService.ReleaseDownloadClaim(reclaimed.ID, resource))
+	otherResource := model.EpisodeResource{Hash: "attach-retry-other-hash"}
+	_, claimed, err = fx.episodeRepo.ClaimForDownload(sub.ID, item.Episode, otherResource)
+	require.NoError(t, err)
+	assert.True(t, claimed, "other resource must be claimable after the released retry")
+}
+
 type schedulerRSSParser struct {
 	items []rss.RSSItem
 }
