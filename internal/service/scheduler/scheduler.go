@@ -9,9 +9,7 @@ import (
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
-	"github.com/WormW/auto-rss/internal/pkg/constants"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
-	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/disk"
 	"github.com/WormW/auto-rss/internal/service/downloader"
@@ -41,8 +39,8 @@ type scheduler struct {
 	configRepo       repository.ConfigRepository
 	rssCheckInterval string
 	rssParser        rss.Parser
-	qbClient         downloader.QBittorrentClient
 	episodeService   *episode.Service
+	downloadsPaused  func() bool
 	rssCheckRunning  atomic.Bool
 	smartFetchFilter *SmartFetchFilter // 智能拉取过滤器
 }
@@ -55,7 +53,7 @@ func NewScheduler(
 	configRepo repository.ConfigRepository,
 	rssCheckInterval string,
 	rssParser rss.Parser,
-	qbClient downloader.QBittorrentClient,
+	_ downloader.QBittorrentClient, // 保留构造参数兼容性；qB 首次 Add 由 DownloadMonitor 独占。
 	episodeService *episode.Service,
 ) Scheduler {
 	return &scheduler{
@@ -66,8 +64,8 @@ func NewScheduler(
 		configRepo:       configRepo,
 		rssCheckInterval: rssCheckInterval,
 		rssParser:        rssParser,
-		qbClient:         qbClient,
 		episodeService:   episodeService,
+		downloadsPaused:  disk.IsDownloadsPaused,
 		smartFetchFilter: NewSmartFetchFilter(downloadRepo, repository.NewEpisodeRepository(db)),
 	}
 }
@@ -506,11 +504,11 @@ func (s *scheduler) processDownloadItem(sub *model.Subscription, item *rss.RSSIt
 	}
 
 	// 检查是否因磁盘空间危险而暂停下载
-	if disk.IsDownloadsPaused() {
+	if s.areDownloadsPaused() {
 		logger.Info("Skipping download creation because downloads are paused",
 			"subscription", sub.Name,
 			"title", item.Title)
-		return false, releaseClaim(nil)
+		return false, releaseClaim(errDownloadsPaused)
 	}
 
 	minSizeBytes := minTorrentSizeBytes(s.configRepo)
@@ -558,64 +556,16 @@ func (s *scheduler) processDownloadItem(sub *model.Subscription, item *rss.RSSIt
 		"fansub", item.Fansub,
 		"language", item.Language,
 		"trigger_context", "scheduler_rss_check")
-
-	// 生成带番剧名的下载路径
-	basePath := constants.DefaultDownloadPath
-	if s.configRepo != nil {
-		if downloadPathConfig, err := s.configRepo.Get("download_path"); err == nil && downloadPathConfig != nil && downloadPathConfig.Value != "" {
-			basePath = downloadPathConfig.Value
-		}
-	}
-	downloadPath := utils.GenerateDownloadPath(basePath, sub.Name)
-
-	// 添加到 qBittorrent（在事务外，因为可能涉及网络操作）
-	addedHash, err := s.qbClient.AddTorrent(item.TorrentURL, downloadPath, downloader.AutoRssCategory)
-	if err != nil {
-		logger.Error("Failed to add torrent to qBittorrent",
-			"task_action", "add_torrent",
-			"subscription_id", sub.ID,
-			"download_id", download.ID,
-			"episode", item.Episode,
-			"title", item.Title,
-			"download_path", downloadPath,
-			"trigger_context", "scheduler_rss_check",
-			"error", err)
-
-		// 保留 attached ledger，让 RetryService 和 Monitor 继续收敛该任务。
-		download.Status = model.DownloadStatusFailed
-		download.ErrorMessage = err.Error()
-		download.LastError = err.Error()
-		if updateErr := s.downloadRepo.Update(download); updateErr != nil {
-			return false, errors.Join(
-				fmt.Errorf("failed to add torrent to qBittorrent: %w", err),
-				fmt.Errorf("failed to mark download %d failed: %w", download.ID, updateErr),
-			)
-		}
-		return false, fmt.Errorf("failed to add torrent to qBittorrent: %w", err)
-	}
-	if hash := strings.TrimSpace(addedHash); hash != "" {
-		download.TorrentHash = hash
-	}
-
-	logger.Debug("Torrent added with path",
-		"task_action", "add_torrent",
-		"subscription", sub.Name,
-		"subscription_id", sub.ID,
-		"download_id", download.ID,
-		"episode", item.Episode,
-		"download_path", downloadPath,
-		"trigger_context", "scheduler_rss_check")
-
-	// 更新状态为 downloading
-	download.Status = model.DownloadStatusDownloading
-	if err := s.downloadRepo.Update(download); err != nil {
-		logger.Error("Failed to update download status",
-			"download_id", download.ID,
-			"error", err)
-		return false, fmt.Errorf("failed to update download status: %w", err)
-	}
-
 	return true, nil
+}
+
+var errDownloadsPaused = errors.New("downloads are paused")
+
+func (s *scheduler) areDownloadsPaused() bool {
+	if s.downloadsPaused == nil {
+		return disk.IsDownloadsPaused()
+	}
+	return s.downloadsPaused()
 }
 
 type downloadPreflightResult struct {
@@ -625,7 +575,7 @@ type downloadPreflightResult struct {
 }
 
 func (s *scheduler) downloadPreflight(sub *model.Subscription, item *rss.RSSItem) downloadPreflightResult {
-	if disk.IsDownloadsPaused() {
+	if s.areDownloadsPaused() {
 		logger.Info("Skipping download creation because downloads are paused",
 			"subscription", sub.Name,
 			"title", item.Title)

@@ -66,7 +66,6 @@ func TestProcessDownloadItemSmallTorrentGuardReleasesClaim(t *testing.T) {
 				db:             db,
 				downloadRepo:   downloadRepo,
 				configRepo:     configRepo,
-				qbClient:       qb,
 				episodeService: episodeService,
 			}
 			sub := &model.Subscription{
@@ -94,8 +93,8 @@ func TestProcessDownloadItemSmallTorrentGuardReleasesClaim(t *testing.T) {
 			if created != tt.wantAdded {
 				t.Fatalf("created = %v, want %v", created, tt.wantAdded)
 			}
-			if qb.addCalls != boolToInt(tt.wantAdded) {
-				t.Fatalf("qBittorrent add calls = %d, want %d", qb.addCalls, boolToInt(tt.wantAdded))
+			if qb.addCalls != 0 {
+				t.Fatalf("qBittorrent add calls = %d, want 0", qb.addCalls)
 			}
 
 			var count int64
@@ -104,6 +103,15 @@ func TestProcessDownloadItemSmallTorrentGuardReleasesClaim(t *testing.T) {
 			}
 			if count != tt.wantDownloads {
 				t.Fatalf("download count = %d, want %d", count, tt.wantDownloads)
+			}
+			if tt.wantDownloads > 0 {
+				var download model.Download
+				if err := db.First(&download).Error; err != nil {
+					t.Fatalf("get queued download: %v", err)
+				}
+				if download.Status != model.DownloadStatusPending {
+					t.Fatalf("download status = %s, want pending", download.Status)
+				}
 			}
 
 			ledger, err := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, item.Episode)
@@ -137,7 +145,6 @@ func TestProcessDownloadItemSmallTorrentGuardReleasesClaimAndLeavesExistingDownl
 		db:             db,
 		downloadRepo:   downloadRepo,
 		configRepo:     &smallTorrentGuardConfigRepo{values: map[string]string{}},
-		qbClient:       qb,
 		episodeService: episodeService,
 	}
 	existing := &model.Download{
@@ -206,13 +213,6 @@ func setupSmallTorrentGuardDB(t *testing.T) *gorm.DB {
 		t.Fatalf("migrate sqlite: %v", err)
 	}
 	return db
-}
-
-func boolToInt(value bool) int {
-	if value {
-		return 1
-	}
-	return 0
 }
 
 type smallTorrentGuardQBClient struct {

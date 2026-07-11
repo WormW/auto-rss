@@ -10,6 +10,7 @@ import (
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
+	"github.com/WormW/auto-rss/internal/service/disk"
 	"gorm.io/gorm"
 )
 
@@ -45,6 +46,7 @@ type DownloadMonitor struct {
 	mediaLibrarySvc  MediaLibraryRefresher
 	ticker           *time.Ticker
 	stopChan         chan struct{}
+	downloadsPaused  func() bool
 	// New service interfaces
 	statusSync        StatusSync
 	completionHandler CompletionHandler
@@ -77,6 +79,7 @@ func NewDownloadMonitor(
 		renameService:    renameSvc,
 		mediaLibrarySvc:  mediaSvc,
 		stopChan:         make(chan struct{}),
+		downloadsPaused:  disk.IsDownloadsPaused,
 	}
 }
 
@@ -122,6 +125,11 @@ func (m *DownloadMonitor) Stop() {
 
 // processPendingDownloads 处理等待中的下载任务
 func (m *DownloadMonitor) processPendingDownloads() {
+	if m.areDownloadsPaused() {
+		logger.Info("Skipping pending downloads because downloads are paused")
+		return
+	}
+
 	pendingDownloads, _, err := m.downloadRepo.List(0, 10, "pending")
 	if err != nil {
 		logger.Error("Failed to get pending downloads", "error", err.Error())
@@ -261,6 +269,13 @@ func (m *DownloadMonitor) processPendingDownloads() {
 				"hash", torrentHash)
 		}
 	}
+}
+
+func (m *DownloadMonitor) areDownloadsPaused() bool {
+	if m.downloadsPaused == nil {
+		return disk.IsDownloadsPaused()
+	}
+	return m.downloadsPaused()
 }
 
 // isTorrentFileURL 检查是否是.torrent文件URL

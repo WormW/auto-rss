@@ -11,7 +11,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestRetryServiceAndMonitorKeepEpisodeAttachedUntilQBSuccess(t *testing.T) {
+func TestDownloadMonitorOwnsFirstAddAndReplacesRSSHash(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/retry-ledger.db"), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(
@@ -28,10 +28,9 @@ func TestRetryServiceAndMonitorKeepEpisodeAttachedUntilQBSuccess(t *testing.T) {
 		Title:          "Retry Anime - 01",
 		Episode:        1,
 		TorrentURL:     "magnet:?xt=urn:btih:retry-ledger-hash",
-		Status:         model.DownloadStatusFailed,
+		TorrentHash:    "rss-resource-hash",
+		Status:         model.DownloadStatusPending,
 		Purpose:        model.DownloadPurposeNormal,
-		LastError:      "temporary qB failure",
-		ErrorMessage:   "temporary qB failure",
 		MaxRetries:     5,
 	}
 	require.NoError(t, db.Create(&download).Error)
@@ -70,6 +69,54 @@ func TestRetryServiceAndMonitorKeepEpisodeAttachedUntilQBSuccess(t *testing.T) {
 	assert.Equal(t, model.EpisodeStatusDownloading, afterLedger.Status)
 	require.NotNil(t, afterLedger.ActiveDownloadID)
 	assert.Equal(t, download.ID, *afterLedger.ActiveDownloadID)
+}
+
+func TestDownloadMonitorLeavesPendingOutboxUntouchedWhileDownloadsPaused(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/paused-outbox.db"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Subscription{}, &model.Download{}, &model.Config{}))
+	sub := model.Subscription{Name: "Paused Anime", Status: "active"}
+	require.NoError(t, db.Create(&sub).Error)
+	download := model.Download{
+		SubscriptionID: sub.ID,
+		Title:          "Paused Anime - 01",
+		Episode:        1,
+		TorrentURL:     "magnet:?xt=urn:btih:paused-outbox-hash",
+		TorrentHash:    "paused-rss-hash",
+		Status:         model.DownloadStatusPending,
+		Purpose:        model.DownloadPurposeNormal,
+	}
+	require.NoError(t, db.Create(&download).Error)
+	downloadRepo := repository.NewDownloadRepository(db)
+	qb := &retryLedgerQBClient{returnHash: "paused-actual-hash"}
+	monitor := NewDownloadMonitor(
+		db,
+		qb,
+		downloadRepo,
+		repository.NewSubscriptionRepository(db),
+		repository.NewConfigRepository(db),
+		"",
+	)
+	monitor.SetNotificationService(nil)
+	paused := true
+	monitor.downloadsPaused = func() bool { return paused }
+
+	monitor.checkDownloads()
+
+	assert.Empty(t, qb.addCategories)
+	afterPause, err := downloadRepo.GetByID(download.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.DownloadStatusPending, afterPause.Status)
+	assert.Equal(t, "paused-rss-hash", afterPause.TorrentHash)
+
+	paused = false
+	monitor.checkDownloads()
+
+	assert.Equal(t, []string{AutoRssCategory}, qb.addCategories)
+	afterResume, err := downloadRepo.GetByID(download.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.DownloadStatusDownloading, afterResume.Status)
+	assert.Equal(t, "paused-actual-hash", afterResume.TorrentHash)
 }
 
 type retryLedgerQBClient struct {
