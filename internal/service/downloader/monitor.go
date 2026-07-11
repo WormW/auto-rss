@@ -305,7 +305,7 @@ func (m *DownloadMonitor) checkDownloads() {
 			if changed && download.Status == "completed" && m.completionHandler != nil {
 				subscription, _ := m.subscriptionRepo.GetByID(download.SubscriptionID)
 				if subscription != nil {
-					m.completionHandler.HandleComplete(download, torrent, subscription)
+					m.handleCompletionAsync(download, torrent, subscription)
 				}
 			}
 		}
@@ -317,6 +317,24 @@ func (m *DownloadMonitor) checkDownloads() {
 		stalled, _, _ := m.downloadRepo.List(0, 10000, "stalled")
 		m.statusSync.Reconcile(torrents, downloading, stalled)
 	}
+}
+
+// handleCompletionAsync runs post-completion work outside the monitor loop.
+// A slow filesystem, qBittorrent operation, or external media library must not
+// prevent the next qBittorrent status reconciliation from running.
+func (m *DownloadMonitor) handleCompletionAsync(download *model.Download, torrent *TorrentInfo, subscription *model.Subscription) {
+	handler := m.completionHandler
+	if handler == nil {
+		return
+	}
+
+	go func() {
+		if err := handler.HandleComplete(download, torrent, subscription); err != nil {
+			logger.Error("Failed to handle completed download asynchronously",
+				"download_id", download.ID,
+				"error", err.Error())
+		}
+	}()
 }
 
 // sendFailedNotification 发送下载失败通知
