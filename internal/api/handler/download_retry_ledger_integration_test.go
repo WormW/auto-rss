@@ -48,7 +48,8 @@ func TestTerminalManualRetryDoesNotStealEpisodeFromOtherDownload(t *testing.T) {
 	downloadRepo := repository.NewDownloadRepository(db)
 	episodeRepo := repository.NewEpisodeRepository(db)
 	episodeService := episodeservice.NewService(episodeRepo)
-	handler := NewDownloadHandler(downloadRepo, nil, nil, episodeService)
+	qb := &mockQBittorrentClient{}
+	handler := NewDownloadHandler(downloadRepo, qb, nil, episodeService)
 	router := gin.New()
 	router.POST("/downloads/:id/retry", handler.Retry)
 	response := httptest.NewRecorder()
@@ -69,6 +70,108 @@ func TestTerminalManualRetryDoesNotStealEpisodeFromOtherDownload(t *testing.T) {
 	assert.Equal(t, model.EpisodeStatusDownloading, after.Status)
 	require.NotNil(t, after.ActiveDownloadID)
 	assert.Equal(t, otherDownload.ID, *after.ActiveDownloadID)
+	assert.False(t, qb.deleteWithPayloadCalled)
+}
+
+func TestManualRetryOwnedEpisodeGuardsDoNotDeletePayload(t *testing.T) {
+	for _, status := range []string{
+		model.EpisodeStatusDownloaded,
+		model.EpisodeStatusIgnored,
+		model.EpisodeStatusMarkedDownloaded,
+	} {
+		t.Run(status, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "manual-retry-guard.db")), &gorm.Config{})
+			require.NoError(t, err)
+			require.NoError(t, db.AutoMigrate(
+				&model.Subscription{}, &model.Download{}, &model.SubscriptionEpisode{}, &model.EpisodeResourceCandidate{},
+			))
+			sub := model.Subscription{Name: "Retry Guard " + status, Status: "active"}
+			require.NoError(t, db.Create(&sub).Error)
+			download := model.Download{
+				SubscriptionID: sub.ID, Title: status, Episode: 1,
+				TorrentURL: "magnet:" + status, TorrentHash: "hash-" + status,
+				Status: model.DownloadStatusFailed, RetryCount: 3, MaxRetries: 3,
+			}
+			require.NoError(t, db.Create(&download).Error)
+			ledger := model.SubscriptionEpisode{
+				SubscriptionID: sub.ID, Episode: 1, Status: status,
+				StatusSource: model.EpisodeStatusSourceUser,
+			}
+			require.NoError(t, db.Create(&ledger).Error)
+			downloadRepo := repository.NewDownloadRepository(db)
+			episodeRepo := repository.NewEpisodeRepository(db)
+			qb := &mockQBittorrentClient{}
+			handler := NewDownloadHandler(downloadRepo, qb, nil, episodeservice.NewService(episodeRepo))
+			router := gin.New()
+			router.POST("/downloads/:id/retry", handler.Retry)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest(
+				http.MethodPost, fmt.Sprintf("/downloads/%d/retry", download.ID), nil,
+			))
+
+			require.Equal(t, http.StatusInternalServerError, response.Code, response.Body.String())
+			assert.False(t, qb.deleteWithPayloadCalled)
+			persisted, err := downloadRepo.GetByID(download.ID)
+			require.NoError(t, err)
+			assert.Equal(t, model.DownloadStatusFailed, persisted.Status)
+			assert.Equal(t, "hash-"+status, persisted.TorrentHash)
+			after, err := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
+			require.NoError(t, err)
+			assert.Equal(t, status, after.Status)
+		})
+	}
+}
+
+func TestManualRetrySaveFailureDoesNotDeletePayload(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "manual-retry-save-failure.db")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(
+		&model.Subscription{}, &model.Download{}, &model.SubscriptionEpisode{}, &model.EpisodeResourceCandidate{},
+	))
+	sub := model.Subscription{Name: "Retry Save Failure", Status: "active"}
+	require.NoError(t, db.Create(&sub).Error)
+	download := model.Download{
+		SubscriptionID: sub.ID, Title: "save failure", Episode: 1,
+		TorrentURL: "magnet:save-failure", TorrentHash: "save-failure-hash",
+		Status: model.DownloadStatusFailed, RetryCount: 3, MaxRetries: 3,
+	}
+	require.NoError(t, db.Create(&download).Error)
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID: sub.ID, Episode: 1, Status: model.EpisodeStatusMissing,
+		StatusSource: model.EpisodeStatusSourceAutomatic,
+	}
+	require.NoError(t, db.Create(&ledger).Error)
+	require.NoError(t, db.Exec(`
+		CREATE TRIGGER fail_handler_requeue
+		BEFORE UPDATE OF status ON downloads
+		WHEN NEW.status = 'pending'
+		BEGIN
+			SELECT RAISE(ABORT, 'injected handler requeue failure');
+		END;
+	`).Error)
+	downloadRepo := repository.NewDownloadRepository(db)
+	episodeRepo := repository.NewEpisodeRepository(db)
+	qb := &mockQBittorrentClient{}
+	handler := NewDownloadHandler(downloadRepo, qb, nil, episodeservice.NewService(episodeRepo))
+	router := gin.New()
+	router.POST("/downloads/:id/retry", handler.Retry)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(
+		http.MethodPost, fmt.Sprintf("/downloads/%d/retry", download.ID), nil,
+	))
+
+	require.Equal(t, http.StatusInternalServerError, response.Code, response.Body.String())
+	assert.False(t, qb.deleteWithPayloadCalled)
+	persisted, err := downloadRepo.GetByID(download.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.DownloadStatusFailed, persisted.Status)
+	assert.Equal(t, "save-failure-hash", persisted.TorrentHash)
+	after, err := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
+	require.NoError(t, err)
+	assert.Equal(t, model.EpisodeStatusMissing, after.Status)
+	assert.Nil(t, after.ActiveDownloadID)
 }
 
 func TestTerminalManualRetryReclaimsEpisodeThroughCompletion(t *testing.T) {
@@ -120,7 +223,16 @@ func TestTerminalManualRetryReclaimsEpisodeThroughCompletion(t *testing.T) {
 	require.Equal(t, model.EpisodeStatusMissing, failedLedger.Status)
 	require.Nil(t, failedLedger.ActiveDownloadID)
 
-	qb := &mockQBittorrentClient{}
+	deleteObservedCommittedRequeue := false
+	qb := &mockQBittorrentClient{deleteTorrentFunc: func(string, bool) error {
+		persisted, downloadErr := downloadRepo.GetByID(download.ID)
+		attached, ledgerErr := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
+		deleteObservedCommittedRequeue = downloadErr == nil && ledgerErr == nil &&
+			persisted.Status == model.DownloadStatusPending && persisted.TorrentHash == "" &&
+			attached.Status == model.EpisodeStatusDownloading && attached.ActiveDownloadID != nil &&
+			*attached.ActiveDownloadID == download.ID
+		return nil
+	}}
 	handler := NewDownloadHandler(downloadRepo, qb, nil, episodeService)
 	router := gin.New()
 	router.POST("/downloads/:id/retry", handler.Retry)
@@ -133,6 +245,7 @@ func TestTerminalManualRetryReclaimsEpisodeThroughCompletion(t *testing.T) {
 	assert.Equal(t, model.DownloadStatusPending, retried.Status)
 	assert.Empty(t, retried.TorrentHash)
 	assert.False(t, qb.addCalled)
+	assert.True(t, deleteObservedCommittedRequeue)
 	afterRetry, err := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
 	require.NoError(t, err)
 	assert.Equal(t, model.EpisodeStatusDownloading, afterRetry.Status)

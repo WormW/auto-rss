@@ -146,8 +146,17 @@ func TestSubscriptionDiagnosticsHandler_RetryFailedResetsRetryableDownloads(t *t
 		Status:         model.DownloadStatusFailed,
 	}))
 
-	qb := &mockQBittorrentClient{}
 	episodeRepo := repository.NewEpisodeRepository(db)
+	deleteObservedCommittedRequeue := false
+	qb := &mockQBittorrentClient{deleteTorrentFunc: func(string, bool) error {
+		persisted, downloadErr := downloadRepo.GetByID(failed.ID)
+		attached, ledgerErr := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
+		deleteObservedCommittedRequeue = downloadErr == nil && ledgerErr == nil &&
+			persisted.Status == model.DownloadStatusPending && persisted.TorrentHash == "" &&
+			attached.Status == model.EpisodeStatusDownloading && attached.ActiveDownloadID != nil &&
+			*attached.ActiveDownloadID == failed.ID
+		return nil
+	}}
 	handler := NewSubscriptionDiagnosticsHandler(subRepo, downloadRepo, nil, qb, t.TempDir(), episodeservice.NewService(episodeRepo))
 	r := gin.New()
 	r.POST("/subscriptions/:id/diagnostics/retry-failed", handler.RetryFailed)
@@ -188,9 +197,60 @@ func TestSubscriptionDiagnosticsHandler_RetryFailedResetsRetryableDownloads(t *t
 	require.True(t, qb.deleteWithPayloadCalled)
 	require.Equal(t, "old-hash", qb.deletedHash)
 	require.False(t, qb.addCalled, "DownloadMonitor must own the first qBittorrent Add")
+	require.True(t, deleteObservedCommittedRequeue)
 	after, err := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
 	require.NoError(t, err)
 	require.Equal(t, model.EpisodeStatusDownloading, after.Status)
 	require.NotNil(t, after.ActiveDownloadID)
 	require.Equal(t, failed.ID, *after.ActiveDownloadID)
+}
+
+func TestSubscriptionDiagnosticsRetryConflictDoesNotDeletePayload(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(
+		&model.Subscription{}, &model.Download{}, &model.SubscriptionEpisode{}, &model.EpisodeResourceCandidate{},
+	))
+	sub := model.Subscription{Name: "Diagnostics Conflict", Season: 1}
+	require.NoError(t, db.Create(&sub).Error)
+	oldDownload := model.Download{
+		SubscriptionID: sub.ID, Title: "old", Episode: 1,
+		TorrentURL: "magnet:old", TorrentHash: "old-hash", Status: model.DownloadStatusFailed,
+		RetryCount: 3, MaxRetries: 3,
+	}
+	require.NoError(t, db.Create(&oldDownload).Error)
+	otherDownload := model.Download{
+		SubscriptionID: sub.ID, Title: "other", Episode: 1,
+		TorrentURL: "magnet:other", TorrentHash: "other-hash", Status: model.DownloadStatusDownloading,
+	}
+	require.NoError(t, db.Create(&otherDownload).Error)
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID: sub.ID, Episode: 1, Status: model.EpisodeStatusDownloading,
+		StatusSource: model.EpisodeStatusSourceAutomatic, ActiveDownloadID: &otherDownload.ID,
+		ActiveTorrentHash: otherDownload.TorrentHash,
+	}
+	require.NoError(t, db.Create(&ledger).Error)
+	downloadRepo := repository.NewDownloadRepository(db)
+	episodeRepo := repository.NewEpisodeRepository(db)
+	qb := &mockQBittorrentClient{}
+	handler := NewSubscriptionDiagnosticsHandler(
+		repository.NewSubscriptionRepository(db),
+		downloadRepo,
+		nil,
+		qb,
+		t.TempDir(),
+		episodeservice.NewService(episodeRepo),
+	)
+
+	err = handler.retryDownload(&sub, &oldDownload)
+	require.Error(t, err)
+	require.False(t, qb.deleteWithPayloadCalled)
+	persisted, reloadErr := downloadRepo.GetByID(oldDownload.ID)
+	require.NoError(t, reloadErr)
+	require.Equal(t, model.DownloadStatusFailed, persisted.Status)
+	require.Equal(t, "old-hash", persisted.TorrentHash)
+	after, reloadErr := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
+	require.NoError(t, reloadErr)
+	require.NotNil(t, after.ActiveDownloadID)
+	require.Equal(t, otherDownload.ID, *after.ActiveDownloadID)
 }

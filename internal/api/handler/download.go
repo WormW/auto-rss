@@ -319,22 +319,7 @@ func (h *DownloadHandler) Retry(c *gin.Context) {
 		return
 	}
 
-	// 2. 如果存在旧种子，从 qBittorrent 删除
-	if download.TorrentHash != "" && h.qbClient != nil {
-		logger.Info("Deleting old torrent for retry",
-			"download_id", id,
-			"hash", download.TorrentHash,
-			"file_path", download.FilePath,
-			"renamed_path", download.RenamedPath)
-		if err := h.qbClient.DeleteTorrentWithPayload(download.TorrentHash); err != nil {
-			logger.Warn("Failed to delete old torrent from qBittorrent (ignoring)",
-				"download_id", id,
-				"hash", download.TorrentHash,
-				"error", err.Error())
-			// 忽略删除错误，旧种子可能不存在
-		}
-	}
-
+	oldHash := download.TorrentHash
 	if h.requeueSvc != nil {
 		err = h.requeueSvc.RequeueDownload(download, &download.Subscription)
 	} else {
@@ -350,6 +335,19 @@ func (h *DownloadHandler) Retry(c *gin.Context) {
 			"message": "Failed to retry download",
 		})
 		return
+	}
+	if oldHash != "" && h.qbClient != nil {
+		logger.Info("Deleting old torrent after download requeue",
+			"download_id", id,
+			"hash", oldHash,
+			"file_path", download.FilePath,
+			"renamed_path", download.RenamedPath)
+		if deleteErr := h.qbClient.DeleteTorrentWithPayload(oldHash); deleteErr != nil {
+			logger.Warn("Failed to delete old torrent from qBittorrent (ignoring)",
+				"download_id", id,
+				"hash", oldHash,
+				"error", deleteErr.Error())
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{

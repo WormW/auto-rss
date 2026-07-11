@@ -733,21 +733,7 @@ func (h *SubscriptionDiagnosticsHandler) buildActions(subscription *model.Subscr
 }
 
 func (h *SubscriptionDiagnosticsHandler) retryDownload(subscription *model.Subscription, download *model.Download) error {
-	if download.TorrentHash != "" && h.qbClient != nil {
-		logger.Info("Deleting old qBittorrent torrent with payload before subscription retry",
-			"download_id", download.ID,
-			"hash", download.TorrentHash,
-			"file_path", download.FilePath,
-			"renamed_path", download.RenamedPath,
-			"configured_download_path", h.resolveBaseDownloadPath())
-		if err := h.qbClient.DeleteTorrentWithPayload(download.TorrentHash); err != nil {
-			logger.Warn("Failed to delete old torrent before subscription retry",
-				"download_id", download.ID,
-				"hash", download.TorrentHash,
-				"error", err)
-		}
-	}
-
+	oldHash := download.TorrentHash
 	var err error
 	if h.requeueSvc != nil {
 		err = h.requeueSvc.RequeueDownload(download, subscription)
@@ -757,6 +743,20 @@ func (h *SubscriptionDiagnosticsHandler) retryDownload(subscription *model.Subsc
 	}
 	if err != nil {
 		return fmt.Errorf("重置下载任务失败: %w", err)
+	}
+	if oldHash != "" && h.qbClient != nil {
+		logger.Info("Deleting old qBittorrent torrent with payload after subscription requeue",
+			"download_id", download.ID,
+			"hash", oldHash,
+			"file_path", download.FilePath,
+			"renamed_path", download.RenamedPath,
+			"configured_download_path", h.resolveBaseDownloadPath())
+		if deleteErr := h.qbClient.DeleteTorrentWithPayload(oldHash); deleteErr != nil {
+			logger.Warn("Failed to delete old torrent after subscription requeue",
+				"download_id", download.ID,
+				"hash", oldHash,
+				"error", deleteErr)
+		}
 	}
 	return nil
 }
