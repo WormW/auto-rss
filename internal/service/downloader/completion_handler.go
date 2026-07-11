@@ -26,10 +26,12 @@ type completionHandler struct {
 	qbClient        QBittorrentClient
 	db              *gorm.DB
 	mediaLibrary    MediaLibraryRefresher
+	episodeService  EpisodeCompletionService
 }
 
 type completionDownloadRepository interface {
 	Update(download *model.Download) error
+	UpdateInTx(tx *gorm.DB, download *model.Download) error
 }
 
 // MediaLibraryRefresher refreshes a media library for a completed download.
@@ -45,6 +47,7 @@ func NewCompletionHandler(
 	renamerSvc *RenameService,
 	qbClient QBittorrentClient,
 	db *gorm.DB,
+	episodeService EpisodeCompletionService,
 	mediaLibrary ...MediaLibraryRefresher,
 ) CompletionHandler {
 	var mediaSvc MediaLibraryRefresher
@@ -58,27 +61,24 @@ func NewCompletionHandler(
 		qbClient:        qbClient,
 		db:              db,
 		mediaLibrary:    mediaSvc,
+		episodeService:  episodeService,
 	}
 }
 
 // HandleComplete 处理下载完成事件
 func (h *completionHandler) HandleComplete(download *model.Download, torrent *TorrentInfo, subscription *model.Subscription) error {
+	originalDownload := *download
+	originalSubscription := *subscription
+	restoreState := func() {
+		*download = originalDownload
+		*subscription = originalSubscription
+	}
+
 	logger.Info("Download completed",
 		"id", download.ID,
 		"title", download.Title,
 		"episode", download.Episode,
 		"subscription_id", download.SubscriptionID)
-
-	// 发送下载完成通知
-	if h.notificationSvc != nil {
-		h.sendCompletionNotification(download, subscription)
-	}
-
-	// 记录下载完成时间
-	now := time.Now()
-	download.Status = model.DownloadStatusCompleted
-	download.DownloadedAt = &now
-	download.FilePath = torrent.SavePath
 
 	// 如果启用了重命名，执行文件重命名
 	// 合集种子（Episode=0）需要批量重命名所有视频文件
@@ -90,7 +90,8 @@ func (h *completionHandler) HandleComplete(download *model.Download, torrent *To
 				logger.Error("Failed to rename file",
 					"download_id", download.ID,
 					"error", err.Error())
-				// 重命名失败不阻止完成处理
+				restoreState()
+				return err
 			} else {
 				download.RenamedPath = newPath
 				logger.Info("File renamed successfully",
@@ -116,20 +117,47 @@ func (h *completionHandler) HandleComplete(download *model.Download, torrent *To
 		}
 	}
 
-	// 更新订阅统计信息
-	if err := h.updateSubscriptionStats(subscription, download); err != nil {
-		logger.Error("Failed to update subscription stats",
-			"subscription_id", subscription.ID,
-			"error", err.Error())
-		// 继续处理，不返回错误
-	}
+	// 记录下载完成时间
+	now := time.Now()
+	download.Status = model.DownloadStatusCompleted
+	download.DownloadedAt = &now
+	download.FilePath = torrent.SavePath
 
-	// 保存下载记录
-	if err := h.downloadRepo.Update(download); err != nil {
+	if download.Episode > subscription.CurrentEpisode {
+		subscription.CurrentEpisode = download.Episode
+	}
+	subscription.LastDownloadAt = &now
+
+	var err error
+	if h.db == nil {
+		err = h.downloadRepo.Update(download)
+		if err == nil && download.Episode > 0 && h.episodeService != nil {
+			err = h.episodeService.MarkDownloadCompleted(download, subscription, now)
+		}
+	} else {
+		err = h.db.Transaction(func(tx *gorm.DB) error {
+			if err := h.downloadRepo.UpdateInTx(tx, download); err != nil {
+				return err
+			}
+			if download.Episode > 0 && h.episodeService != nil {
+				if err := h.episodeService.MarkDownloadCompletedInTx(tx, download, subscription, now); err != nil {
+					return err
+				}
+			}
+			return tx.Save(subscription).Error
+		})
+	}
+	if err != nil {
+		restoreState()
 		logger.Error("Failed to update download after completion",
 			"download_id", download.ID,
 			"error", err.Error())
 		return err
+	}
+
+	// 完成状态持久化后才发送通知。
+	if h.notificationSvc != nil {
+		h.sendCompletionNotification(download, subscription)
 	}
 
 	if h.mediaLibrary != nil {
@@ -293,48 +321,6 @@ func (h *completionHandler) renameCollectionFiles(download *model.Download, subs
 	}
 
 	return renamedCount, nil
-}
-
-// updateSubscriptionStats 更新订阅统计信息（使用事务）
-func (h *completionHandler) updateSubscriptionStats(subscription *model.Subscription, download *model.Download) error {
-	// 更新当前集数
-	if download.Episode > subscription.CurrentEpisode {
-		subscription.CurrentEpisode = download.Episode
-	}
-
-	// 更新最后下载时间
-	now := time.Now()
-	subscription.LastDownloadAt = &now
-
-	// 如果数据库连接为nil，仅更新内存中的对象（用于测试）
-	if h.db == nil {
-		logger.Debug("DB is nil, skipping database update for subscription stats",
-			"subscription_id", subscription.ID)
-		return nil
-	}
-
-	// 使用事务保存到数据库
-	err := h.db.Transaction(func(tx *gorm.DB) error {
-		// 保存订阅统计
-		if err := tx.Save(subscription).Error; err != nil {
-			return err
-		}
-		return nil
-	})
-
-	if err != nil {
-		logger.Error("Failed to update subscription stats",
-			"subscription_id", subscription.ID,
-			"error", err.Error())
-		return err
-	}
-
-	logger.Info("Subscription stats updated",
-		"subscription_id", subscription.ID,
-		"current_episode", subscription.CurrentEpisode,
-		"last_download_at", subscription.LastDownloadAt)
-
-	return nil
 }
 
 // isConflictError 检查是否是冲突错误（如文件已存在）

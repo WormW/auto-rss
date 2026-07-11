@@ -304,16 +304,16 @@ func TestRetryHandler_ResetsRetryFields(t *testing.T) {
 		t.Errorf("expected LastError to be empty, got %q", updated.LastError)
 	}
 
-	if updated.Status != "downloading" {
-		t.Errorf("expected Status to be 'downloading', got %q", updated.Status)
+	if updated.Status != "pending" {
+		t.Errorf("expected Status to be 'pending', got %q", updated.Status)
 	}
 
-	if updated.TorrentHash != "new-hash-123" {
-		t.Errorf("expected TorrentHash to be updated to 'new-hash-123', got %q", updated.TorrentHash)
+	if updated.TorrentHash != "" {
+		t.Errorf("expected TorrentHash to be cleared for monitor checkpoint, got %q", updated.TorrentHash)
 	}
 }
 
-func TestRetryHandler_CallsAddTorrent(t *testing.T) {
+func TestRetryHandlerLeavesFirstAddToDownloadMonitor(t *testing.T) {
 	db, downloadRepo, configRepo := setupRetryTest(t)
 	mockQB := &mockQBittorrentClient{}
 	handler := NewDownloadHandler(downloadRepo, mockQB, configRepo)
@@ -351,22 +351,12 @@ func TestRetryHandler_CallsAddTorrent(t *testing.T) {
 		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Verify AddTorrent was called with correct parameters
-	if !mockQB.addCalled {
-		t.Error("expected AddTorrent to be called")
-	}
-
-	if mockQB.addedURL != "magnet:test-retry-url" {
-		t.Errorf("expected added URL to be 'magnet:test-retry-url', got %q", mockQB.addedURL)
-	}
-
-	// Should contain the anime name in the path
-	if mockQB.addedPath == "" {
-		t.Error("expected download path to be set")
+	if mockQB.addCalled {
+		t.Error("retry handler must leave qBittorrent AddTorrent to DownloadMonitor")
 	}
 }
 
-func TestRetryHandler_OnAddTorrentSuccess_UpdatesStatusToDownloading(t *testing.T) {
+func TestRetryHandlerQueuesPendingEvenIfAddWouldSucceed(t *testing.T) {
 	db, downloadRepo, configRepo := setupRetryTest(t)
 	mockQB := &mockQBittorrentClient{
 		addTorrentFunc: func(torrentURL, downloadPath, category string) (string, error) {
@@ -408,22 +398,22 @@ func TestRetryHandler_OnAddTorrentSuccess_UpdatesStatusToDownloading(t *testing.
 		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Verify status updated to downloading
+	// The handler does not invoke the configured AddTorrent result.
 	updated, err := downloadRepo.GetByID(testDownload.ID)
 	if err != nil {
 		t.Fatalf("failed to get updated download: %v", err)
 	}
 
-	if updated.Status != "downloading" {
-		t.Errorf("expected Status to be 'downloading', got %q", updated.Status)
+	if updated.Status != "pending" {
+		t.Errorf("expected Status to be 'pending', got %q", updated.Status)
 	}
 
-	if updated.TorrentHash != "success-hash-xyz" {
-		t.Errorf("expected TorrentHash to be 'success-hash-xyz', got %q", updated.TorrentHash)
+	if updated.TorrentHash != "" {
+		t.Errorf("expected TorrentHash to remain empty before monitor checkpoint, got %q", updated.TorrentHash)
 	}
 }
 
-func TestRetryHandler_OnAddTorrentFailure_KeepsFailedStatus(t *testing.T) {
+func TestRetryHandlerQueuesPendingEvenIfAddWouldFail(t *testing.T) {
 	db, downloadRepo, configRepo := setupRetryTest(t)
 	mockQB := &mockQBittorrentClient{
 		addTorrentFunc: func(torrentURL, downloadPath, category string) (string, error) {
@@ -460,23 +450,22 @@ func TestRetryHandler_OnAddTorrentFailure_KeepsFailedStatus(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	// Validate response - should still return 200 but with failure indication
+	// AddTorrent is deferred, so the configured qB failure is not observed here.
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Verify status stays failed and error is recorded
 	updated, err := downloadRepo.GetByID(testDownload.ID)
 	if err != nil {
 		t.Fatalf("failed to get updated download: %v", err)
 	}
 
-	if updated.Status != "failed" {
-		t.Errorf("expected Status to remain 'failed', got %q", updated.Status)
+	if updated.Status != "pending" {
+		t.Errorf("expected Status to be 'pending', got %q", updated.Status)
 	}
 
-	if updated.LastError != "qBittorrent rejected torrent" {
-		t.Errorf("expected LastError to be set, got %q", updated.LastError)
+	if updated.LastError != "" {
+		t.Errorf("expected LastError to be cleared for retry, got %q", updated.LastError)
 	}
 }
 

@@ -1,6 +1,7 @@
 package organizer
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,6 +14,92 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+type failingOrganizerMover struct{ FileMover }
+
+func (f *failingOrganizerMover) Move(string, string) error { return errors.New("move failed") }
+
+type organizerEpisodeCompletionMock struct {
+	completedInTx bool
+}
+
+func (*organizerEpisodeCompletionMock) MarkDownloadCompleted(*model.Download, *model.Subscription, time.Time) error {
+	return nil
+}
+
+func (m *organizerEpisodeCompletionMock) MarkDownloadCompletedInTx(*gorm.DB, *model.Download, *model.Subscription, time.Time) error {
+	m.completedInTx = true
+	return nil
+}
+
+func (*organizerEpisodeCompletionMock) MarkDownloadFailed(uint) error { return nil }
+func (*organizerEpisodeCompletionMock) DetachDownload(uint) error     { return nil }
+
+func TestFileOrganizerCompletesEpisodeInDownloadTransaction(t *testing.T) {
+	watchDir := t.TempDir()
+	destDir := t.TempDir()
+	filePath := filepath.Join(watchDir, "[Group] Ledger Show - 01 [1080p].mkv")
+	require.NoError(t, os.WriteFile(filePath, []byte("video"), 0600))
+	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/organizer-ledger.db"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Subscription{}, &model.Download{}))
+	subRepo := repository.NewSubscriptionRepository(db)
+	downloadRepo := repository.NewDownloadRepository(db)
+	sub := &model.Subscription{Name: "Ledger Show", Season: 1, RssURL: "https://example.test/rss"}
+	require.NoError(t, subRepo.Create(sub))
+	download := &model.Download{
+		SubscriptionID: sub.ID,
+		Title:          "Ledger Show - 01",
+		Episode:        1,
+		TorrentURL:     "https://example.test/1.torrent",
+		TorrentHash:    "organizer-ledger",
+		Status:         model.DownloadStatusDownloading,
+	}
+	require.NoError(t, downloadRepo.Create(download))
+	episodes := &organizerEpisodeCompletionMock{}
+	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "", episodes)
+	require.NoError(t, err)
+	defer organizer.Stop()
+
+	require.NoError(t, organizer.organizeFile(filePath))
+
+	assert.True(t, episodes.completedInTx)
+	persisted, err := downloadRepo.GetByID(download.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.DownloadStatusCompleted, persisted.Status)
+}
+
+func TestFileOrganizerMoveFailureKeepsDownloadActive(t *testing.T) {
+	watchDir := t.TempDir()
+	destDir := t.TempDir()
+	filePath := filepath.Join(watchDir, "[Group] Move Failure Show - 01 [1080p].mkv")
+	require.NoError(t, os.WriteFile(filePath, []byte("video"), 0600))
+	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/organizer-move-failure.db"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Subscription{}, &model.Download{}))
+	subRepo := repository.NewSubscriptionRepository(db)
+	downloadRepo := repository.NewDownloadRepository(db)
+	sub := &model.Subscription{Name: "Move Failure Show", Season: 1, RssURL: "https://example.test/rss"}
+	require.NoError(t, subRepo.Create(sub))
+	download := &model.Download{
+		SubscriptionID: sub.ID, Title: "Move Failure Show - 01", Episode: 1,
+		TorrentURL: "https://example.test/1.torrent", TorrentHash: "organizer-move-failure",
+		Status: model.DownloadStatusDownloading,
+	}
+	require.NoError(t, downloadRepo.Create(download))
+	episodes := &organizerEpisodeCompletionMock{}
+	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "", episodes)
+	require.NoError(t, err)
+	defer organizer.Stop()
+	organizer.mover = &failingOrganizerMover{FileMover: NewFileMover()}
+
+	err = organizer.organizeFile(filePath)
+	require.Error(t, err)
+	persisted, err := downloadRepo.GetByID(download.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.DownloadStatusDownloading, persisted.Status)
+	assert.False(t, episodes.completedInTx)
+}
 
 func TestFileOrganizer_organizeFile(t *testing.T) {
 	tests := []struct {
@@ -95,7 +182,7 @@ func TestFileOrganizer_organizeFile(t *testing.T) {
 			}
 
 			// Create organizer
-			organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "")
+			organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "", nil)
 			require.NoError(t, err)
 
 			// Test organize
@@ -135,7 +222,7 @@ func TestFileOrganizer_organizeFile_NonExistent(t *testing.T) {
 	subRepo := repository.NewSubscriptionRepository(db)
 	downloadRepo := repository.NewDownloadRepository(db)
 
-	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "")
+	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "", nil)
 	require.NoError(t, err)
 
 	// Try to organize non-existent file
@@ -160,7 +247,7 @@ func TestFileOrganizer_Start(t *testing.T) {
 	subRepo := repository.NewSubscriptionRepository(db)
 	downloadRepo := repository.NewDownloadRepository(db)
 
-	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "")
+	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "", nil)
 	require.NoError(t, err)
 
 	// Start should not error
@@ -213,7 +300,7 @@ func TestFileOrganizer_organizeFile_UpdatesDownloadRecord(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create organizer
-	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "")
+	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "", nil)
 	require.NoError(t, err)
 
 	// Organize file
@@ -258,7 +345,7 @@ func TestFileOrganizer_organizeFile_NoMatchingSubscription(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create organizer
-	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "")
+	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "", nil)
 	require.NoError(t, err)
 
 	// Try to organize file - should fail because no matching subscription
@@ -286,7 +373,7 @@ func TestFileOrganizer_organizeFile_PathTraversalPrevention(t *testing.T) {
 	downloadRepo := repository.NewDownloadRepository(db)
 
 	// Create organizer
-	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "")
+	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "", nil)
 	require.NoError(t, err)
 
 	// Try to organize file outside watch directory (path traversal attempt)
@@ -306,7 +393,7 @@ func TestFileOrganizer_TriggerScan(t *testing.T) {
 	subRepo := repository.NewSubscriptionRepository(db)
 	downloadRepo := repository.NewDownloadRepository(db)
 
-	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "")
+	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "", nil)
 	require.NoError(t, err)
 
 	// Start organizer first
@@ -328,7 +415,7 @@ func TestFileOrganizer_PreventsDuplicateScans(t *testing.T) {
 	subRepo := repository.NewSubscriptionRepository(db)
 	downloadRepo := repository.NewDownloadRepository(db)
 
-	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "")
+	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "", nil)
 	require.NoError(t, err)
 
 	require.True(t, organizer.beginScan())
@@ -360,7 +447,7 @@ func TestFileOrganizer_StartDoesNotAutoScanExistingFiles(t *testing.T) {
 	existingFile := filepath.Join(watchDir, "[Group] Quiet Show - 01 [1080p].mkv")
 	require.NoError(t, os.WriteFile(existingFile, []byte("test"), 0644))
 
-	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "")
+	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "", nil)
 	require.NoError(t, err)
 	require.NoError(t, organizer.Start())
 	defer organizer.Stop()
@@ -392,7 +479,7 @@ func TestFileOrganizer_StartAutoScansExistingFilesWhenEnabled(t *testing.T) {
 	existingFile := filepath.Join(watchDir, "[Group] Auto Scan Show - 01 [1080p].mkv")
 	require.NoError(t, os.WriteFile(existingFile, []byte("test"), 0644))
 
-	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "")
+	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "", nil)
 	require.NoError(t, err)
 	organizer.SetScanOnStart(true)
 	require.NoError(t, organizer.Start())
@@ -414,7 +501,7 @@ func TestFileOrganizer_Stop(t *testing.T) {
 	subRepo := repository.NewSubscriptionRepository(db)
 	downloadRepo := repository.NewDownloadRepository(db)
 
-	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "")
+	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "", nil)
 	require.NoError(t, err)
 
 	// Start and then stop

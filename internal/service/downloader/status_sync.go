@@ -26,6 +26,7 @@ type StatusSync interface {
 type statusSync struct {
 	downloadRepo    statusSyncDownloadRepository
 	notificationSvc NotificationService
+	episodeService  EpisodeCompletionService
 	gracePeriod     time.Duration
 }
 
@@ -38,10 +39,12 @@ type statusSyncDownloadRepository interface {
 func NewStatusSync(
 	downloadRepo statusSyncDownloadRepository,
 	notificationSvc NotificationService,
+	episodeService EpisodeCompletionService,
 ) StatusSync {
 	return &statusSync{
 		downloadRepo:    downloadRepo,
 		notificationSvc: notificationSvc,
+		episodeService:  episodeService,
 		gracePeriod:     ReconcileGracePeriod,
 	}
 }
@@ -92,16 +95,14 @@ func (s *statusSync) UpdateStatus(download *model.Download, torrent *TorrentInfo
 	oldStatus := download.Status
 
 	// 映射 qB 状态到内部状态
-	newStatus := mapQBStateToStatus(torrent.State)
-
-	// 如果状态是 downloading 但已完成，设置为 completed
-	if newStatus == "downloading" && isTorrentComplete(torrent) {
-		newStatus = "completed"
-	}
+	newStatus := downloadStatusForTorrent(torrent)
 
 	// 状态未变化
 	if oldStatus == newStatus {
 		return false, nil
+	}
+	if newStatus == model.DownloadStatusCompleted {
+		return true, nil
 	}
 
 	logger.Info("Download status changed",
@@ -125,6 +126,11 @@ func (s *statusSync) UpdateStatus(download *model.Download, torrent *TorrentInfo
 			"id", download.ID,
 			"error", err.Error())
 		return false, err
+	}
+	if newStatus == model.DownloadStatusFailed && s.episodeService != nil {
+		if err := s.episodeService.MarkDownloadFailed(download.ID); err != nil {
+			return false, err
+		}
 	}
 
 	return true, nil
@@ -178,6 +184,14 @@ func (s *statusSync) Reconcile(torrents []*TorrentInfo, downloadingTasks, stalle
 				"hash", hash,
 				"error", updateErr.Error())
 			continue
+		}
+		if s.episodeService != nil {
+			if markErr := s.episodeService.MarkDownloadFailed(download.ID); markErr != nil {
+				logger.Error("Failed to release episode after download reconciliation",
+					"download_id", download.ID,
+					"error", markErr.Error())
+				continue
+			}
 		}
 
 		reconciled++

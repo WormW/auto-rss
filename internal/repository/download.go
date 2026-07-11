@@ -67,7 +67,12 @@ func (r *downloadRepository) Update(download *model.Download) error {
 
 // Delete 删除下载任务
 func (r *downloadRepository) Delete(id uint) error {
-	return r.db.Delete(&model.Download{}, id).Error
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := detachEpisodeDownloadsInTx(tx, "id = ?", id); err != nil {
+			return err
+		}
+		return tx.Delete(&model.Download{}, id).Error
+	})
 }
 
 // GetByID 根据 ID 获取下载任务
@@ -166,17 +171,64 @@ func (r *downloadRepository) BatchDelete(ids []uint) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	return r.db.Delete(&model.Download{}, ids).Error
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := detachEpisodeDownloadsInTx(tx, "id IN ?", ids); err != nil {
+			return err
+		}
+		return tx.Delete(&model.Download{}, ids).Error
+	})
 }
 
 // DeleteByStatus 按状态删除下载任务
 func (r *downloadRepository) DeleteByStatus(status string) error {
-	return r.db.Where("status = ?", status).Delete(&model.Download{}).Error
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := detachEpisodeDownloadsInTx(tx, "status = ?", status); err != nil {
+			return err
+		}
+		return tx.Where("status = ?", status).Delete(&model.Download{}).Error
+	})
 }
 
 // DeleteAll 删除所有下载任务
 func (r *downloadRepository) DeleteAll() error {
-	return r.db.Where("1 = 1").Delete(&model.Download{}).Error
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := detachEpisodeDownloadsInTx(tx, "1 = 1"); err != nil {
+			return err
+		}
+		return tx.Where("1 = 1").Delete(&model.Download{}).Error
+	})
+}
+
+func detachEpisodeDownloadsInTx(tx *gorm.DB, downloadWhere string, args ...any) error {
+	if !tx.Migrator().HasTable(&model.SubscriptionEpisode{}) {
+		return nil
+	}
+
+	var downloadIDs []uint
+	if err := tx.Model(&model.Download{}).Where(downloadWhere, args...).Pluck("id", &downloadIDs).Error; err != nil {
+		return err
+	}
+	if len(downloadIDs) == 0 {
+		return nil
+	}
+
+	if err := tx.Model(&model.SubscriptionEpisode{}).
+		Where("active_download_id IN ? AND status = ?", downloadIDs, model.EpisodeStatusDownloading).
+		Updates(map[string]any{
+			"status":              model.EpisodeStatusMissing,
+			"status_source":       model.EpisodeStatusSourceAutomatic,
+			"active_download_id":  nil,
+			"active_torrent_hash": "",
+			"active_torrent_url":  "",
+			"active_title":        "",
+			"downloaded_at":       nil,
+		}).Error; err != nil {
+		return err
+	}
+
+	return tx.Model(&model.SubscriptionEpisode{}).
+		Where("active_download_id IN ?", downloadIDs).
+		Update("active_download_id", nil).Error
 }
 
 // GetFailedDownloadsReadyForRetry 获取准备好重试的失败下载任务
@@ -266,22 +318,22 @@ func (r *downloadRepository) GetDownloadHistory(filter *DownloadHistoryFilter, o
 
 // DownloadStatistics 下载统计信息
 type DownloadStatistics struct {
-	TotalCount       int64            `json:"total_count"`
-	CompletedCount   int64            `json:"completed_count"`
-	FailedCount      int64            `json:"failed_count"`
-	DownloadingCount int64            `json:"downloading_count"`
-	PendingCount     int64            `json:"pending_count"`
-	DailyStats       []DailyStat      `json:"daily_stats"`
+	TotalCount        int64              `json:"total_count"`
+	CompletedCount    int64              `json:"completed_count"`
+	FailedCount       int64              `json:"failed_count"`
+	DownloadingCount  int64              `json:"downloading_count"`
+	PendingCount      int64              `json:"pending_count"`
+	DailyStats        []DailyStat        `json:"daily_stats"`
 	SubscriptionStats []SubscriptionStat `json:"subscription_stats"`
 }
 
 // DailyStat 每日统计
 type DailyStat struct {
-	Date          string `json:"date"`
-	Count         int64  `json:"count"`
-	Completed     int64  `json:"completed"`
-	Failed        int64  `json:"failed"`
-	TotalSize     int64  `json:"total_size"`
+	Date      string `json:"date"`
+	Count     int64  `json:"count"`
+	Completed int64  `json:"completed"`
+	Failed    int64  `json:"failed"`
+	TotalSize int64  `json:"total_size"`
 }
 
 // SubscriptionStat 订阅下载统计

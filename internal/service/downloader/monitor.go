@@ -67,6 +67,7 @@ type DownloadMonitor struct {
 	retryService     *RetryService
 	notificationSvc  NotificationService
 	mediaLibrarySvc  MediaLibraryRefresher
+	episodeService   EpisodeCompletionService
 	ticker           *time.Ticker
 	stopChan         chan struct{}
 	downloadsPaused  func() bool
@@ -83,6 +84,7 @@ func NewDownloadMonitor(
 	subscriptionRepo repository.SubscriptionRepository,
 	configRepo repository.ConfigRepository,
 	renameTemplate string,
+	episodeService EpisodeCompletionService,
 	mediaLibrarySvc ...MediaLibraryRefresher,
 ) *DownloadMonitor {
 	retrySvc := NewRetryService(downloadRepo)
@@ -101,6 +103,7 @@ func NewDownloadMonitor(
 		retryService:     retrySvc,
 		renameService:    renameSvc,
 		mediaLibrarySvc:  mediaSvc,
+		episodeService:   episodeService,
 		stopChan:         make(chan struct{}),
 		downloadsPaused:  disk.IsDownloadsPaused,
 	}
@@ -110,8 +113,8 @@ func NewDownloadMonitor(
 func (m *DownloadMonitor) SetNotificationService(svc NotificationService) {
 	m.notificationSvc = svc
 	// Initialize services that need notification service
-	m.statusSync = NewStatusSync(m.downloadRepo, svc)
-	m.completionHandler = NewCompletionHandler(m.subscriptionRepo, m.downloadRepo, svc, m.renameService, m.qbClient, m.db, m.mediaLibrarySvc)
+	m.statusSync = NewStatusSync(m.downloadRepo, svc, m.episodeService)
+	m.completionHandler = NewCompletionHandler(m.subscriptionRepo, m.downloadRepo, svc, m.renameService, m.qbClient, m.db, m.episodeService, m.mediaLibrarySvc)
 }
 
 // Start 启动监控服务
@@ -271,6 +274,12 @@ func (m *DownloadMonitor) processPendingDownloads() {
 				logger.Error("Failed to mark download as failed",
 					"download_id", download.ID,
 					"error", markErr.Error())
+			} else if m.episodeService != nil {
+				if episodeErr := m.episodeService.MarkDownloadFailed(download.ID); episodeErr != nil {
+					logger.Error("Failed to release episode after pending download failure",
+						"download_id", download.ID,
+						"error", episodeErr.Error())
+				}
 			}
 			if m.notificationSvc != nil && download.RetryCount >= download.MaxRetries {
 				m.sendFailedNotification(&download, download.ErrorMessage)
@@ -383,7 +392,7 @@ func (m *DownloadMonitor) checkDownloads() {
 
 		if m.statusSync != nil {
 			changed, _ := m.statusSync.UpdateStatus(download, torrent)
-			if changed && download.Status == "completed" && m.completionHandler != nil {
+			if changed && downloadStatusForTorrent(torrent) == model.DownloadStatusCompleted && m.completionHandler != nil {
 				subscription, _ := m.subscriptionRepo.GetByID(download.SubscriptionID)
 				if subscription != nil {
 					m.completionHandler.HandleComplete(download, torrent, subscription)

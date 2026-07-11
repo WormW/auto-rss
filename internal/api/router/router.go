@@ -123,7 +123,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	appCtx.RegisterShutdownHook(diskMonitor.Stop)
 
 	// 初始化下载监控服务（在 handler 之前，因为某些 handler 可能需要它）
-	downloadMonitor := downloader.NewDownloadMonitor(db, qbClient, downloadRepo, subscriptionRepo, configRepo, renameTemplate, mediaLibrarySvc)
+	downloadMonitor := downloader.NewDownloadMonitor(db, qbClient, downloadRepo, subscriptionRepo, configRepo, renameTemplate, episodeService, mediaLibrarySvc)
 	downloadMonitor.SetNotificationService(notificationSvc)
 	downloadMonitor.Start(30 * time.Second)
 	appCtx.RegisterShutdownHook(downloadMonitor.Stop)

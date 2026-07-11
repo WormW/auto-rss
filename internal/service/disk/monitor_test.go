@@ -12,6 +12,8 @@ import (
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/repository"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -22,13 +24,43 @@ func newDiskTestMonitor(t *testing.T) (*Monitor, *gorm.DB, repository.DownloadRe
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}, &model.Config{}, &model.DiskSample{}, &model.DiskCleanupRecord{}); err != nil {
+	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}, &model.SubscriptionEpisode{}, &model.Config{}, &model.DiskSample{}, &model.DiskCleanupRecord{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	downloadRepo := repository.NewDownloadRepository(db)
 	configRepo := repository.NewConfigRepository(db)
 	monitor := NewMonitor(db, downloadRepo, repository.NewSubscriptionRepository(db), configRepo)
 	return monitor, db, downloadRepo, configRepo
+}
+
+func TestRunCleanupDetachesDownloadedEpisodeWithoutLosingResource(t *testing.T) {
+	monitor, db, downloadRepo, _ := newDiskTestMonitor(t)
+	root := t.TempDir()
+	path := filepath.Join(root, "ledger.mkv")
+	require.NoError(t, os.WriteFile(path, []byte("video"), 0600))
+	oldTime := time.Now().AddDate(0, 0, -40)
+	download := model.Download{
+		SubscriptionID: 1, Title: "ledger", Episode: 1,
+		TorrentURL: "https://example.test/ledger", TorrentHash: "disk-ledger",
+		Status: model.DownloadStatusCompleted, FilePath: path, DownloadedAt: &oldTime,
+	}
+	require.NoError(t, downloadRepo.Create(&download))
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID: 1, Episode: 1, Status: model.EpisodeStatusDownloaded,
+		StatusSource: model.EpisodeStatusSourceAutomatic, ActiveDownloadID: &download.ID,
+		ActiveTorrentHash: download.TorrentHash, ActiveTorrentURL: download.TorrentURL, ActiveTitle: download.Title,
+	}
+	require.NoError(t, db.Create(&ledger).Error)
+
+	result, err := monitor.RunCleanup(CleanupOptions{Trigger: CleanupTriggerManual, Strategy: CleanupByAge, KeepDays: 30, DownloadPath: root})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.DeletedCount)
+	after, err := repository.NewEpisodeRepository(db).GetBySubscriptionAndEpisode(1, 1)
+	require.NoError(t, err)
+	assert.Equal(t, model.EpisodeStatusDownloaded, after.Status)
+	assert.Nil(t, after.ActiveDownloadID)
+	assert.Equal(t, "disk-ledger", after.ActiveTorrentHash)
+	assert.Equal(t, download.TorrentURL, after.ActiveTorrentURL)
 }
 
 func TestDiskSamplesAndCleanupRecordsPersistForHistory(t *testing.T) {

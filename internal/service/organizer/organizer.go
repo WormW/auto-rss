@@ -36,11 +36,12 @@ type FileOrganizer struct {
 	scanRunning      bool
 	scanOnStart      bool
 	// New service interfaces
-	parser        *FileNameParser
-	matcher       SubscriptionMatcher
-	mover         FileMover
-	renameService *downloader.RenameService
-	mediaLibrary  *medialibrary.Service
+	parser         *FileNameParser
+	matcher        SubscriptionMatcher
+	mover          FileMover
+	renameService  *downloader.RenameService
+	mediaLibrary   *medialibrary.Service
+	episodeService downloader.EpisodeCompletionService
 }
 
 // NewFileOrganizer 创建文件整理服务
@@ -52,6 +53,7 @@ func NewFileOrganizer(
 	db *gorm.DB,
 	bangumiService *bangumi.BangumiService,
 	renameTemplate string,
+	episodeService downloader.EpisodeCompletionService,
 	mediaLibrarySvc ...*medialibrary.Service,
 ) (*FileOrganizer, error) {
 	watcher, err := fsnotify.NewWatcher()
@@ -85,6 +87,7 @@ func NewFileOrganizer(
 		mover:            mover,
 		renameService:    downloader.NewRenameService(renameTemplate),
 		mediaLibrary:     mediaSvc,
+		episodeService:   episodeService,
 	}, nil
 }
 
@@ -320,17 +323,6 @@ func (f *FileOrganizer) organizeFile(filePath string) error {
 		}
 	}
 
-	if download != nil && f.downloadRepo != nil {
-		download.Status = model.DownloadStatusOrganizing
-		if err := f.downloadRepo.Update(download); err != nil {
-			logger.Error("Failed to set organizing status",
-				"download_id", download.ID,
-				"error", err)
-		} else {
-			logger.Debug("Set download status to organizing", "download_id", download.ID)
-		}
-	}
-
 	newPath := f.generateNewPath(subscription, info)
 	if newPath == "" {
 		return fmt.Errorf("failed to generate new file path")
@@ -368,28 +360,40 @@ func (f *FileOrganizer) organizeFile(filePath string) error {
 		delete(f.processing, newPath)
 		f.procMux.Unlock()
 
-		if download != nil && f.downloadRepo != nil {
-			download.Status = model.DownloadStatusFailed
-			download.LastError = err.Error()
-			if updateErr := f.downloadRepo.Update(download); updateErr != nil {
-				logger.Error("Failed to update download status to failed",
-					"download_id", download.ID,
-					"error", updateErr)
-			}
-		}
-
 		return fmt.Errorf("failed to move file: %w", err)
 	}
 
 	if download != nil && f.downloadRepo != nil {
+		originalDownload := *download
+		completedAt := time.Now()
 		download.Status = model.DownloadStatusCompleted
 		download.FilePath = newPath
 		download.RenamedPath = newPath
-		if err := f.downloadRepo.Update(download); err != nil {
+		download.DownloadedAt = &completedAt
+		var updateErr error
+		if f.db == nil {
+			updateErr = f.downloadRepo.Update(download)
+			if updateErr == nil && download.Episode > 0 && f.episodeService != nil {
+				updateErr = f.episodeService.MarkDownloadCompleted(download, subscription, completedAt)
+			}
+		} else {
+			updateErr = f.db.Transaction(func(tx *gorm.DB) error {
+				if err := f.downloadRepo.UpdateInTx(tx, download); err != nil {
+					return err
+				}
+				if download.Episode > 0 && f.episodeService != nil {
+					return f.episodeService.MarkDownloadCompletedInTx(tx, download, subscription, completedAt)
+				}
+				return nil
+			})
+		}
+		if updateErr != nil {
+			*download = originalDownload
 			logger.Error("File moved but failed to update database",
 				"download_id", download.ID,
 				"new_path", newPath,
-				"error", err)
+				"error", updateErr)
+			return fmt.Errorf("failed to persist organized download: %w", updateErr)
 		} else {
 			logger.Debug("Updated download status to completed",
 				"download_id", download.ID,

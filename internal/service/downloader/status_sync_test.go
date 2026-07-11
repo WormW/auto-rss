@@ -225,7 +225,7 @@ func TestStatusSync_UpdateStatus(t *testing.T) {
 				State: "uploading",
 			},
 			expectedChange: true,
-			expectedStatus: "completed",
+			expectedStatus: "downloading",
 		},
 		{
 			name: "status changed to completed via progress",
@@ -239,7 +239,7 @@ func TestStatusSync_UpdateStatus(t *testing.T) {
 				Progress: 0.9999,
 			},
 			expectedChange: true,
-			expectedStatus: "completed",
+			expectedStatus: "downloading",
 		},
 		{
 			name: "status changed to failed",
@@ -273,7 +273,7 @@ func TestStatusSync_UpdateStatus(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			mockRepo := &mockDownloadRepo{}
 			mockNotify := &mockNotificationService{}
-			sync := NewStatusSync(mockRepo, mockNotify)
+			sync := NewStatusSync(mockRepo, mockNotify, nil)
 
 			changed, err := sync.UpdateStatus(tt.download, tt.torrent)
 			if err != nil {
@@ -294,7 +294,7 @@ func TestStatusSync_UpdateStatus(t *testing.T) {
 func TestStatusSync_UpdateStatus_SetsErrorMessage(t *testing.T) {
 	mockRepo := &mockDownloadRepo{}
 	mockNotify := &mockNotificationService{}
-	sync := NewStatusSync(mockRepo, mockNotify)
+	sync := NewStatusSync(mockRepo, mockNotify, nil)
 
 	download := &model.Download{
 		ID:     1,
@@ -312,6 +312,46 @@ func TestStatusSync_UpdateStatus_SetsErrorMessage(t *testing.T) {
 
 	if download.ErrorMessage == "" {
 		t.Error("Expected ErrorMessage to be set for failed status")
+	}
+}
+
+func TestStatusSyncFailedStatusMarksEpisodeFailed(t *testing.T) {
+	episodes := &mockEpisodeCompletionService{}
+	sync := NewStatusSync(&mockDownloadRepo{}, nil, episodes)
+	download := &model.Download{ID: 42, Status: model.DownloadStatusDownloading}
+
+	changed, err := sync.UpdateStatus(download, &TorrentInfo{Hash: "failed-42", State: StateError})
+	if err != nil {
+		t.Fatalf("UpdateStatus: %v", err)
+	}
+	if !changed {
+		t.Fatal("failed status should be reported as changed")
+	}
+	if len(episodes.failedIDs) != 1 || episodes.failedIDs[0] != download.ID {
+		t.Fatalf("failed episode calls = %v, want [%d]", episodes.failedIDs, download.ID)
+	}
+}
+
+func TestStatusSyncDefersCompletedPersistenceToCompletionHandler(t *testing.T) {
+	updates := 0
+	sync := NewStatusSync(&mockDownloadRepo{updateFunc: func(*model.Download) error {
+		updates++
+		return nil
+	}}, nil, nil)
+	download := &model.Download{ID: 9, Status: model.DownloadStatusDownloading}
+
+	changed, err := sync.UpdateStatus(download, &TorrentInfo{Hash: "complete-9", State: StateCompleted})
+	if err != nil {
+		t.Fatalf("UpdateStatus: %v", err)
+	}
+	if !changed {
+		t.Fatal("completion should be reported to the monitor")
+	}
+	if download.Status != model.DownloadStatusDownloading {
+		t.Fatalf("status = %q, want deferred %q", download.Status, model.DownloadStatusDownloading)
+	}
+	if updates != 0 {
+		t.Fatalf("repository updates = %d, want 0 before completion handler", updates)
 	}
 }
 
@@ -336,7 +376,7 @@ func TestStatusSync_Sync(t *testing.T) {
 		},
 	}
 	mockNotify := &mockNotificationService{}
-	sync := NewStatusSync(mockRepo, mockNotify)
+	sync := NewStatusSync(mockRepo, mockNotify, nil)
 
 	torrents := []*TorrentInfo{
 		{Hash: "abc123", State: "uploading"},   // will change to completed
@@ -348,13 +388,9 @@ func TestStatusSync_Sync(t *testing.T) {
 		t.Fatalf("Sync() error = %v", err)
 	}
 
-	// Only one download should be updated (the one found in DB)
-	if len(updatedDownloads) != 1 {
-		t.Errorf("Expected 1 download to be updated, got %d", len(updatedDownloads))
-	}
-
-	if len(updatedDownloads) > 0 && updatedDownloads[0].Status != "completed" {
-		t.Errorf("Expected status to be 'completed', got %s", updatedDownloads[0].Status)
+	// Completion persistence belongs to CompletionHandler after import succeeds.
+	if len(updatedDownloads) != 0 {
+		t.Errorf("Expected completion update to be deferred, got %d repository updates", len(updatedDownloads))
 	}
 }
 
@@ -365,7 +401,7 @@ func TestStatusSync_Sync_RepositoryError(t *testing.T) {
 		},
 	}
 	mockNotify := &mockNotificationService{}
-	sync := NewStatusSync(mockRepo, mockNotify)
+	sync := NewStatusSync(mockRepo, mockNotify, nil)
 
 	torrents := []*TorrentInfo{
 		{Hash: "abc123", State: "downloading"},
@@ -459,7 +495,7 @@ func TestStatusSync_Reconcile(t *testing.T) {
 				},
 			}
 			mockNotify := &mockNotificationService{}
-			sync := NewStatusSync(mockRepo, mockNotify)
+			sync := NewStatusSync(mockRepo, mockNotify, nil)
 
 			reconciled, skipped, err := sync.Reconcile(tt.torrents, tt.downloadingTasks, tt.stalledTasks)
 			if err != nil {
@@ -490,7 +526,7 @@ func TestStatusSync_Reconcile_SendsNotification(t *testing.T) {
 		},
 	}
 	mockNotify := &mockNotificationService{}
-	sync := NewStatusSync(mockRepo, mockNotify)
+	sync := NewStatusSync(mockRepo, mockNotify, nil)
 
 	torrents := []*TorrentInfo{}
 	downloadingTasks := []model.Download{
@@ -517,7 +553,7 @@ func TestStatusSync_Reconcile_RepositoryError(t *testing.T) {
 		},
 	}
 	mockNotify := &mockNotificationService{}
-	sync := NewStatusSync(mockRepo, mockNotify)
+	sync := NewStatusSync(mockRepo, mockNotify, nil)
 
 	torrents := []*TorrentInfo{}
 	downloadingTasks := []model.Download{

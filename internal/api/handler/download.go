@@ -6,9 +6,7 @@ import (
 	"strings"
 
 	"github.com/WormW/auto-rss/internal/model"
-	"github.com/WormW/auto-rss/internal/pkg/constants"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
-	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/gin-gonic/gin"
@@ -350,53 +348,6 @@ func (h *DownloadHandler) Retry(c *gin.Context) {
 			"message": "Failed to retry download",
 		})
 		return
-	}
-
-	// 5. 如果 qbClient 可用，立即添加新种子
-	if h.qbClient != nil {
-		// 获取下载路径配置
-		basePath := constants.DefaultDownloadPath
-		if h.configRepo != nil {
-			if config, err := h.configRepo.Get("download_path"); err == nil && config.Value != "" {
-				basePath = config.Value
-			}
-		}
-
-		// 生成下载路径（包含番剧名子目录）
-		downloadPath := basePath
-		if download.Subscription.Name != "" {
-			downloadPath = utils.GenerateDownloadPath(basePath, download.Subscription.Name)
-		}
-
-		// 添加种子到 qBittorrent
-		torrentHash, err := h.qbClient.AddTorrent(download.TorrentURL, downloadPath, "")
-		if err != nil {
-			logger.Error("Failed to add torrent for retry",
-				"download_id", id,
-				"torrent_url", download.TorrentURL,
-				"error", err.Error())
-			download.Status = "failed"
-			download.LastError = err.Error()
-			h.repo.Update(download)
-			c.JSON(http.StatusOK, gin.H{
-				"code":    500,
-				"message": "Failed to add torrent: " + err.Error(),
-			})
-			return
-		}
-
-		// 更新为下载中状态
-		download.Status = "downloading"
-		download.TorrentHash = torrentHash
-		if err := h.repo.Update(download); err != nil {
-			logger.Error("Failed to update download status after retry",
-				"download_id", id,
-				"error", err.Error())
-		}
-
-		logger.Info("Retry successful - torrent added",
-			"download_id", id,
-			"new_hash", torrentHash)
 	}
 
 	c.JSON(http.StatusOK, gin.H{

@@ -61,6 +61,7 @@ func TestDownloadMonitorOwnsFirstAddAndReplacesRSSHash(t *testing.T) {
 		repository.NewSubscriptionRepository(db),
 		repository.NewConfigRepository(db),
 		"",
+		nil,
 	)
 	monitor.SetNotificationService(nil)
 	monitor.checkDownloads()
@@ -115,6 +116,7 @@ func TestDownloadMonitorLeavesPendingOutboxUntouchedWhileDownloadsPaused(t *test
 		repository.NewSubscriptionRepository(db),
 		repository.NewConfigRepository(db),
 		"",
+		nil,
 	)
 	monitor.SetNotificationService(nil)
 	paused := true
@@ -137,6 +139,38 @@ func TestDownloadMonitorLeavesPendingOutboxUntouchedWhileDownloadsPaused(t *test
 	assert.Equal(t, model.DownloadStatusDownloading, afterResume.Status)
 	assert.Equal(t, "paused-actual-hash", afterResume.TorrentHash)
 	assert.Equal(t, AutoRssCategory, qb.categoryForHash("paused-actual-hash"))
+}
+
+func TestDownloadMonitorMarksEpisodeFailedWhenPendingAddFails(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/pending-failure.db"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Subscription{}, &model.Download{}, &model.Config{}))
+	sub := model.Subscription{Name: "Failure Show", Status: "active"}
+	require.NoError(t, db.Create(&sub).Error)
+	download := model.Download{
+		SubscriptionID: sub.ID,
+		Title:          "Failure Show - 01",
+		Episode:        1,
+		TorrentURL:     "magnet:?xt=urn:btih:pending-failure",
+		Status:         model.DownloadStatusPending,
+		MaxRetries:     1,
+	}
+	require.NoError(t, db.Create(&download).Error)
+	episodes := &mockEpisodeCompletionService{}
+	monitor := NewDownloadMonitor(
+		db,
+		&retryLedgerQBClient{addErr: errors.New("qB unavailable")},
+		repository.NewDownloadRepository(db),
+		repository.NewSubscriptionRepository(db),
+		repository.NewConfigRepository(db),
+		"",
+		episodes,
+	)
+	monitor.SetNotificationService(nil)
+
+	monitor.processPendingDownloads()
+
+	assert.Equal(t, []uint{download.ID}, episodes.failedIDs)
 }
 
 func TestParsePendingDownloadCategory(t *testing.T) {
@@ -168,6 +202,7 @@ func TestParsePendingDownloadCategory(t *testing.T) {
 
 type retryLedgerQBClient struct {
 	returnHash       string
+	addErr           error
 	torrents         []*TorrentInfo
 	addCategories    []string
 	queryCategories  []string
@@ -183,6 +218,9 @@ func (q *retryLedgerQBClient) Login(string, string, string) error          { ret
 func (q *retryLedgerQBClient) TestConnection(string, string, string) error { return nil }
 func (q *retryLedgerQBClient) AddTorrent(_ string, _ string, category string) (string, error) {
 	q.addCategories = append(q.addCategories, category)
+	if q.addErr != nil {
+		return "", q.addErr
+	}
 	q.torrents = append(q.torrents, &TorrentInfo{Hash: q.returnHash, State: StateDownloading, Category: category})
 	return q.returnHash, nil
 }

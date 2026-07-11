@@ -21,6 +21,17 @@ func mapQBStateToStatus(qbState string) string {
 	}
 }
 
+func downloadStatusForTorrent(torrent *TorrentInfo) string {
+	if torrent == nil {
+		return model.DownloadStatusStalled
+	}
+	status := mapQBStateToStatus(torrent.State)
+	if status == model.DownloadStatusDownloading && isTorrentComplete(torrent) {
+		return model.DownloadStatusCompleted
+	}
+	return status
+}
+
 // isTorrentComplete 检查种子是否已完成
 func isTorrentComplete(torrent *TorrentInfo) bool {
 	if torrent == nil {
