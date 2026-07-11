@@ -73,6 +73,32 @@ func TestTerminalManualRetryDoesNotStealEpisodeFromOtherDownload(t *testing.T) {
 	assert.False(t, qb.deleteWithPayloadCalled)
 }
 
+func TestEpisodeManualRetryFailsClosedWithoutLifecycleService(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "missing-lifecycle.db")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Subscription{}, &model.Download{}))
+	sub := model.Subscription{Name: "Missing Lifecycle", Status: "active"}
+	require.NoError(t, db.Create(&sub).Error)
+	download := model.Download{
+		SubscriptionID: sub.ID, Title: "episode", Episode: 1, TorrentURL: "magnet:episode",
+		TorrentHash: "missing-lifecycle-hash", Status: model.DownloadStatusFailed,
+	}
+	require.NoError(t, db.Create(&download).Error)
+	repo := repository.NewDownloadRepository(db)
+	handler := NewDownloadHandler(repo, &mockQBittorrentClient{}, nil)
+	router := gin.New()
+	router.POST("/downloads/:id/retry", handler.Retry)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, fmt.Sprintf("/downloads/%d/retry", download.ID), nil))
+
+	require.Equal(t, http.StatusInternalServerError, response.Code)
+	persisted, err := repo.GetByID(download.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.DownloadStatusFailed, persisted.Status)
+	assert.Equal(t, "missing-lifecycle-hash", persisted.TorrentHash)
+}
+
 func TestManualRetryOwnedEpisodeGuardsDoNotDeletePayload(t *testing.T) {
 	for _, status := range []string{
 		model.EpisodeStatusDownloaded,
@@ -146,7 +172,7 @@ func TestManualRetrySaveFailureDoesNotDeletePayload(t *testing.T) {
 	require.NoError(t, db.Exec(`
 		CREATE TRIGGER fail_handler_requeue
 		BEFORE UPDATE OF status ON downloads
-		WHEN NEW.status = 'pending'
+		WHEN NEW.status = 'retry_cleanup'
 		BEGIN
 			SELECT RAISE(ABORT, 'injected handler requeue failure');
 		END;
@@ -223,16 +249,7 @@ func TestTerminalManualRetryReclaimsEpisodeThroughCompletion(t *testing.T) {
 	require.Equal(t, model.EpisodeStatusMissing, failedLedger.Status)
 	require.Nil(t, failedLedger.ActiveDownloadID)
 
-	deleteObservedCommittedRequeue := false
-	qb := &mockQBittorrentClient{deleteTorrentFunc: func(string, bool) error {
-		persisted, downloadErr := downloadRepo.GetByID(download.ID)
-		attached, ledgerErr := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
-		deleteObservedCommittedRequeue = downloadErr == nil && ledgerErr == nil &&
-			persisted.Status == model.DownloadStatusPending && persisted.TorrentHash == "" &&
-			attached.Status == model.EpisodeStatusDownloading && attached.ActiveDownloadID != nil &&
-			*attached.ActiveDownloadID == download.ID
-		return nil
-	}}
+	qb := &mockQBittorrentClient{}
 	handler := NewDownloadHandler(downloadRepo, qb, nil, episodeService)
 	router := gin.New()
 	router.POST("/downloads/:id/retry", handler.Retry)
@@ -242,10 +259,10 @@ func TestTerminalManualRetryReclaimsEpisodeThroughCompletion(t *testing.T) {
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 	retried, err := downloadRepo.GetByID(download.ID)
 	require.NoError(t, err)
-	assert.Equal(t, model.DownloadStatusPending, retried.Status)
-	assert.Empty(t, retried.TorrentHash)
+	assert.Equal(t, model.DownloadStatusRetryCleanup, retried.Status)
+	assert.Equal(t, "manual-old-hash", retried.TorrentHash)
 	assert.False(t, qb.addCalled)
-	assert.True(t, deleteObservedCommittedRequeue)
+	assert.False(t, qb.deleteWithPayloadCalled)
 	afterRetry, err := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
 	require.NoError(t, err)
 	assert.Equal(t, model.EpisodeStatusDownloading, afterRetry.Status)

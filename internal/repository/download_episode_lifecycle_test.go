@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"fmt"
+	"path/filepath"
 	"testing"
 
 	"github.com/WormW/auto-rss/internal/model"
@@ -132,4 +134,53 @@ func TestDownloadRepositoryDeleteSupportsLegacySchemaWithoutEpisodeTable(t *test
 	require.NoError(t, repo.Create(&download))
 
 	require.NoError(t, repo.Delete(download.ID))
+}
+
+func TestDownloadRepositoryBulkDeletesExceedSQLiteVariableLimit(t *testing.T) {
+	const rowCount = 32770
+	tests := []struct {
+		name   string
+		remove func(DownloadRepository) error
+	}{
+		{
+			name: "batch",
+			remove: func(repo DownloadRepository) error {
+				ids := make([]uint, rowCount)
+				for i := range ids {
+					ids[i] = uint(i + 1)
+				}
+				return repo.BatchDelete(ids)
+			},
+		},
+		{name: "status", remove: func(repo DownloadRepository) error { return repo.DeleteByStatus(model.DownloadStatusFailed) }},
+		{name: "all", remove: func(repo DownloadRepository) error { return repo.DeleteAll() }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), fmt.Sprintf("%s.db", tt.name))), &gorm.Config{})
+			require.NoError(t, err)
+			require.NoError(t, db.AutoMigrate(&model.Download{}, &model.SubscriptionEpisode{}))
+			require.NoError(t, db.Exec(`
+				WITH RECURSIVE seq(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM seq WHERE x < ?)
+				INSERT INTO downloads (subscription_id, title, episode, torrent_url, torrent_hash, status, created_at, updated_at)
+				SELECT 1, 'bulk-' || x, x, 'magnet:' || x, 'bulk-hash-' || x, 'failed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM seq
+			`, rowCount).Error)
+			require.NoError(t, db.Exec(`
+				INSERT INTO subscription_episodes
+					(subscription_id, episode, status, status_source, active_download_id, active_torrent_hash, created_at, updated_at)
+				SELECT 1, id, 'downloading', 'automatic', id, torrent_hash, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM downloads
+			`).Error)
+
+			require.NoError(t, tt.remove(NewDownloadRepository(db)))
+
+			var downloads int64
+			require.NoError(t, db.Model(&model.Download{}).Count(&downloads).Error)
+			assert.Zero(t, downloads)
+			var detached int64
+			require.NoError(t, db.Model(&model.SubscriptionEpisode{}).
+				Where("status = ? AND active_download_id IS NULL", model.EpisodeStatusMissing).
+				Count(&detached).Error)
+			assert.EqualValues(t, rowCount, detached)
+		})
+	}
 }

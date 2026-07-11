@@ -274,8 +274,8 @@ func (h *SubscriptionDiagnosticsHandler) RetryFailed(c *gin.Context) {
 
 		response.Retried++
 		result.Success = true
-		result.Status = model.DownloadStatusPending
-		result.Message = "已重置为待下载，等待后台调度"
+		result.Status = model.DownloadStatusRetryCleanup
+		result.Message = "已排队清理旧下载，清理完成后将自动重试"
 		response.Results = append(response.Results, result)
 	}
 
@@ -733,30 +733,17 @@ func (h *SubscriptionDiagnosticsHandler) buildActions(subscription *model.Subscr
 }
 
 func (h *SubscriptionDiagnosticsHandler) retryDownload(subscription *model.Subscription, download *model.Download) error {
-	oldHash := download.TorrentHash
 	var err error
 	if h.requeueSvc != nil {
 		err = h.requeueSvc.RequeueDownload(download, subscription)
+	} else if download.Episode > 0 {
+		err = errEpisodeRetryLifecycleUnavailable
 	} else {
 		resetDownloadForManualRetry(download)
 		err = h.downloadRepo.Update(download)
 	}
 	if err != nil {
 		return fmt.Errorf("重置下载任务失败: %w", err)
-	}
-	if oldHash != "" && h.qbClient != nil {
-		logger.Info("Deleting old qBittorrent torrent with payload after subscription requeue",
-			"download_id", download.ID,
-			"hash", oldHash,
-			"file_path", download.FilePath,
-			"renamed_path", download.RenamedPath,
-			"configured_download_path", h.resolveBaseDownloadPath())
-		if deleteErr := h.qbClient.DeleteTorrentWithPayload(oldHash); deleteErr != nil {
-			logger.Warn("Failed to delete old torrent after subscription requeue",
-				"download_id", download.ID,
-				"hash", oldHash,
-				"error", deleteErr)
-		}
 	}
 	return nil
 }

@@ -112,6 +112,7 @@ func (s *statusSync) UpdateStatus(download *model.Download, torrent *TorrentInfo
 		"new_status", newStatus,
 		"progress", torrent.Progress)
 
+	original := *download
 	// 更新状态
 	download.Status = newStatus
 
@@ -121,18 +122,19 @@ func (s *statusSync) UpdateStatus(download *model.Download, torrent *TorrentInfo
 	}
 
 	// 保存到数据库
-	if err := s.downloadRepo.Update(download); err != nil {
+	var persistErr error
+	if newStatus == model.DownloadStatusFailed {
+		persistErr = persistDownloadFailure(s.downloadRepo, s.episodeService, download, shouldReleaseEpisodeAfterFailure(download))
+	} else {
+		persistErr = s.downloadRepo.Update(download)
+	}
+	if persistErr != nil {
+		*download = original
 		logger.Error("Failed to update download status",
 			"id", download.ID,
-			"error", err.Error())
-		return false, err
+			"error", persistErr.Error())
+		return false, persistErr
 	}
-	if newStatus == model.DownloadStatusFailed && s.episodeService != nil && shouldReleaseEpisodeAfterFailure(download) {
-		if err := s.episodeService.MarkDownloadFailed(download.ID); err != nil {
-			return false, err
-		}
-	}
-
 	return true, nil
 }
 
@@ -175,25 +177,18 @@ func (s *statusSync) Reconcile(torrents []*TorrentInfo, downloadingTasks, stalle
 		}
 
 		// 标记为失败
+		original := *download
 		download.Status = "failed"
 		download.ErrorMessage = "Torrent missing in qBittorrent during monitor reconciliation"
 
-		if updateErr := s.downloadRepo.Update(download); updateErr != nil {
+		if updateErr := persistDownloadFailure(s.downloadRepo, s.episodeService, download, shouldReleaseEpisodeAfterFailure(download)); updateErr != nil {
+			*download = original
 			logger.Error("Failed to reconcile missing downloading task",
 				"download_id", download.ID,
 				"hash", hash,
 				"error", updateErr.Error())
 			continue
 		}
-		if s.episodeService != nil && shouldReleaseEpisodeAfterFailure(download) {
-			if markErr := s.episodeService.MarkDownloadFailed(download.ID); markErr != nil {
-				logger.Error("Failed to release episode after download reconciliation",
-					"download_id", download.ID,
-					"error", markErr.Error())
-				continue
-			}
-		}
-
 		reconciled++
 
 		// 发送下载失败通知

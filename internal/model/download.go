@@ -4,12 +4,14 @@ import "time"
 
 // Download status constants
 const (
-	DownloadStatusPending     = "pending"
-	DownloadStatusDownloading = "downloading"
-	DownloadStatusStalled     = "stalled"
-	DownloadStatusCompleted   = "completed"
-	DownloadStatusFailed      = "failed"
-	DownloadStatusOrganizing  = "organizing"
+	DownloadStatusPending                = "pending"
+	DownloadStatusRetryCleanup           = "retry_cleanup"
+	DownloadStatusRetryCleanupProcessing = "retry_cleanup_processing"
+	DownloadStatusDownloading            = "downloading"
+	DownloadStatusStalled                = "stalled"
+	DownloadStatusCompleted              = "completed"
+	DownloadStatusFailed                 = "failed"
+	DownloadStatusOrganizing             = "organizing"
 )
 
 // Download 下载任务模型

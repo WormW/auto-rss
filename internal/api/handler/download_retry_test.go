@@ -185,7 +185,7 @@ func TestRetryHandler_Returns404IfDownloadNotFound(t *testing.T) {
 	}
 }
 
-func TestRetryHandler_CallsDeleteTorrentWhenHashExists(t *testing.T) {
+func TestRetryHandlerQueuesCleanupWithoutDeletingTorrent(t *testing.T) {
 	db, downloadRepo, configRepo := setupRetryTest(t)
 	mockQB := &mockQBittorrentClient{}
 	handler := NewDownloadHandler(downloadRepo, mockQB, configRepo)
@@ -224,17 +224,8 @@ func TestRetryHandler_CallsDeleteTorrentWhenHashExists(t *testing.T) {
 		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Verify explicit payload deletion was called.
-	if !mockQB.deleteWithPayloadCalled {
-		t.Error("expected DeleteTorrentWithPayload to be called")
-	}
-
-	if !mockQB.lastDeleteFiles {
-		t.Error("expected retry to request payload deletion")
-	}
-
-	if mockQB.deletedHash != "test-hash-abc123" {
-		t.Errorf("expected deleted hash to be 'test-hash-abc123', got %q", mockQB.deletedHash)
+	if mockQB.deleteWithPayloadCalled {
+		t.Error("retry handler must leave payload cleanup to DownloadMonitor")
 	}
 }
 
@@ -304,12 +295,12 @@ func TestRetryHandler_ResetsRetryFields(t *testing.T) {
 		t.Errorf("expected LastError to be empty, got %q", updated.LastError)
 	}
 
-	if updated.Status != "pending" {
-		t.Errorf("expected Status to be 'pending', got %q", updated.Status)
+	if updated.Status != model.DownloadStatusRetryCleanup {
+		t.Errorf("expected Status to be retry_cleanup, got %q", updated.Status)
 	}
 
-	if updated.TorrentHash != "" {
-		t.Errorf("expected TorrentHash to be cleared for monitor checkpoint, got %q", updated.TorrentHash)
+	if updated.TorrentHash != "test-hash-1" {
+		t.Errorf("expected old TorrentHash cleanup checkpoint, got %q", updated.TorrentHash)
 	}
 }
 
@@ -404,12 +395,12 @@ func TestRetryHandlerQueuesPendingEvenIfAddWouldSucceed(t *testing.T) {
 		t.Fatalf("failed to get updated download: %v", err)
 	}
 
-	if updated.Status != "pending" {
-		t.Errorf("expected Status to be 'pending', got %q", updated.Status)
+	if updated.Status != model.DownloadStatusRetryCleanup {
+		t.Errorf("expected Status to be retry_cleanup, got %q", updated.Status)
 	}
 
-	if updated.TorrentHash != "" {
-		t.Errorf("expected TorrentHash to remain empty before monitor checkpoint, got %q", updated.TorrentHash)
+	if updated.TorrentHash != "old-hash" {
+		t.Errorf("expected old hash cleanup checkpoint, got %q", updated.TorrentHash)
 	}
 }
 
@@ -460,8 +451,8 @@ func TestRetryHandlerQueuesPendingEvenIfAddWouldFail(t *testing.T) {
 		t.Fatalf("failed to get updated download: %v", err)
 	}
 
-	if updated.Status != "pending" {
-		t.Errorf("expected Status to be 'pending', got %q", updated.Status)
+	if updated.Status != model.DownloadStatusRetryCleanup {
+		t.Errorf("expected Status to be retry_cleanup, got %q", updated.Status)
 	}
 
 	if updated.LastError != "" {
@@ -537,12 +528,12 @@ func TestRetryHandler_NoQBClient_SkipsTorrentOperations(t *testing.T) {
 		t.Errorf("expected RetryCount to be reset to 0, got %d", updated.RetryCount)
 	}
 
-	if updated.Status != "pending" {
-		t.Errorf("expected Status to be 'pending' when no qbClient, got %q", updated.Status)
+	if updated.Status != model.DownloadStatusRetryCleanup {
+		t.Errorf("expected Status to be retry_cleanup when no qbClient, got %q", updated.Status)
 	}
 }
 
-func TestRetryHandler_DeleteTorrentError_Ignored(t *testing.T) {
+func TestRetryHandlerDoesNotInvokeDeleteTorrent(t *testing.T) {
 	db, downloadRepo, configRepo := setupRetryTest(t)
 	mockQB := &mockQBittorrentClient{
 		deleteTorrentFunc: func(hash string, deleteFiles bool) error {
@@ -584,12 +575,7 @@ func TestRetryHandler_DeleteTorrentError_Ignored(t *testing.T) {
 		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Verify retry still proceeded after explicit payload deletion failed.
-	if !mockQB.deleteWithPayloadCalled {
-		t.Error("expected DeleteTorrentWithPayload to be called")
-	}
-
-	if !mockQB.lastDeleteFiles {
-		t.Error("expected retry to request payload deletion")
+	if mockQB.deleteWithPayloadCalled {
+		t.Error("retry handler must not call DeleteTorrentWithPayload")
 	}
 }

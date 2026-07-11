@@ -30,9 +30,15 @@ const (
 )
 
 const pendingDownloadCategoryPrefix = AutoRssCategory + ":pending:"
+const retryTorrentPlaceholderPrefix = AutoRssCategory + ":retry:"
+const retryCleanupLeaseTimeout = 5 * time.Minute
 
 func pendingDownloadCategory(downloadID uint) string {
 	return pendingDownloadCategoryPrefix + strconv.FormatUint(uint64(downloadID), 10)
+}
+
+func retryTorrentPlaceholder(downloadID uint) string {
+	return retryTorrentPlaceholderPrefix + strconv.FormatUint(uint64(downloadID), 10)
 }
 
 func parsePendingDownloadCategory(category string) (uint, bool) {
@@ -151,6 +157,8 @@ func (m *DownloadMonitor) Stop() {
 
 // processPendingDownloads 处理等待中的下载任务
 func (m *DownloadMonitor) processPendingDownloads() {
+	m.processRetryCleanupDownloads()
+
 	if m.areDownloadsPaused() {
 		logger.Info("Skipping pending downloads because downloads are paused")
 		return
@@ -270,18 +278,20 @@ func (m *DownloadMonitor) processPendingDownloads() {
 				"download_id", download.ID,
 				"title", download.Title,
 				"error", err.Error())
-			if markErr := m.retryService.MarkFailed(&download, err, "qbittorrent_add_failed"); markErr != nil {
+			original := download
+			m.retryService.PrepareFailure(&download, err, "qbittorrent_add_failed")
+			releaseEpisode := shouldReleaseEpisodeAfterFailure(&download)
+			failurePersisted := false
+			if markErr := persistDownloadFailure(m.downloadRepo, m.episodeService, &download, releaseEpisode); markErr != nil {
+				download = original
 				logger.Error("Failed to mark download as failed",
 					"download_id", download.ID,
 					"error", markErr.Error())
-			} else if m.episodeService != nil && shouldReleaseEpisodeAfterFailure(&download) {
-				if episodeErr := m.episodeService.MarkDownloadFailed(download.ID); episodeErr != nil {
-					logger.Error("Failed to release episode after pending download failure",
-						"download_id", download.ID,
-						"error", episodeErr.Error())
-				}
+			} else {
+				failurePersisted = true
+				m.retryService.logFailure(&download, err, "qbittorrent_add_failed")
 			}
-			if m.notificationSvc != nil && download.RetryCount >= download.MaxRetries {
+			if m.notificationSvc != nil && failurePersisted && releaseEpisode {
 				m.sendFailedNotification(&download, download.ErrorMessage)
 			}
 			continue
@@ -295,6 +305,72 @@ func (m *DownloadMonitor) processPendingDownloads() {
 		}
 
 		m.checkpointPendingDownload(&download, torrentHash)
+	}
+}
+
+func (m *DownloadMonitor) processRetryCleanupDownloads() {
+	if m.db == nil || m.qbClient == nil {
+		return
+	}
+	now := time.Now()
+	if err := m.db.Model(&model.Download{}).
+		Where("status = ? AND updated_at < ?", model.DownloadStatusRetryCleanupProcessing, now.Add(-retryCleanupLeaseTimeout)).
+		Updates(map[string]any{"status": model.DownloadStatusRetryCleanup, "updated_at": now}).Error; err != nil {
+		logger.Error("Failed to recover stale retry cleanup claims", "error", err.Error())
+		return
+	}
+	cleanupDownloads, _, err := m.downloadRepo.List(0, 10, model.DownloadStatusRetryCleanup)
+	if err != nil {
+		logger.Error("Failed to get retry cleanup downloads", "error", err.Error())
+		return
+	}
+	for i := range cleanupDownloads {
+		download := &cleanupDownloads[i]
+		oldHash := strings.TrimSpace(download.TorrentHash)
+		claim := m.db.Model(&model.Download{}).
+			Where("id = ? AND status = ? AND torrent_hash = ?", download.ID, model.DownloadStatusRetryCleanup, download.TorrentHash).
+			Updates(map[string]any{"status": model.DownloadStatusRetryCleanupProcessing, "updated_at": time.Now()})
+		if claim.Error != nil {
+			logger.Error("Failed to claim retry cleanup", "download_id", download.ID, "error", claim.Error.Error())
+			continue
+		}
+		if claim.RowsAffected != 1 {
+			continue
+		}
+		if oldHash != "" {
+			if err := m.qbClient.DeleteTorrentWithPayload(oldHash); err != nil {
+				logger.Warn("Failed to delete retry cleanup torrent; checkpoint retained",
+					"download_id", download.ID, "hash", oldHash, "error", err.Error())
+				m.releaseRetryCleanupClaim(download)
+				continue
+			}
+		}
+		result := m.db.Model(&model.Download{}).
+			Where("id = ? AND status = ? AND torrent_hash = ?", download.ID, model.DownloadStatusRetryCleanupProcessing, download.TorrentHash).
+			Updates(map[string]any{
+				"status":       model.DownloadStatusPending,
+				"torrent_hash": retryTorrentPlaceholder(download.ID),
+			})
+		if result.Error != nil {
+			logger.Error("Failed to finalize retry cleanup; checkpoint retained",
+				"download_id", download.ID, "hash", oldHash, "error", result.Error.Error())
+			m.releaseRetryCleanupClaim(download)
+			continue
+		}
+		if result.RowsAffected != 1 {
+			logger.Debug("Retry cleanup checkpoint changed before finalize", "download_id", download.ID)
+		}
+	}
+}
+
+func (m *DownloadMonitor) releaseRetryCleanupClaim(download *model.Download) {
+	if download == nil || m.db == nil {
+		return
+	}
+	if err := m.db.Model(&model.Download{}).
+		Where("id = ? AND status = ? AND torrent_hash = ?", download.ID, model.DownloadStatusRetryCleanupProcessing, download.TorrentHash).
+		Update("status", model.DownloadStatusRetryCleanup).Error; err != nil {
+		logger.Error("Failed to release retry cleanup claim", "download_id", download.ID, "error", err.Error())
 	}
 }
 

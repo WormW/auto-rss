@@ -442,8 +442,8 @@ func TestRequeueDownloadIsIdempotentForSameActiveDownload(t *testing.T) {
 
 	require.NoError(t, fx.service.RequeueDownload(&download, &sub))
 
-	assert.Equal(t, model.DownloadStatusPending, download.Status)
-	assert.Empty(t, download.TorrentHash)
+	assert.Equal(t, model.DownloadStatusRetryCleanup, download.Status)
+	assert.Equal(t, "same-hash", download.TorrentHash)
 	after, err := fx.repo.GetBySubscriptionAndEpisode(sub.ID, 1)
 	require.NoError(t, err)
 	assert.Equal(t, model.EpisodeStatusDownloading, after.Status)
@@ -491,8 +491,8 @@ func TestRequeueDownloadCollectionOnlyResetsDownload(t *testing.T) {
 
 	require.NoError(t, fx.service.RequeueDownload(&download, nil))
 
-	assert.Equal(t, model.DownloadStatusPending, download.Status)
-	assert.Empty(t, download.TorrentHash)
+	assert.Equal(t, model.DownloadStatusRetryCleanup, download.Status)
+	assert.Equal(t, "collection-hash", download.TorrentHash)
 	var ledgerCount int64
 	require.NoError(t, fx.db.Model(&model.SubscriptionEpisode{}).Count(&ledgerCount).Error)
 	assert.Zero(t, ledgerCount)
@@ -516,7 +516,7 @@ func TestRequeueDownloadSaveFailureRollsBackEpisodeClaim(t *testing.T) {
 	require.NoError(t, fx.db.Exec(`
 		CREATE TRIGGER fail_requeue_download
 		BEFORE UPDATE OF status ON downloads
-		WHEN NEW.status = 'pending'
+		WHEN NEW.status = 'retry_cleanup'
 		BEGIN
 			SELECT RAISE(ABORT, 'injected requeue save failure');
 		END;
@@ -533,6 +533,66 @@ func TestRequeueDownloadSaveFailureRollsBackEpisodeClaim(t *testing.T) {
 	var persisted model.Download
 	require.NoError(t, fx.db.First(&persisted, download.ID).Error)
 	assert.Equal(t, model.DownloadStatusFailed, persisted.Status)
+}
+
+func TestRequeueDownloadKeepsDistinctCleanupCheckpoints(t *testing.T) {
+	fx := newServiceFixture(t)
+	sub := model.Subscription{Name: "parallel retry", Status: "active"}
+	require.NoError(t, fx.db.Create(&sub).Error)
+	downloads := []model.Download{
+		{SubscriptionID: sub.ID, Title: "one", TorrentURL: "magnet:one", TorrentHash: "old-one", Status: model.DownloadStatusFailed},
+		{SubscriptionID: sub.ID, Title: "two", TorrentURL: "magnet:two", TorrentHash: "old-two", Status: model.DownloadStatusFailed},
+	}
+	require.NoError(t, fx.db.Create(&downloads).Error)
+
+	require.NoError(t, fx.service.RequeueDownload(&downloads[0], nil))
+	require.NoError(t, fx.service.RequeueDownload(&downloads[1], nil))
+
+	assert.Equal(t, model.DownloadStatusRetryCleanup, downloads[0].Status)
+	assert.Equal(t, model.DownloadStatusRetryCleanup, downloads[1].Status)
+	assert.Equal(t, "old-one", downloads[0].TorrentHash)
+	assert.Equal(t, "old-two", downloads[1].TorrentHash)
+}
+
+func TestPersistDownloadFailureRollsBackWhenLedgerReleaseFails(t *testing.T) {
+	fx := newServiceFixture(t)
+	sub := model.Subscription{Name: "atomic failure", Status: "active"}
+	require.NoError(t, fx.db.Create(&sub).Error)
+	download := model.Download{
+		SubscriptionID: sub.ID, Title: "episode one", Episode: 1,
+		TorrentURL: "magnet:atomic", TorrentHash: "atomic-hash", Status: model.DownloadStatusDownloading,
+		RetryCount: 1, MaxRetries: 1,
+	}
+	require.NoError(t, fx.db.Create(&download).Error)
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID: sub.ID, Episode: 1, Status: model.EpisodeStatusDownloading,
+		StatusSource: model.EpisodeStatusSourceAutomatic, ActiveDownloadID: &download.ID,
+		ActiveTorrentHash: download.TorrentHash,
+	}
+	require.NoError(t, fx.db.Create(&ledger).Error)
+	require.NoError(t, fx.db.Exec(`CREATE TRIGGER fail_failure_release BEFORE UPDATE OF status ON subscription_episodes WHEN NEW.status = 'missing' BEGIN SELECT RAISE(ABORT, 'injected release failure'); END;`).Error)
+
+	download.Status = model.DownloadStatusFailed
+	download.LastError = "terminal failure"
+	download.ErrorMessage = "terminal failure"
+	err := fx.service.PersistDownloadFailure(&download, true)
+	require.Error(t, err)
+	persisted := model.Download{}
+	require.NoError(t, fx.db.First(&persisted, download.ID).Error)
+	assert.Equal(t, model.DownloadStatusDownloading, persisted.Status)
+	after, reloadErr := fx.repo.GetBySubscriptionAndEpisode(sub.ID, 1)
+	require.NoError(t, reloadErr)
+	assert.Equal(t, model.EpisodeStatusDownloading, after.Status)
+	require.NotNil(t, after.ActiveDownloadID)
+
+	require.NoError(t, fx.db.Exec("DROP TRIGGER fail_failure_release").Error)
+	require.NoError(t, fx.service.PersistDownloadFailure(&download, true))
+	require.NoError(t, fx.db.First(&persisted, download.ID).Error)
+	assert.Equal(t, model.DownloadStatusFailed, persisted.Status)
+	after, reloadErr = fx.repo.GetBySubscriptionAndEpisode(sub.ID, 1)
+	require.NoError(t, reloadErr)
+	assert.Equal(t, model.EpisodeStatusMissing, after.Status)
+	assert.Nil(t, after.ActiveDownloadID)
 }
 
 func ledgerForMatrix(status, hash, url string) *model.SubscriptionEpisode {

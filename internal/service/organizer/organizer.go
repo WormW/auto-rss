@@ -1,6 +1,7 @@
 package organizer
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -332,35 +333,37 @@ func (f *FileOrganizer) organizeFile(filePath string) error {
 		return fmt.Errorf("generated path escapes destination directory: %w", err)
 	}
 
-	if filePath == newPath {
-		logger.Debug("File already in correct location, skipping", "path", filePath)
-		return nil
-	}
-
-	if f.mover.IsAlreadyOrganized(filePath, subscription) {
+	alreadyAtTarget := filePath == newPath
+	if !alreadyAtTarget && f.mover.IsAlreadyOrganized(filePath, subscription) {
 		logger.Debug("File already organized, skipping", "path", filePath)
 		return nil
 	}
 
-	targetDir := filepath.Dir(newPath)
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		return fmt.Errorf("failed to create target directory: %w", err)
-	}
+	moved := false
+	if !alreadyAtTarget {
+		targetDir := filepath.Dir(newPath)
+		if err := os.MkdirAll(targetDir, 0755); err != nil {
+			return fmt.Errorf("failed to create target directory: %w", err)
+		}
 
-	logger.Info("Moving file",
-		"from", filePath,
-		"to", newPath)
+		logger.Info("Moving file",
+			"from", filePath,
+			"to", newPath)
 
-	f.procMux.Lock()
-	f.processing[newPath] = true
-	f.procMux.Unlock()
-
-	if err := f.mover.Move(filePath, newPath); err != nil {
 		f.procMux.Lock()
-		delete(f.processing, newPath)
+		f.processing[newPath] = true
 		f.procMux.Unlock()
 
-		return fmt.Errorf("failed to move file: %w", err)
+		if err := f.mover.Move(filePath, newPath); err != nil {
+			f.procMux.Lock()
+			delete(f.processing, newPath)
+			f.procMux.Unlock()
+
+			return fmt.Errorf("failed to move file: %w", err)
+		}
+		moved = true
+	} else {
+		logger.Debug("File already in correct location; completing persistence", "path", filePath)
 	}
 
 	if download != nil && f.downloadRepo != nil {
@@ -389,11 +392,22 @@ func (f *FileOrganizer) organizeFile(filePath string) error {
 		}
 		if updateErr != nil {
 			*download = originalDownload
+			var compensationErr error
+			if moved {
+				compensationErr = f.mover.Move(newPath, filePath)
+				f.procMux.Lock()
+				delete(f.processing, newPath)
+				f.procMux.Unlock()
+			}
 			logger.Error("File moved but failed to update database",
 				"download_id", download.ID,
 				"new_path", newPath,
 				"error", updateErr)
-			return fmt.Errorf("failed to persist organized download: %w", updateErr)
+			persistErr := fmt.Errorf("failed to persist organized download: %w", updateErr)
+			if compensationErr != nil {
+				return errors.Join(persistErr, fmt.Errorf("failed to compensate file move from %s to %s: %w", newPath, filePath, compensationErr))
+			}
+			return persistErr
 		} else {
 			logger.Debug("Updated download status to completed",
 				"download_id", download.ID,
@@ -410,13 +424,15 @@ func (f *FileOrganizer) organizeFile(filePath string) error {
 		}
 	}
 
-	go func() {
-		time.Sleep(10 * time.Second)
-		f.procMux.Lock()
-		delete(f.processing, newPath)
-		f.procMux.Unlock()
-		logger.Debug("Cleared processing flag for moved file", "path", newPath)
-	}()
+	if moved {
+		go func() {
+			time.Sleep(10 * time.Second)
+			f.procMux.Lock()
+			delete(f.processing, newPath)
+			f.procMux.Unlock()
+			logger.Debug("Cleared processing flag for moved file", "path", newPath)
+		}()
+	}
 
 	logger.Info("File organized successfully",
 		"original", filename,

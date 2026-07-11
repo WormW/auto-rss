@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	MaxPageSize     = 1000
-	DefaultPageSize = 20
+	MaxPageSize         = 1000
+	DefaultPageSize     = 20
+	bulkDeleteChunkSize = 500
 )
 
 // DownloadRepository 下载仓储接口
@@ -172,10 +173,20 @@ func (r *downloadRepository) BatchDelete(ids []uint) error {
 		return nil
 	}
 	return r.db.Transaction(func(tx *gorm.DB) error {
-		if err := detachEpisodeDownloadsInTx(tx, "id IN ?", ids); err != nil {
-			return err
+		for start := 0; start < len(ids); start += bulkDeleteChunkSize {
+			end := start + bulkDeleteChunkSize
+			if end > len(ids) {
+				end = len(ids)
+			}
+			chunk := ids[start:end]
+			if err := detachEpisodeDownloadsInTx(tx, "id IN ?", chunk); err != nil {
+				return err
+			}
+			if err := tx.Where("id IN ?", chunk).Delete(&model.Download{}).Error; err != nil {
+				return err
+			}
 		}
-		return tx.Delete(&model.Download{}, ids).Error
+		return nil
 	})
 }
 
@@ -204,16 +215,10 @@ func detachEpisodeDownloadsInTx(tx *gorm.DB, downloadWhere string, args ...any) 
 		return nil
 	}
 
-	var downloadIDs []uint
-	if err := tx.Model(&model.Download{}).Where(downloadWhere, args...).Pluck("id", &downloadIDs).Error; err != nil {
-		return err
-	}
-	if len(downloadIDs) == 0 {
-		return nil
-	}
+	downloadIDs := tx.Model(&model.Download{}).Select("id").Where(downloadWhere, args...)
 
 	if err := tx.Model(&model.SubscriptionEpisode{}).
-		Where("active_download_id IN ? AND status = ?", downloadIDs, model.EpisodeStatusDownloading).
+		Where("active_download_id IN (?) AND status = ?", downloadIDs, model.EpisodeStatusDownloading).
 		Updates(map[string]any{
 			"status":              model.EpisodeStatusMissing,
 			"status_source":       model.EpisodeStatusSourceAutomatic,
@@ -227,7 +232,7 @@ func detachEpisodeDownloadsInTx(tx *gorm.DB, downloadWhere string, args ...any) 
 	}
 
 	return tx.Model(&model.SubscriptionEpisode{}).
-		Where("active_download_id IN ?", downloadIDs).
+		Where("active_download_id IN (?)", downloadIDs).
 		Update("active_download_id", nil).Error
 }
 

@@ -181,6 +181,13 @@ func (m *mockEpisodeCompletionService) MarkDownloadFailed(downloadID uint) error
 	return nil
 }
 
+func (m *mockEpisodeCompletionService) PersistDownloadFailure(download *model.Download, releaseEpisode bool) error {
+	if releaseEpisode {
+		m.failedIDs = append(m.failedIDs, download.ID)
+	}
+	return nil
+}
+
 func (m *mockEpisodeCompletionService) DetachDownload(uint) error { return nil }
 
 func TestCompletionHandlerMarksEpisodeCompletedInsideDownloadTransaction(t *testing.T) {

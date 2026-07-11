@@ -196,6 +196,31 @@ func (s *Service) MarkDownloadFailed(downloadID uint) error {
 	return s.repository.MarkMissingIfActiveDownload(downloadID)
 }
 
+func (s *Service) PersistDownloadFailure(download *model.Download, releaseEpisode bool) error {
+	if download == nil {
+		return errors.New("download is required")
+	}
+	return s.repository.RunInTransaction(func(tx *gorm.DB) error {
+		if err := tx.Save(download).Error; err != nil {
+			return err
+		}
+		if !releaseEpisode || download.Episode <= 0 {
+			return nil
+		}
+		return tx.Model(&model.SubscriptionEpisode{}).
+			Where("active_download_id = ? AND status = ?", download.ID, model.EpisodeStatusDownloading).
+			Updates(map[string]any{
+				"status":              model.EpisodeStatusMissing,
+				"status_source":       model.EpisodeStatusSourceAutomatic,
+				"active_download_id":  nil,
+				"active_torrent_hash": "",
+				"active_torrent_url":  "",
+				"active_title":        "",
+				"downloaded_at":       nil,
+			}).Error
+	})
+}
+
 func (s *Service) DetachDownload(downloadID uint) error {
 	return s.repository.DetachDownload(downloadID)
 }
@@ -265,8 +290,7 @@ func resetDownloadForRetry(download *model.Download) {
 	download.NextRetryAt = nil
 	download.LastError = ""
 	download.ErrorMessage = ""
-	download.Status = model.DownloadStatusPending
-	download.TorrentHash = ""
+	download.Status = model.DownloadStatusRetryCleanup
 }
 
 func (s *Service) EnsureRange(subscriptionID uint, totalEpisodes int) error {

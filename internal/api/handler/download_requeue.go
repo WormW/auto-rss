@@ -1,6 +1,12 @@
 package handler
 
-import "github.com/WormW/auto-rss/internal/model"
+import (
+	"errors"
+
+	"github.com/WormW/auto-rss/internal/model"
+)
+
+var errEpisodeRetryLifecycleUnavailable = errors.New("episode retry lifecycle service is unavailable")
 
 type DownloadRequeueService interface {
 	RequeueDownload(download *model.Download, subscription *model.Subscription) error
@@ -12,6 +18,5 @@ func resetDownloadForManualRetry(download *model.Download) {
 	download.NextRetryAt = nil
 	download.LastError = ""
 	download.ErrorMessage = ""
-	download.Status = model.DownloadStatusPending
-	download.TorrentHash = ""
+	download.Status = model.DownloadStatusRetryCleanup
 }

@@ -504,8 +504,8 @@ func TestDownloadHandler_Retry(t *testing.T) {
 			wantUpdated: true,
 			verifyUpdate: func(t *testing.T, download *model.Download) {
 				assert.Equal(t, 0, download.RetryCount)
-				assert.Equal(t, "pending", download.Status)
-				assert.Equal(t, "", download.TorrentHash)
+				assert.Equal(t, model.DownloadStatusRetryCleanup, download.Status)
+				assert.Equal(t, "old-hash", download.TorrentHash)
 				assert.Equal(t, "user_retry", download.RetryReason)
 			},
 		},

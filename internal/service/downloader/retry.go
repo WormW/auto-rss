@@ -156,6 +156,17 @@ func (s *RetryService) PrepareRetry(download *model.Download, reason string) err
 
 // MarkFailed 标记下载失败并设置重试信息
 func (s *RetryService) MarkFailed(download *model.Download, err error, reason string) error {
+	s.PrepareFailure(download, err, reason)
+
+	if err := s.downloadRepo.Update(download); err != nil {
+		return fmt.Errorf("failed to mark download as failed: %w", err)
+	}
+
+	s.logFailure(download, err, reason)
+	return nil
+}
+
+func (s *RetryService) PrepareFailure(download *model.Download, err error, reason string) {
 	download.Status = "failed"
 	download.LastError = err.Error()
 	download.ErrorMessage = err.Error()
@@ -166,10 +177,9 @@ func (s *RetryService) MarkFailed(download *model.Download, err error, reason st
 		download.NextRetryAt = &nextRetryAt
 	}
 
-	if err := s.downloadRepo.Update(download); err != nil {
-		return fmt.Errorf("failed to mark download as failed: %w", err)
-	}
+}
 
+func (s *RetryService) logFailure(download *model.Download, err error, reason string) {
 	logger.Warn("Download marked as failed",
 		"download_id", download.ID,
 		"title", download.Title,
@@ -178,7 +188,6 @@ func (s *RetryService) MarkFailed(download *model.Download, err error, reason st
 		"error", err.Error(),
 		"reason", reason)
 
-	return nil
 }
 
 // ProcessRetries 处理所有待重试的失败任务

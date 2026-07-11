@@ -147,16 +147,7 @@ func TestSubscriptionDiagnosticsHandler_RetryFailedResetsRetryableDownloads(t *t
 	}))
 
 	episodeRepo := repository.NewEpisodeRepository(db)
-	deleteObservedCommittedRequeue := false
-	qb := &mockQBittorrentClient{deleteTorrentFunc: func(string, bool) error {
-		persisted, downloadErr := downloadRepo.GetByID(failed.ID)
-		attached, ledgerErr := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
-		deleteObservedCommittedRequeue = downloadErr == nil && ledgerErr == nil &&
-			persisted.Status == model.DownloadStatusPending && persisted.TorrentHash == "" &&
-			attached.Status == model.EpisodeStatusDownloading && attached.ActiveDownloadID != nil &&
-			*attached.ActiveDownloadID == failed.ID
-		return nil
-	}}
+	qb := &mockQBittorrentClient{}
 	handler := NewSubscriptionDiagnosticsHandler(subRepo, downloadRepo, nil, qb, t.TempDir(), episodeservice.NewService(episodeRepo))
 	r := gin.New()
 	r.POST("/subscriptions/:id/diagnostics/retry-failed", handler.RetryFailed)
@@ -184,20 +175,18 @@ func TestSubscriptionDiagnosticsHandler_RetryFailedResetsRetryableDownloads(t *t
 		}
 	}
 	require.NotNil(t, retryResult)
-	require.Equal(t, model.DownloadStatusPending, retryResult.Status)
-	require.Equal(t, "已重置为待下载，等待后台调度", retryResult.Message)
+	require.Equal(t, model.DownloadStatusRetryCleanup, retryResult.Status)
+	require.Equal(t, "已排队清理旧下载，清理完成后将自动重试", retryResult.Message)
 
 	updated, err := downloadRepo.GetByID(failed.ID)
 	require.NoError(t, err)
-	require.Equal(t, model.DownloadStatusPending, updated.Status)
+	require.Equal(t, model.DownloadStatusRetryCleanup, updated.Status)
 	require.Equal(t, 0, updated.RetryCount)
-	require.Empty(t, updated.TorrentHash)
+	require.Equal(t, "old-hash", updated.TorrentHash)
 	require.Empty(t, updated.LastError)
 	require.Equal(t, "user_retry", updated.RetryReason)
-	require.True(t, qb.deleteWithPayloadCalled)
-	require.Equal(t, "old-hash", qb.deletedHash)
+	require.False(t, qb.deleteWithPayloadCalled)
 	require.False(t, qb.addCalled, "DownloadMonitor must own the first qBittorrent Add")
-	require.True(t, deleteObservedCommittedRequeue)
 	after, err := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
 	require.NoError(t, err)
 	require.Equal(t, model.EpisodeStatusDownloading, after.Status)

@@ -33,7 +33,10 @@ func (m *organizerEpisodeCompletionMock) MarkDownloadCompletedInTx(*gorm.DB, *mo
 }
 
 func (*organizerEpisodeCompletionMock) MarkDownloadFailed(uint) error { return nil }
-func (*organizerEpisodeCompletionMock) DetachDownload(uint) error     { return nil }
+func (*organizerEpisodeCompletionMock) PersistDownloadFailure(*model.Download, bool) error {
+	return nil
+}
+func (*organizerEpisodeCompletionMock) DetachDownload(uint) error { return nil }
 
 func TestFileOrganizerCompletesEpisodeInDownloadTransaction(t *testing.T) {
 	watchDir := t.TempDir()
