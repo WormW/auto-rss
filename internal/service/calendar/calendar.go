@@ -121,15 +121,15 @@ func (c *Calendar) GetWeekSchedule(weekOffset int) (*WeekSchedule, error) {
 		if sub.AirDay == "" {
 			continue // 没有设置播出时间
 		}
-		if isSubscriptionCompleted(sub) {
+		if sub.IsCompleted() {
 			continue // 日历仅展示未完结作品
 		}
 
 		// 检查是否已下载 - 查询下一集的下载状态
 		isDownloaded := false
-		nextEpisode := sub.CurrentEpisode + 1
+		nextOriginalEpisode := sub.CurrentEpisode + 1
 		if c.downloadRepo != nil {
-			if download, err := c.downloadRepo.GetBySubscriptionAndEpisode(sub.ID, nextEpisode); err == nil && download != nil {
+			if download, err := c.downloadRepo.GetBySubscriptionAndEpisode(sub.ID, nextOriginalEpisode); err == nil && download != nil {
 				isDownloaded = download.Status == "completed"
 			}
 		}
@@ -137,10 +137,10 @@ func (c *Calendar) GetWeekSchedule(weekOffset int) (*WeekSchedule, error) {
 		item := CalendarItem{
 			SubscriptionID: sub.ID,
 			Name:           sub.Name,
-			Episode:        nextEpisode, // 下一集
+			Episode:        sub.RelativeEpisode(nextOriginalEpisode),
 			AirTime:        sub.AirTime,
 			AirDay:         sub.AirDay,
-			CurrentEpisode: sub.CurrentEpisode,
+			CurrentEpisode: sub.RelativeCurrentEpisode(),
 			TotalEpisodes:  sub.TotalEpisodes,
 			IsDownloaded:   isDownloaded,
 			IsCompleted:    false,
@@ -209,7 +209,7 @@ func (c *Calendar) CheckUpcomingAiring() ([]CalendarItem, error) {
 		if !sub.NotifyEnabled || sub.AirDay != weekday {
 			continue
 		}
-		if isSubscriptionCompleted(sub) {
+		if sub.IsCompleted() {
 			continue
 		}
 
@@ -239,13 +239,14 @@ func (c *Calendar) CheckUpcomingAiring() ([]CalendarItem, error) {
 
 		// 如果距离播出时间在提醒范围内（即将播出或刚刚播出）
 		if timeUntil > 0 && timeUntil <= notifyBefore {
+			nextOriginalEpisode := sub.CurrentEpisode + 1
 			upcoming = append(upcoming, CalendarItem{
 				SubscriptionID: sub.ID,
 				Name:           sub.Name,
-				Episode:        sub.CurrentEpisode + 1,
+				Episode:        sub.RelativeEpisode(nextOriginalEpisode),
 				AirTime:        sub.AirTime,
 				AirDay:         sub.AirDay,
-				CurrentEpisode: sub.CurrentEpisode,
+				CurrentEpisode: sub.RelativeCurrentEpisode(),
 				TotalEpisodes:  sub.TotalEpisodes,
 				IsCompleted:    false,
 			})
@@ -272,10 +273,6 @@ func (c *Calendar) SendAiringReminders() {
 	for _, item := range upcoming {
 		c.sendAiringNotification(item)
 	}
-}
-
-func isSubscriptionCompleted(sub model.Subscription) bool {
-	return sub.TotalEpisodes > 0 && sub.CurrentEpisode >= sub.TotalEpisodes
 }
 
 // sendAiringNotification 发送播出通知

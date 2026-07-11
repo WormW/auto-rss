@@ -65,6 +65,13 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+func TestCompletedAtLogValue(t *testing.T) {
+	assert.Nil(t, completedAtLogValue(nil))
+
+	completedAt := time.Date(2026, time.July, 11, 16, 30, 0, 0, time.Local)
+	assert.Equal(t, "2026-07-11 16:30:00", completedAtLogValue(&completedAt))
+}
+
 func TestEvaluateSubscription_CompletedStopDays(t *testing.T) {
 	db := setupTestDB(t)
 
@@ -199,6 +206,25 @@ func TestEvaluateSubscription_CompletedStopDaysZero(t *testing.T) {
 	assert.NotContains(t, status.FetchReason, "stop_checking", "Should not stop checking when CompletedStopDays=0")
 }
 
+func TestEvaluateSubscription_ClearsStaleCompletedAtForOffsetSubscription(t *testing.T) {
+	filter := NewSmartFetchFilter(nil)
+	completedAt := time.Now().Add(-40 * 24 * time.Hour)
+	sub := &model.Subscription{
+		Name:           "偏移订阅",
+		EpisodeOffset:  170,
+		TotalEpisodes:  52,
+		CurrentEpisode: 171,
+		CompletedAt:    &completedAt,
+		AirDay:         "1",
+	}
+
+	status, needsUpdate := filter.EvaluateSubscription(sub)
+
+	assert.False(t, status.IsCompleted)
+	assert.True(t, needsUpdate)
+	assert.Nil(t, sub.CompletedAt)
+}
+
 func TestEvaluateSubscription_SmartFetchGlobalDisabled(t *testing.T) {
 	db := setupTestDB(t)
 	filter := NewSmartFetchFilter(repository.NewDownloadRepository(db))
@@ -296,6 +322,24 @@ func TestIsCompleted(t *testing.T) {
 			sub: &model.Subscription{
 				TotalEpisodes:  12,
 				CurrentEpisode: 13, // 可能是特别篇或数据错误
+			},
+			expect: true,
+		},
+		{
+			name: "偏移订阅尚未完结",
+			sub: &model.Subscription{
+				EpisodeOffset:  170,
+				TotalEpisodes:  52,
+				CurrentEpisode: 221,
+			},
+			expect: false,
+		},
+		{
+			name: "偏移订阅已经完结",
+			sub: &model.Subscription{
+				EpisodeOffset:  170,
+				TotalEpisodes:  52,
+				CurrentEpisode: 222,
 			},
 			expect: true,
 		},

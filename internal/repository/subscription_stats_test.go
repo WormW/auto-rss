@@ -145,3 +145,34 @@ func TestSubscriptionRepository_GetSubscriptionsWithDownloadCount(t *testing.T) 
 		}
 	})
 }
+
+func TestSubscriptionRepository_GetStatisticsUsesEpisodeOffset(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("failed to open test DB: %v", err)
+	}
+	if err := db.AutoMigrate(&model.Subscription{}); err != nil {
+		t.Fatalf("failed to migrate test DB: %v", err)
+	}
+
+	repo := NewSubscriptionRepository(db)
+	subscriptions := []model.Subscription{
+		{Name: "普通完结", TotalEpisodes: 12, CurrentEpisode: 12},
+		{Name: "偏移未完结", EpisodeOffset: 170, TotalEpisodes: 52, CurrentEpisode: 221},
+		{Name: "偏移完结", EpisodeOffset: 170, TotalEpisodes: 52, CurrentEpisode: 222},
+		{Name: "负偏移未完结", EpisodeOffset: -5, TotalEpisodes: 12, CurrentEpisode: 10},
+	}
+	for i := range subscriptions {
+		if err := repo.Create(&subscriptions[i]); err != nil {
+			t.Fatalf("failed to create subscription %q: %v", subscriptions[i].Name, err)
+		}
+	}
+
+	stats, err := repo.GetStatistics()
+	if err != nil {
+		t.Fatalf("GetStatistics() error = %v", err)
+	}
+	if stats.CompletedCount != 2 {
+		t.Fatalf("CompletedCount = %d, want 2", stats.CompletedCount)
+	}
+}

@@ -219,7 +219,7 @@ func (u *BangumiUpdater) updateAllSubscriptions() {
 
 func shouldCorrectFalseCompletion(sub model.Subscription, latestEp int) bool {
 	return sub.TotalEpisodes > 0 &&
-		sub.LatestEpisode >= sub.TotalEpisodes &&
+		sub.RelativeLatestEpisode() >= sub.TotalEpisodes &&
 		latestEp > 0 &&
 		latestEp < sub.TotalEpisodes
 }

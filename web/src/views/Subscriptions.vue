@@ -58,11 +58,11 @@
                   {{ formatAirTime(sub) }}
                 </n-tag>
                 <n-tag size="tiny" :type="isTodayDownloaded(sub) ? 'default' : 'success'">
-                  {{ isTodayDownloaded(sub) ? '已下载' : `第${sub.latest_episode}集已更新` }}
+                  {{ isTodayDownloaded(sub) ? '已下载' : `第${getRelativeLatestEpisode(sub)}集已更新` }}
                 </n-tag>
               </div>
               <div class="today-progress">
-                <span>已收集 {{ sub.current_episode || 0 }}/{{ sub.total_episodes || '?' }}</span>
+                <span>已收集 {{ getRelativeCurrentEpisode(sub) }}/{{ sub.total_episodes || '?' }}</span>
               </div>
             </div>
             <div class="today-actions">
@@ -251,9 +251,9 @@
                         :show-indicator="false"
                       />
                       <div class="progress-info">
-                        <span>{{ sub.current_episode || 0 }} / {{ sub.total_episodes || '?' }}</span>
-                        <span v-if="sub.latest_episode && sub.latest_episode > (sub.current_episode || 0)" class="latest-ep">
-                          最新 {{ sub.latest_episode }}
+                        <span>{{ getRelativeCurrentEpisode(sub) }} / {{ sub.total_episodes || '?' }}</span>
+                        <span v-if="getRelativeLatestEpisode(sub) > getRelativeCurrentEpisode(sub)" class="latest-ep">
+                          最新 {{ getRelativeLatestEpisode(sub) }}
                         </span>
                         <span v-if="getMissingEpisodes(sub).length > 0" class="missing-ep" @click="showMissingEpisodes(sub)">
                           缺失 {{ getMissingEpisodes(sub).join(',') }} 集
@@ -421,7 +421,7 @@
                     />
                     <div class="progress-info">
                       <span :style="{ color: isSeasonComplete(sub) ? '#18a058' : '' }">
-                        {{ sub.current_episode || 0 }} / {{ sub.total_episodes || '?' }}
+                        {{ getRelativeCurrentEpisode(sub) }} / {{ sub.total_episodes || '?' }}
                       </span>
                     </div>
                   </div>
@@ -1102,6 +1102,12 @@ import {
   ToolOutlined
 } from '@vicons/antd'
 import AnimeSearch from '@/components/AnimeSearch.vue'
+import {
+  getEpisodeProgressPercent,
+  getRelativeCurrentEpisode,
+  getRelativeLatestEpisode,
+  isEpisodeProgressComplete
+} from '@/utils/episodes'
 
 const route = useRoute()
 const message = useMessage()
@@ -1372,9 +1378,9 @@ const listColumns = computed<DataTableColumns<Subscription>>(() => [
           showIndicator={false}
         />
         <div style="font-size: 12px; color: #666; margin-top: 4px;">
-          {row.current_episode || 0} / {row.total_episodes || '?'}
-          {(row.latest_episode || 0) > (row.current_episode || 0) && (
-            <span style="color: #18a058; margin-left: 8px;">最新 {row.latest_episode}</span>
+          {getRelativeCurrentEpisode(row)} / {row.total_episodes || '?'}
+          {getRelativeLatestEpisode(row) > getRelativeCurrentEpisode(row) && (
+            <span style="color: #18a058; margin-left: 8px;">最新 {getRelativeLatestEpisode(row)}</span>
           )}
         </div>
       </div>
@@ -1518,14 +1524,15 @@ const airTimeValue = computed({
 // 判断番剧是否已完结
 const isCompleted = (sub: Subscription) => {
   if (!sub.total_episodes || sub.total_episodes <= 0) return false
-  if (sub.current_episode && sub.current_episode >= sub.total_episodes) return true
-  if (sub.latest_episode && sub.latest_episode >= sub.total_episodes && sub.air_date) {
+  if (isEpisodeProgressComplete(sub)) return true
+  const relativeLatestEpisode = getRelativeLatestEpisode(sub)
+  if (relativeLatestEpisode >= sub.total_episodes && sub.air_date) {
     const airDate = new Date(sub.air_date)
     const estimatedEndDate = new Date(airDate)
     estimatedEndDate.setDate(estimatedEndDate.getDate() + (sub.total_episodes * 7) + 30)
     if (new Date() > estimatedEndDate) return true
   }
-  if (sub.latest_episode && sub.latest_episode >= sub.total_episodes && sub.air_year) {
+  if (relativeLatestEpisode >= sub.total_episodes && sub.air_year) {
     const currentYear = new Date().getFullYear()
     if (sub.air_year < currentYear) return true
   }
@@ -1550,12 +1557,13 @@ const isTodayDownloaded = (sub: Subscription) => {
 
 // 计算缺失剧集
 const getMissingEpisodes = (sub: Subscription): number[] => {
-  if (!sub.latest_episode || sub.latest_episode <= 0) return []
-  const current = sub.current_episode || 0
-  if (current >= sub.latest_episode) return []
+  const latest = getRelativeLatestEpisode(sub)
+  if (latest <= 0) return []
+  const current = getRelativeCurrentEpisode(sub)
+  if (current >= latest) return []
 
   const missing: number[] = []
-  for (let i = current + 1; i <= sub.latest_episode; i++) {
+  for (let i = current + 1; i <= latest; i++) {
     missing.push(i)
   }
   return missing
@@ -1563,9 +1571,7 @@ const getMissingEpisodes = (sub: Subscription): number[] => {
 
 // 计算进度百分比
 const getProgressPercent = (sub: Subscription) => {
-  if (!sub.total_episodes || sub.total_episodes <= 0) return 0
-  const current = sub.current_episode || 0
-  return Math.min(100, Math.round((current / sub.total_episodes) * 100))
+  return getEpisodeProgressPercent(sub)
 }
 
 // 检查RSS检查警告
@@ -1639,10 +1645,7 @@ const getYearSeasonLabel = (year: number, airDate?: string) => {
 
 // 判断是否已完成本季
 const isSeasonComplete = (sub: Subscription) => {
-  const current = sub.current_episode ?? 0
-  const total = sub.total_episodes ?? 0
-  if (total <= 0) return false
-  return current >= total
+  return isEpisodeProgressComplete(sub)
 }
 
 // 选择相关

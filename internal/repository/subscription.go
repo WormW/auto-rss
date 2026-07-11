@@ -293,9 +293,9 @@ func (r *subscriptionRepository) GetStatistics() (*SubscriptionStatistics, error
 	}
 	stats.DisabledCount = stats.TotalCount - stats.ActiveCount
 
-	// 已完结统计（TotalEpisodes > 0 且 CurrentEpisode >= TotalEpisodes）
+	// 已完结统计使用季度内相对集数，避免偏移订阅被提前计为完结。
 	if err := r.db.Model(&model.Subscription{}).
-		Where("total_episodes > 0 AND current_episode >= total_episodes").
+		Where("total_episodes > 0 AND CASE WHEN episode_offset > 0 AND current_episode > episode_offset THEN current_episode - episode_offset WHEN episode_offset <= 0 THEN current_episode ELSE 0 END >= total_episodes").
 		Count(&stats.CompletedCount).Error; err != nil {
 		return nil, err
 	}
