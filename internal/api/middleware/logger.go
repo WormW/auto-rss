@@ -16,8 +16,7 @@ func Logger() gin.HandlerFunc {
 
 		c.Next()
 
-		// Skip logging for log API endpoints to avoid circular dependency
-		if path == "/api/v1/logs" || path == "/api/v1/logs/clear" {
+		if shouldSkipRequestLog(path) {
 			return
 		}
 
@@ -34,5 +33,14 @@ func Logger() gin.HandlerFunc {
 			"path", path,
 			"query", query,
 		)
+	}
+}
+
+func shouldSkipRequestLog(path string) bool {
+	switch path {
+	case "/health", "/api/v1/health", "/ready", "/live", "/api/v1/logs", "/api/v1/logs/clear":
+		return true
+	default:
+		return false
 	}
 }

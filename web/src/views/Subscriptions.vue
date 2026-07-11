@@ -694,9 +694,9 @@
               <small>失败 {{ diagnosticsData.downloads.failed }} / 停滞 {{ diagnosticsData.downloads.stalled }}</small>
             </div>
             <div class="diagnostic-metric">
-              <span>本地文件</span>
+              <span>已记录路径</span>
               <strong>{{ diagnosticsData.files.completed_with_file }}</strong>
-              <small>缺路径 {{ diagnosticsData.files.completed_missing_file }}</small>
+              <small>未记录路径 {{ diagnosticsData.files.completed_missing_file }}</small>
             </div>
             <div class="diagnostic-metric">
               <span>磁盘剩余</span>

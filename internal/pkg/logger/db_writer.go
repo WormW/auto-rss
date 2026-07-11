@@ -2,6 +2,7 @@ package logger
 
 import (
 	"encoding/json"
+	"sync"
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
@@ -11,19 +12,26 @@ import (
 
 // 日志清理配置
 const (
-	maxLogCount   = 10000  // 最大日志条数
-	cleanupBatch  = 2000   // 每次清理的条数
-	retentionDays = 30     // 保留天数
+	maxLogCount   = 10000 // 最大日志条数
+	cleanupBatch  = 2000  // 每次清理的条数
+	retentionDays = 30    // 保留天数
+	cleanupEvery  = time.Hour
 )
 
 // DBWriter 数据库日志写入器
 type DBWriter struct {
-	db *gorm.DB
+	db              *gorm.DB
+	cleanupMu       sync.Mutex
+	lastCleanup     time.Time
+	cleanupInterval time.Duration
 }
 
 // NewDBWriter 创建数据库写入器
 func NewDBWriter(db *gorm.DB) *DBWriter {
-	return &DBWriter{db: db}
+	return &DBWriter{
+		db:              db,
+		cleanupInterval: cleanupEvery,
+	}
 }
 
 // Write 实现 io.Writer 接口
@@ -57,12 +65,30 @@ func (w *DBWriter) Write(p []byte) (n int, err error) {
 	}
 
 	go func() {
-		_ = w.db.Create(log).Error
-		// 异步执行日志清理
-		w.cleanupOldLogs()
+		if err := w.db.Create(log).Error; err != nil {
+			return
+		}
+		if w.reserveCleanup(time.Now()) {
+			w.cleanupOldLogs()
+		}
 	}()
 
 	return len(p), nil
+}
+
+func (w *DBWriter) reserveCleanup(now time.Time) bool {
+	w.cleanupMu.Lock()
+	defer w.cleanupMu.Unlock()
+
+	interval := w.cleanupInterval
+	if interval <= 0 {
+		interval = cleanupEvery
+	}
+	if !w.lastCleanup.IsZero() && now.Sub(w.lastCleanup) < interval {
+		return false
+	}
+	w.lastCleanup = now
+	return true
 }
 
 // inferModule 从 caller 路径推断模块名
