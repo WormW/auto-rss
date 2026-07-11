@@ -99,7 +99,7 @@ func (r *subscriptionRepository) Update(subscription *model.Subscription) error 
 
 // Delete 删除订阅
 func (r *subscriptionRepository) Delete(id uint) error {
-	return r.db.Delete(&model.Subscription{}, id).Error
+	return r.deleteByIDs([]uint{id})
 }
 
 // GetByID 根据 ID 获取订阅
@@ -197,7 +197,26 @@ func (r *subscriptionRepository) BatchDelete(ids []uint) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	return r.db.Delete(&model.Subscription{}, "id IN ?", ids).Error
+	return r.deleteByIDs(ids)
+}
+
+func (r *subscriptionRepository) deleteByIDs(ids []uint) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if tx.Migrator().HasTable(&model.SubscriptionEpisode{}) {
+			if tx.Migrator().HasTable(&model.EpisodeResourceCandidate{}) {
+				if err := tx.Where(
+					"subscription_episode_id IN (?)",
+					tx.Model(&model.SubscriptionEpisode{}).Select("id").Where("subscription_id IN ?", ids),
+				).Delete(&model.EpisodeResourceCandidate{}).Error; err != nil {
+					return err
+				}
+			}
+			if err := tx.Where("subscription_id IN ?", ids).Delete(&model.SubscriptionEpisode{}).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Where("id IN ?", ids).Delete(&model.Subscription{}).Error
+	})
 }
 
 // BatchUpdateGroup 批量更新订阅分组
