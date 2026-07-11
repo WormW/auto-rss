@@ -112,6 +112,87 @@ func TestPreviewSkipsRedactedSensitiveValuesAndDetectsConflicts(t *testing.T) {
 	}
 }
 
+func TestPreviewConflictActionsFollowImportStrategy(t *testing.T) {
+	db := newBackupTestDB(t)
+	if err := db.Create(&model.Config{Key: "download_path", Value: "/old"}).Error; err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	if err := db.Create(&model.Subscription{
+		Name:    "既存番剧",
+		RssURL:  "https://example.com/existing.xml",
+		Season:  1,
+		Status:  "active",
+		Enabled: true,
+	}).Error; err != nil {
+		t.Fatalf("seed subscription: %v", err)
+	}
+
+	pkg := Package{
+		App:           "auto-rss",
+		SchemaVersion: SchemaVersion,
+		Configs: []ConfigRecord{
+			{Key: "download_path", Value: "/new"},
+			{Key: "qbittorrent_password", Value: RedactedValue, Sensitive: true, Redacted: true},
+		},
+		Subscriptions: []SubscriptionRecord{
+			{
+				Subscription: model.Subscription{
+					Name:    "既存番剧",
+					RssURL:  "https://example.com/existing.xml",
+					Season:  1,
+					Status:  "paused",
+					Enabled: true,
+				},
+			},
+		},
+	}
+	data, err := json.Marshal(pkg)
+	if err != nil {
+		t.Fatalf("marshal backup: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		strategy string
+		action   string
+	}{
+		{
+			name:     "default skip",
+			strategy: "",
+			action:   "skip",
+		},
+		{
+			name:     "overwrite",
+			strategy: StrategyOverwrite,
+			action:   "overwrite",
+		},
+		{
+			name:     "merge",
+			strategy: StrategyMerge,
+			action:   "merge",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan, err := NewService(db).Preview(data, SourceAutoRSS, tt.strategy)
+			if err != nil {
+				t.Fatalf("preview: %v", err)
+			}
+
+			assertPlanItem(t, plan, "config", "download_path", tt.action, true, false)
+			assertPlanItem(t, plan, "subscription", "https://example.com/existing.xml|season:1", tt.action, true, false)
+			assertPlanItem(t, plan, "config", "qbittorrent_password", "skip", false, true)
+			if got := countPlanItems(plan, tt.action, true); got != 2 {
+				t.Fatalf("expected two %s conflict actions, got %d in %#v", tt.action, got, plan.Items)
+			}
+			if plan.Summary.SensitiveSkipped != 1 {
+				t.Fatalf("expected one sensitive skip, got summary %#v", plan.Summary)
+			}
+		})
+	}
+}
+
 func TestImportOverwriteCreatesRelationsAndDoesNotImportRedactedSecrets(t *testing.T) {
 	db := newBackupTestDB(t)
 	if err := db.Create(&model.Config{Key: "download_path", Value: "/old"}).Error; err != nil {
@@ -186,6 +267,105 @@ func TestImportOverwriteCreatesRelationsAndDoesNotImportRedactedSecrets(t *testi
 	}
 }
 
+func TestImportMergeFillsMissingFieldsWithoutOverwritingExistingValues(t *testing.T) {
+	db := newBackupTestDB(t)
+	if err := db.Create(&model.Config{Key: "download_path", Value: "/old"}).Error; err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	if err := db.Create(&model.NotificationSetting{Channel: "telegram", Enabled: true, Config: `{"token":"old"}`}).Error; err != nil {
+		t.Fatalf("seed notification setting: %v", err)
+	}
+	if err := db.Create(&model.Subscription{
+		Name:           "既存番剧",
+		RssURL:         "https://example.com/existing.xml",
+		Season:         1,
+		Status:         "active",
+		Enabled:        true,
+		Fansub:         "本地字幕组",
+		FilterKeywords: "",
+	}).Error; err != nil {
+		t.Fatalf("seed subscription: %v", err)
+	}
+
+	pkg := Package{
+		App:           "auto-rss",
+		SchemaVersion: SchemaVersion,
+		Configs: []ConfigRecord{
+			{Key: "download_path", Value: "/new"},
+			{Key: "api_token", Value: RedactedValue, Sensitive: true, Redacted: true},
+		},
+		NotificationSettings: []NotificationSettingRecord{
+			{Channel: "telegram", Enabled: false, Config: `{"token":"new"}`, Sensitive: true},
+			{Channel: "email", Enabled: true, Config: RedactedValue, Sensitive: true, Redacted: true},
+		},
+		Subscriptions: []SubscriptionRecord{
+			{
+				Subscription: model.Subscription{
+					Name:           "既存番剧",
+					RssURL:         "https://example.com/existing.xml",
+					Season:         1,
+					Status:         "paused",
+					Enabled:        true,
+					Fansub:         "导入字幕组",
+					FilterKeywords: `["1080p"]`,
+				},
+			},
+		},
+	}
+	data, err := json.Marshal(pkg)
+	if err != nil {
+		t.Fatalf("marshal backup: %v", err)
+	}
+
+	plan, err := NewService(db).Import(data, SourceAutoRSS, StrategyMerge)
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	assertPlanItem(t, plan, "config", "download_path", "merge", true, false)
+	assertPlanItem(t, plan, "notification_setting", "telegram", "merge", true, true)
+	assertPlanItem(t, plan, "subscription", "https://example.com/existing.xml|season:1", "merge", true, false)
+	assertPlanItem(t, plan, "config", "api_token", "skip", false, true)
+	assertPlanItem(t, plan, "notification_setting", "email", "skip", false, true)
+	if plan.Summary.Merge != 3 || plan.Summary.SensitiveSkipped != 2 {
+		t.Fatalf("unexpected import summary: %#v", plan.Summary)
+	}
+
+	var cfg model.Config
+	if err := db.Where("key = ?", "download_path").First(&cfg).Error; err != nil {
+		t.Fatalf("load download_path: %v", err)
+	}
+	if cfg.Value != "/old" {
+		t.Fatalf("expected merge not to overwrite config, got %q", cfg.Value)
+	}
+
+	var setting model.NotificationSetting
+	if err := db.Where("channel = ?", "telegram").First(&setting).Error; err != nil {
+		t.Fatalf("load telegram setting: %v", err)
+	}
+	if setting.Config != `{"token":"old"}` || !setting.Enabled {
+		t.Fatalf("expected merge not to overwrite notification setting, got %#v", setting)
+	}
+	var count int64
+	if err := db.Model(&model.NotificationSetting{}).Where("channel = ?", "email").Count(&count).Error; err != nil {
+		t.Fatalf("count email setting: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected redacted email setting not imported, count=%d", count)
+	}
+
+	var sub model.Subscription
+	if err := db.Where("rss_url = ?", "https://example.com/existing.xml").First(&sub).Error; err != nil {
+		t.Fatalf("load subscription: %v", err)
+	}
+	if sub.Fansub != "本地字幕组" {
+		t.Fatalf("expected merge not to overwrite existing fansub, got %q", sub.Fansub)
+	}
+	if sub.FilterKeywords != `["1080p"]` {
+		t.Fatalf("expected merge to fill missing filter keywords, got %q", sub.FilterKeywords)
+	}
+}
+
 func TestParseAutoBangumiPackageMapsRSSLinks(t *testing.T) {
 	data := json.RawMessage(`{
 		"bangumi": [
@@ -222,4 +402,27 @@ func TestParseAutoBangumiPackageMapsRSSLinks(t *testing.T) {
 	if sub.FilterRules == "" || sub.FilterKeywords == "" {
 		t.Fatalf("expected filter fields to be mapped: %#v", sub)
 	}
+}
+
+func assertPlanItem(t *testing.T, plan *ImportPlan, resource, key, action string, conflict, sensitive bool) {
+	t.Helper()
+	for _, item := range plan.Items {
+		if item.Resource == resource && item.Key == key && item.Action == action {
+			if item.Conflict != conflict || item.Sensitive != sensitive {
+				t.Fatalf("expected %s %s item conflict=%t sensitive=%t, got %#v", resource, key, conflict, sensitive, item)
+			}
+			return
+		}
+	}
+	t.Fatalf("expected plan item resource=%s key=%s action=%s in %#v", resource, key, action, plan.Items)
+}
+
+func countPlanItems(plan *ImportPlan, action string, conflict bool) int {
+	count := 0
+	for _, item := range plan.Items {
+		if item.Action == action && item.Conflict == conflict {
+			count++
+		}
+	}
+	return count
 }

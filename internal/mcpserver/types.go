@@ -191,6 +191,45 @@ type RefreshRSSOutput struct {
 	Message string `json:"message"`
 }
 
+type PreviewRecoveryInput struct {
+	SubscriptionID uint `json:"subscription_id,omitempty" jsonschema:"Optional subscription ID filter. Leave empty to preview recovery candidates for all subscriptions."`
+}
+
+type RecoveryPreviewOutput struct {
+	DryRun                 bool                          `json:"dry_run"`
+	PreviewOnly            bool                          `json:"preview_only"`
+	Applied                bool                          `json:"applied"`
+	ScannedFiles           int                           `json:"scanned_files"`
+	MatchedFiles           int                           `json:"matched_files"`
+	OrphanFileCount        int                           `json:"orphan_file_count"`
+	OrphanFileSamples      []string                      `json:"orphan_file_samples,omitempty"`
+	OrphanFileOmittedCount int                           `json:"orphan_file_omitted_count,omitempty"`
+	SubscriptionCount      int                           `json:"subscription_count"`
+	DownloadsToUpdateCount int                           `json:"downloads_to_update_count"`
+	DownloadsToCreateCount int                           `json:"downloads_to_create_count"`
+	DownloadsMissingCount  int                           `json:"downloads_missing_count"`
+	Subscriptions          []RecoverySubscriptionPreview `json:"subscriptions"`
+}
+
+type RecoverySubscriptionPreview struct {
+	SubscriptionID         uint   `json:"subscription_id"`
+	Name                   string `json:"name"`
+	CurrentEpisodeOld      int    `json:"current_episode_old"`
+	CurrentEpisodeNew      int    `json:"current_episode_new"`
+	LatestEpisodeOld       int    `json:"latest_episode_old"`
+	LatestEpisodeNew       int    `json:"latest_episode_new"`
+	EpisodesOnDiskCount    int    `json:"episodes_on_disk_count"`
+	EpisodeSamples         []int  `json:"episode_samples,omitempty"`
+	EpisodeOmittedCount    int    `json:"episode_omitted_count,omitempty"`
+	MatchedFileCount       int    `json:"matched_file_count"`
+	DownloadsToUpdateCount int    `json:"downloads_to_update_count"`
+	DownloadsToUpdateIDs   []uint `json:"downloads_to_update_ids,omitempty"`
+	DownloadsToCreateCount int    `json:"downloads_to_create_count"`
+	DownloadsToCreate      []int  `json:"downloads_to_create,omitempty"`
+	DownloadsMissingCount  int    `json:"downloads_missing_count"`
+	DownloadsMissingIDs    []uint `json:"downloads_missing_ids,omitempty"`
+}
+
 type SearchMikanInput struct {
 	Query string `json:"query" jsonschema:"Anime title keyword. Must be at least 2 characters."`
 }

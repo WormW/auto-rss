@@ -2,8 +2,8 @@
   <div class="backup-page">
     <div class="page-heading">
       <div>
-        <h2 class="page-title">备份恢复</h2>
-        <p class="page-subtitle">导出完整配置包，预览差异后再恢复或迁移。</p>
+        <h2 class="page-title">备份导入</h2>
+        <p class="page-subtitle">导出默认脱敏的配置包，预览差异后再导入或迁移。</p>
       </div>
       <n-space>
         <n-tooltip>
@@ -21,7 +21,7 @@
     </div>
 
     <n-alert type="info" class="top-alert">
-      默认导出的敏感字段会以占位符保存。恢复时这些占位符会被跳过，不会覆盖本机已有密钥。
+      默认导出的敏感字段会以占位符保存。导入时这些占位符会被跳过，不会覆盖本机已有密钥。
     </n-alert>
 
     <div class="summary-grid">
@@ -42,7 +42,7 @@
         </n-space>
       </n-card>
 
-      <n-card title="恢复策略" class="panel-card">
+      <n-card title="导入策略" class="panel-card">
         <n-form label-placement="top">
           <n-form-item label="来源格式">
             <n-select v-model:value="sourceFormat" :options="sourceOptions" />
@@ -86,14 +86,14 @@
             </n-button>
             <n-button
               type="primary"
-              :disabled="!plan || importableCount === 0"
+              :disabled="!previewedImport || importableCount === 0"
               :loading="importing"
               @click="applyImport"
             >
               <template #icon>
                 <n-icon><CloudDownloadOutline /></n-icon>
               </template>
-              执行导入
+              按预览导入
             </n-button>
           </n-space>
         </div>
@@ -125,7 +125,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, ref } from 'vue'
+import { computed, h, ref, watch } from 'vue'
 import {
   NAlert,
   NButton,
@@ -164,6 +164,10 @@ import {
   type BackupPackage,
   type BackupPackageSummary
 } from '@/api'
+import {
+  isPreviewedImportCurrent,
+  type PreviewedImport
+} from '@/utils/backupImportPreview'
 
 const message = useMessage()
 const dialog = useDialog()
@@ -178,6 +182,9 @@ const fileName = ref('')
 const importData = ref<unknown | null>(null)
 const plan = ref<BackupImportPlan | null>(null)
 const lastExportSummary = ref<BackupPackageSummary | null>(null)
+const importFileGeneration = ref(0)
+
+const previewedImport = ref<PreviewedImport<BackupImportPlan> | null>(null)
 
 const sourceOptions = [
   { label: '自动识别', value: 'auto' },
@@ -206,6 +213,19 @@ const importableCount = computed(() => {
   if (!plan.value) return 0
   return plan.value.summary.create + plan.value.summary.overwrite + plan.value.summary.merge
 })
+
+const invalidateImportPreview = () => {
+  plan.value = null
+  previewedImport.value = null
+}
+
+const currentImportInputSnapshot = () => ({
+  data: importData.value,
+  sourceFormat: sourceFormat.value,
+  strategy: strategy.value
+})
+
+watch([sourceFormat, strategy], invalidateImportPreview)
 
 const columns: DataTableColumns<BackupImportItem> = [
   {
@@ -272,26 +292,38 @@ const exportBackup = async () => {
 }
 
 const handleFileChange = async ({ file }: { file: UploadFileInfo }) => {
+  const generation = ++importFileGeneration.value
+
   if (!file.file) {
     clearImportState()
     return
   }
 
+  fileName.value = file.name
+  importData.value = null
+  invalidateImportPreview()
+
   try {
     const text = await file.file.text()
-    importData.value = JSON.parse(text)
-    fileName.value = file.name
-    plan.value = null
+    const parsed = JSON.parse(text)
+    if (generation !== importFileGeneration.value) {
+      return
+    }
+    importData.value = parsed
   } catch {
+    if (generation !== importFileGeneration.value) {
+      return
+    }
     clearImportState()
     message.error('备份文件不是有效的 JSON')
   }
 }
 
 const clearImportState = () => {
+  importFileGeneration.value += 1
   fileName.value = ''
   importData.value = null
-  plan.value = null
+  invalidateImportPreview()
 }
 
 const previewImport = async () => {
@@ -302,8 +334,28 @@ const previewImport = async () => {
 
   previewing.value = true
   try {
-    const res: any = await backupApi.preview(importData.value, sourceFormat.value, strategy.value)
-    plan.value = res.data as BackupImportPlan
+    const previewData = importData.value
+    const previewSourceFormat = sourceFormat.value
+    const previewStrategy = strategy.value
+    const res: any = await backupApi.preview(previewData, previewSourceFormat, previewStrategy)
+    if (!isPreviewedImportCurrent({
+      data: previewData,
+      sourceFormat: previewSourceFormat,
+      strategy: previewStrategy
+    }, currentImportInputSnapshot())) {
+      invalidateImportPreview()
+      message.warning('导入参数已变化，请重新预览')
+      return
+    }
+
+    const nextPlan = res.data as BackupImportPlan
+    plan.value = nextPlan
+    previewedImport.value = {
+      data: previewData,
+      sourceFormat: previewSourceFormat,
+      strategy: previewStrategy,
+      plan: nextPlan
+    }
     message.success('导入预览已生成')
   } catch (error: any) {
     const errorMsg = error?.response?.data?.message || '预览导入失败'
@@ -314,20 +366,44 @@ const previewImport = async () => {
 }
 
 const applyImport = () => {
-  if (!importData.value || !plan.value) {
+  const preview = previewedImport.value
+  if (!preview) {
+    return
+  }
+
+  if (!isPreviewedImportCurrent(preview, currentImportInputSnapshot())) {
+    invalidateImportPreview()
+    message.warning('导入参数已变化，请重新预览')
     return
   }
 
   dialog.warning({
     title: '确认导入',
-    content: `将新增 ${plan.value.summary.create} 项，覆盖 ${plan.value.summary.overwrite} 项，合并 ${plan.value.summary.merge} 项。`,
-    positiveText: '执行导入',
+    content: `将按当前预览新增 ${preview.plan.summary.create} 项，覆盖 ${preview.plan.summary.overwrite} 项，合并 ${preview.plan.summary.merge} 项；脱敏占位符会继续跳过。`,
+    positiveText: '按预览导入',
     negativeText: '取消',
     onPositiveClick: async () => {
+      if (!isPreviewedImportCurrent(preview, currentImportInputSnapshot())) {
+        invalidateImportPreview()
+        message.warning('导入参数已变化，请重新预览')
+        return
+      }
+
       importing.value = true
       try {
-        const res: any = await backupApi.import(importData.value, sourceFormat.value, strategy.value)
-        plan.value = res.data as BackupImportPlan
+        const res: any = await backupApi.import(preview.data, preview.sourceFormat, preview.strategy)
+        const importedPlan = res.data as BackupImportPlan
+        if (!isPreviewedImportCurrent(preview, currentImportInputSnapshot())) {
+          invalidateImportPreview()
+          message.success('导入完成')
+          return
+        }
+
+        plan.value = importedPlan
+        previewedImport.value = {
+          ...preview,
+          plan: importedPlan
+        }
         message.success('导入完成')
       } catch (error: any) {
         const errorMsg = error?.response?.data?.message || '导入失败'

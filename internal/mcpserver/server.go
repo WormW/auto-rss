@@ -20,10 +20,13 @@ import (
 	"github.com/WormW/auto-rss/internal/service/disk"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/mikan"
+	"github.com/WormW/auto-rss/internal/service/recovery"
 	"github.com/WormW/auto-rss/internal/service/scheduler"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"gorm.io/gorm"
 )
+
+const recoveryPreviewSampleLimit = 10
 
 type Dependencies struct {
 	DB               *gorm.DB
@@ -117,6 +120,7 @@ func (s *Server) registerTools() {
 	addTool(s, "get_download", "Get one download record by ID. Use this before retrying a download or when a user asks about one specific failed or stalled item. This is read-only.", true, s.getDownload)
 	addTool(s, "retry_download", "Reset a failed or stalled download and ask qBittorrent to add the torrent again when configured. Use only when the user explicitly asks to retry or repair a download. The tool returns an actionable error if qBittorrent cannot accept the torrent.", false, s.retryDownload)
 	addTool(s, "refresh_rss", "Trigger an asynchronous RSS check now. Use this when the user asks Auto-RSS to scan feeds immediately. It returns once the check has been queued; inspect logs or downloads afterwards for results.", false, s.refreshRSS)
+	addTool(s, "preview_recovery_scan", "Preview recovery candidates by running the recovery scanner in dry-run mode. This is read-only, accepts an optional subscription_id, never applies fixes, and returns bounded counts plus concise samples instead of full file dumps.", true, s.previewRecoveryScan)
 	addTool(s, "search_mikan", "Search Mikan for anime by title. Use this to discover candidate anime pages before fetching fansub RSS feeds. Do not create subscriptions from search results until you have selected a fansub RSS URL.", true, s.searchMikan)
 	addTool(s, "get_mikan_season", "List Mikan anime for a specific year and season. Use this for seasonal discovery, then call get_mikan_fansubs on an anime URL to get concrete RSS feeds.", true, s.getMikanSeason)
 	addTool(s, "get_mikan_fansubs", "Get fansub groups and RSS feed URLs for one Mikan anime page. Use this after search_mikan or get_mikan_season when choosing which RSS feed to subscribe to.", true, s.getMikanFansubs)
@@ -462,9 +466,13 @@ func (s *Server) retryDownload(ctx context.Context, req *mcp.CallToolRequest, in
 		return nil, RetryDownloadOutput{}, fmt.Errorf("download %d was not found", input.ID)
 	}
 
+	if err := validateRetryDownloadPreconditions(download); err != nil {
+		return nil, RetryDownloadOutput{}, err
+	}
+
 	if download.TorrentHash != "" && s.qbClient != nil {
-		if err := s.qbClient.DeleteTorrentWithPayload(download.TorrentHash); err != nil {
-			logger.Warn("MCP retry could not delete old qBittorrent torrent", "download_id", input.ID, "hash", download.TorrentHash, "error", err.Error())
+		if err := s.qbClient.RemoveTorrentTask(download.TorrentHash); err != nil {
+			logger.Warn("MCP retry could not remove old qBittorrent task", "download_id", input.ID, "hash", download.TorrentHash, "error", err.Error())
 		}
 	}
 
@@ -509,6 +517,16 @@ func (s *Server) retryDownload(ctx context.Context, req *mcp.CallToolRequest, in
 	return resultWithText(out)
 }
 
+func validateRetryDownloadPreconditions(download *model.Download) error {
+	if download.Status != model.DownloadStatusFailed && download.Status != model.DownloadStatusStalled {
+		return fmt.Errorf("download %d cannot be retried while status is %q; only failed or stalled downloads can be retried", download.ID, download.Status)
+	}
+	if strings.TrimSpace(download.TorrentURL) == "" {
+		return fmt.Errorf("download %d cannot be retried because it has no torrent URL", download.ID)
+	}
+	return nil
+}
+
 func (s *Server) refreshRSS(ctx context.Context, req *mcp.CallToolRequest, input RefreshRSSInput) (*mcp.CallToolResult, RefreshRSSOutput, error) {
 	if s.scheduler == nil {
 		return nil, RefreshRSSOutput{}, fmt.Errorf("RSS scheduler is not available")
@@ -517,4 +535,109 @@ func (s *Server) refreshRSS(ctx context.Context, req *mcp.CallToolRequest, input
 		return nil, RefreshRSSOutput{}, fmt.Errorf("failed to trigger RSS refresh: %w", err)
 	}
 	return resultWithText(RefreshRSSOutput{Message: "RSS refresh queued"})
+}
+
+func (s *Server) previewRecoveryScan(ctx context.Context, req *mcp.CallToolRequest, input PreviewRecoveryInput) (*mcp.CallToolResult, RecoveryPreviewOutput, error) {
+	var subscriptionID *uint
+	if input.SubscriptionID != 0 {
+		subscriptionID = &input.SubscriptionID
+	}
+
+	scanner := recovery.NewScanner(s.db, s.subscriptionRepo, s.downloadRepo, s.configRepo, s.bangumiService, configuredDownloadPath(s.cfg))
+	result, err := scanner.Scan(&recovery.ScanRequest{
+		DryRun:         true,
+		SubscriptionID: subscriptionID,
+	})
+	if err != nil {
+		return nil, RecoveryPreviewOutput{}, fmt.Errorf("failed to preview recovery scan: %w", err)
+	}
+
+	return resultWithText(summarizeRecoveryPreview(result))
+}
+
+func configuredDownloadPath(cfg *config.Config) string {
+	if cfg != nil && strings.TrimSpace(cfg.DownloadPath) != "" {
+		return cfg.DownloadPath
+	}
+	return constants.DefaultDownloadPath
+}
+
+func summarizeRecoveryPreview(result *recovery.ScanResult) RecoveryPreviewOutput {
+	out := RecoveryPreviewOutput{
+		DryRun:                 true,
+		PreviewOnly:            true,
+		Applied:                result.Applied,
+		ScannedFiles:           result.ScannedFiles,
+		MatchedFiles:           result.MatchedFiles,
+		OrphanFileCount:        len(result.OrphanFiles),
+		OrphanFileSamples:      limitStrings(result.OrphanFiles, recoveryPreviewSampleLimit),
+		OrphanFileOmittedCount: omittedCount(len(result.OrphanFiles), recoveryPreviewSampleLimit),
+		SubscriptionCount:      len(result.Subscriptions),
+		Subscriptions:          make([]RecoverySubscriptionPreview, 0, len(result.Subscriptions)),
+	}
+
+	for _, sub := range result.Subscriptions {
+		preview := RecoverySubscriptionPreview{
+			SubscriptionID:         sub.SubscriptionID,
+			Name:                   sub.Name,
+			CurrentEpisodeOld:      sub.CurrentEpisodeOld,
+			CurrentEpisodeNew:      sub.CurrentEpisodeNew,
+			LatestEpisodeOld:       sub.LatestEpisodeOld,
+			LatestEpisodeNew:       sub.LatestEpisodeNew,
+			EpisodesOnDiskCount:    len(sub.EpisodesOnDisk),
+			EpisodeSamples:         limitInts(sub.EpisodesOnDisk, recoveryPreviewSampleLimit),
+			EpisodeOmittedCount:    omittedCount(len(sub.EpisodesOnDisk), recoveryPreviewSampleLimit),
+			MatchedFileCount:       len(sub.MatchedEpisodes),
+			DownloadsToUpdateCount: len(sub.DownloadsToUpdate),
+			DownloadsToUpdateIDs:   limitUints(sub.DownloadsToUpdate, recoveryPreviewSampleLimit),
+			DownloadsToCreateCount: len(sub.DownloadsToCreate),
+			DownloadsToCreate:      limitInts(sub.DownloadsToCreate, recoveryPreviewSampleLimit),
+			DownloadsMissingCount:  len(sub.DownloadsMissing),
+			DownloadsMissingIDs:    limitUints(sub.DownloadsMissing, recoveryPreviewSampleLimit),
+		}
+
+		out.DownloadsToUpdateCount += preview.DownloadsToUpdateCount
+		out.DownloadsToCreateCount += preview.DownloadsToCreateCount
+		out.DownloadsMissingCount += preview.DownloadsMissingCount
+		out.Subscriptions = append(out.Subscriptions, preview)
+	}
+
+	return out
+}
+
+func limitStrings(items []string, limit int) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	if len(items) > limit {
+		return append([]string(nil), items[:limit]...)
+	}
+	return append([]string(nil), items...)
+}
+
+func limitInts(items []int, limit int) []int {
+	if len(items) == 0 {
+		return nil
+	}
+	if len(items) > limit {
+		return append([]int(nil), items[:limit]...)
+	}
+	return append([]int(nil), items...)
+}
+
+func limitUints(items []uint, limit int) []uint {
+	if len(items) == 0 {
+		return nil
+	}
+	if len(items) > limit {
+		return append([]uint(nil), items[:limit]...)
+	}
+	return append([]uint(nil), items...)
+}
+
+func omittedCount(length, limit int) int {
+	if length <= limit {
+		return 0
+	}
+	return length - limit
 }
