@@ -45,6 +45,7 @@ type FileOrganizer struct {
 	scanOnStart      bool
 	recoveryMux      sync.Mutex
 	recoveryInterval time.Duration
+	stat             func(string) (os.FileInfo, error)
 	// New service interfaces
 	parser         *FileNameParser
 	matcher        SubscriptionMatcher
@@ -96,6 +97,7 @@ func NewFileOrganizer(
 		processing:       make(map[string]bool),
 		scanOnStart:      false,
 		recoveryInterval: time.Minute,
+		stat:             os.Stat,
 		parser:           parser,
 		matcher:          matcher,
 		mover:            mover,
@@ -497,13 +499,23 @@ func (f *FileOrganizer) organizeFile(filePath string) error {
 	}
 
 	if moved {
-		go func() {
-			time.Sleep(10 * time.Second)
+		started := f.startTask(func() {
+			select {
+			case <-time.After(10 * time.Second):
+			case <-f.ctx.Done():
+			}
 			f.procMux.Lock()
 			delete(f.processing, newPath)
 			f.procMux.Unlock()
-			logger.Debug("Cleared processing flag for moved file", "path", newPath)
-		}()
+			if f.ctx.Err() == nil {
+				logger.Debug("Cleared processing flag for moved file", "path", newPath)
+			}
+		})
+		if !started {
+			f.procMux.Lock()
+			delete(f.processing, newPath)
+			f.procMux.Unlock()
+		}
 	}
 
 	logger.Info("File organized successfully",
@@ -577,6 +589,9 @@ func (f *FileOrganizer) recoverOrganizingDownloads() {
 			return
 		}
 		for i := range downloads {
+			if f.ctx.Err() != nil {
+				return
+			}
 			lastID = downloads[i].ID
 			if err := f.recoverOrganizingDownload(&downloads[i]); err != nil {
 				logger.Warn("Failed to recover organizing checkpoint",
@@ -588,6 +603,9 @@ func (f *FileOrganizer) recoverOrganizingDownloads() {
 }
 
 func (f *FileOrganizer) recoverOrganizingDownload(download *model.Download) error {
+	if err := f.ctx.Err(); err != nil {
+		return err
+	}
 	sourcePath := strings.TrimSpace(download.FilePath)
 	targetPath := strings.TrimSpace(download.RenamedPath)
 	if sourcePath == "" || targetPath == "" {
@@ -599,10 +617,20 @@ func (f *FileOrganizer) recoverOrganizingDownload(download *model.Download) erro
 	if _, err := utils.ValidatePath(targetPath, f.destDir); err != nil {
 		return fmt.Errorf("checkpoint target escapes destination directory: %w", err)
 	}
-	targetInfo, targetErr := os.Stat(targetPath)
-	sourceInfo, sourceErr := os.Stat(sourcePath)
-	targetExists := targetErr == nil && !targetInfo.IsDir()
-	sourceExists := sourceErr == nil && !sourceInfo.IsDir()
+	targetInfo, targetExists, err := f.strictStat(targetPath)
+	if err != nil {
+		return fmt.Errorf("failed to stat checkpoint target: %w", err)
+	}
+	if err := f.ctx.Err(); err != nil {
+		return err
+	}
+	sourceInfo, sourceExists, err := f.strictStat(sourcePath)
+	if err != nil {
+		return fmt.Errorf("failed to stat checkpoint source: %w", err)
+	}
+	if err := f.ctx.Err(); err != nil {
+		return err
+	}
 	if targetExists && sourceExists && !os.SameFile(sourceInfo, targetInfo) {
 		return fmt.Errorf("organizing checkpoint conflict: source and target both exist")
 	}
@@ -610,8 +638,14 @@ func (f *FileOrganizer) recoverOrganizingDownload(download *model.Download) erro
 		if !sourceExists {
 			return fmt.Errorf("neither checkpoint source nor target exists")
 		}
+		if err := f.ctx.Err(); err != nil {
+			return err
+		}
 		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
 			return fmt.Errorf("failed to create checkpoint target directory: %w", err)
+		}
+		if err := f.ctx.Err(); err != nil {
+			return err
 		}
 		actualPath, err := f.mover.Move(sourcePath, targetPath)
 		if err != nil {
@@ -624,16 +658,37 @@ func (f *FileOrganizer) recoverOrganizingDownload(download *model.Download) erro
 	}
 	subscription := &download.Subscription
 	if subscription.ID == 0 {
+		if err := f.ctx.Err(); err != nil {
+			return err
+		}
 		loaded, err := f.subscriptionRepo.GetByID(download.SubscriptionID)
 		if err != nil {
 			return fmt.Errorf("failed to load checkpoint subscription: %w", err)
 		}
 		subscription = loaded
 	}
+	if err := f.ctx.Err(); err != nil {
+		return err
+	}
 	if err := f.completeOrganizingDownload(download, subscription, targetPath); err != nil {
 		return fmt.Errorf("failed to complete organizing checkpoint: %w", err)
 	}
 	return nil
+}
+
+func (f *FileOrganizer) strictStat(path string) (os.FileInfo, bool, error) {
+	stat := f.stat
+	if stat == nil {
+		stat = os.Stat
+	}
+	info, err := stat(path)
+	if err == nil {
+		return info, !info.IsDir(), nil
+	}
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	return nil, false, err
 }
 
 func fileExists(path string) bool {

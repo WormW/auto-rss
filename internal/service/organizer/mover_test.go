@@ -19,7 +19,7 @@ func TestFileMoverCopyRemoveFailureCleansDestination(t *testing.T) {
 	}
 	mover := &fileMover{
 		videoExts: []string{".mkv"},
-		rename:    func(string, string) error { return errors.New("cross-device") },
+		link:      func(string, string) error { return errors.New("cross-device") },
 		remove: func(path string) error {
 			if path == src {
 				return errors.New("source busy")

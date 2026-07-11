@@ -43,7 +43,7 @@ type FileMover interface {
 // fileMover 文件移动服务实现
 type fileMover struct {
 	videoExts []string
-	rename    func(string, string) error
+	link      func(string, string) error
 	remove    func(string) error
 }
 
@@ -51,35 +51,34 @@ type fileMover struct {
 func NewFileMover() FileMover {
 	return &fileMover{
 		videoExts: []string{".mkv", ".mp4", ".avi", ".flv", ".ts", ".m2ts", ".mov", ".wmv"},
-		rename:    os.Rename,
+		link:      os.Link,
 		remove:    os.Remove,
 	}
 }
 
 // Move 移动文件（支持跨文件系统）
 func (m *fileMover) Move(src, dest string) (string, error) {
-	if _, err := os.Stat(dest); err == nil {
-		return "", fmt.Errorf("destination already exists: %s", dest)
-	}
-
-	// 尝试重命名（如果在同一文件系统上）
-	rename := m.rename
-	if rename == nil {
-		rename = os.Rename
+	link := m.link
+	if link == nil {
+		link = os.Link
 	}
 	remove := m.remove
 	if remove == nil {
 		remove = os.Remove
 	}
-	err := rename(src, dest)
-	if err == nil {
+	if err := link(src, dest); err == nil {
+		if removeErr := remove(src); removeErr != nil {
+			moveErr := fmt.Errorf("failed to remove source after link: %w", removeErr)
+			if cleanupErr := remove(dest); cleanupErr != nil {
+				return "", errors.Join(moveErr, fmt.Errorf("failed to remove linked destination: %w", cleanupErr))
+			}
+			return "", moveErr
+		}
 		return dest, nil
+	} else if os.IsExist(err) {
+		return "", fmt.Errorf("destination already exists: %s", dest)
 	}
-
-	// 如果重命名失败（跨文件系统），则复制后删除
-	logger.Debug("Rename failed, trying copy + delete", "error", err)
-
-	if err := m.Copy(src, dest); err != nil {
+	if err := m.copyExclusive(src, dest); err != nil {
 		return "", fmt.Errorf("failed to copy file: %w", err)
 	}
 
@@ -92,6 +91,52 @@ func (m *fileMover) Move(src, dest string) (string, error) {
 	}
 
 	return dest, nil
+}
+
+func (m *fileMover) copyExclusive(src, dest string) (err error) {
+	source, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	info, err := source.Stat()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+		return err
+	}
+	target, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode())
+	if err != nil {
+		return err
+	}
+	cleanup := true
+	closed := false
+	defer func() {
+		if !closed {
+			if closeErr := target.Close(); err == nil && closeErr != nil {
+				err = closeErr
+			}
+		}
+		if cleanup || err != nil {
+			_ = os.Remove(dest)
+		}
+	}()
+	if _, err = io.Copy(target, source); err != nil {
+		return err
+	}
+	if err = target.Chmod(info.Mode()); err != nil {
+		return err
+	}
+	if err = target.Sync(); err != nil {
+		return err
+	}
+	if err = target.Close(); err != nil {
+		return err
+	}
+	closed = true
+	cleanup = false
+	return nil
 }
 
 // Copy 复制文件
