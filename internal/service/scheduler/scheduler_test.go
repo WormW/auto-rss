@@ -225,6 +225,7 @@ func TestRSSSourceBaselineReconcilesLedgerWithoutCreatingDownloads(t *testing.T)
 		schedulerRSSItem(1, "new-source-episode-1", now.Add(-72*time.Hour)),
 		schedulerRSSItem(2, "new-source-episode-2", now.Add(-71*time.Hour)),
 		schedulerRSSItem(3, "new-source-episode-3", now.Add(-70*time.Hour)),
+		schedulerRSSItem(99, "new-source-out-of-range", now),
 	}
 	for i := range items {
 		items[i].SizeBytes = 1
@@ -351,9 +352,35 @@ func TestEmptyRSSSourceBaselineClearsOldWatermark(t *testing.T) {
 }
 
 func TestRSSSourceBaselineCompletionFailureKeepsPendingAndWatermark(t *testing.T) {
-	fx := newSchedulerLedgerFixture(t, nil)
+	now := time.Now().UTC().Truncate(time.Second)
+	items := []rss.RSSItem{
+		schedulerRSSItem(1, "completion-rollback-candidate", now.Add(-2*time.Hour)),
+		schedulerRSSItem(2, "completion-rollback-missing", now.Add(-time.Hour)),
+	}
+	fx := newSchedulerLedgerFixture(t, items)
 	sub := fx.createSubscription(t)
 	originalWatermark := *sub.LastRSSPubTime
+	oldDownload := model.Download{
+		SubscriptionID: sub.ID,
+		Title:          "old source episode 1",
+		Episode:        1,
+		TorrentURL:     "https://old.example/episode-1.torrent",
+		TorrentHash:    "completion-rollback-old",
+		Status:         model.DownloadStatusCompleted,
+		Purpose:        model.DownloadPurposeNormal,
+	}
+	require.NoError(t, fx.db.Create(&oldDownload).Error)
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID:    sub.ID,
+		Episode:           1,
+		Status:            model.EpisodeStatusDownloaded,
+		StatusSource:      model.EpisodeStatusSourceAutomatic,
+		ActiveDownloadID:  &oldDownload.ID,
+		ActiveTorrentHash: oldDownload.TorrentHash,
+		ActiveTorrentURL:  oldDownload.TorrentURL,
+		ActiveTitle:       oldDownload.Title,
+	}
+	require.NoError(t, fx.db.Create(&ledger).Error)
 	require.NoError(t, fx.db.Model(&model.Subscription{}).Where("id = ?", sub.ID).Update("rss_baseline_pending", true).Error)
 	require.NoError(t, fx.db.Exec(`
 		CREATE TRIGGER block_baseline_completion
@@ -369,6 +396,14 @@ func TestRSSSourceBaselineCompletionFailureKeepsPendingAndWatermark(t *testing.T
 	assert.True(t, afterFailure.RSSBaselinePending)
 	require.NotNil(t, afterFailure.LastRSSPubTime)
 	assert.Equal(t, originalWatermark, *afterFailure.LastRSSPubTime)
+	var candidateCount int64
+	require.NoError(t, fx.db.Model(&model.EpisodeResourceCandidate{}).Count(&candidateCount).Error)
+	assert.Zero(t, candidateCount)
+	_, err = fx.episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 2)
+	require.ErrorIs(t, err, gorm.ErrRecordNotFound)
+	unchanged, err := fx.episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
+	require.NoError(t, err)
+	assert.Equal(t, oldDownload.TorrentHash, unchanged.ActiveTorrentHash)
 
 	require.NoError(t, fx.db.Exec("DROP TRIGGER block_baseline_completion").Error)
 	fx.scheduler.checkRSSFeeds()
@@ -376,8 +411,14 @@ func TestRSSSourceBaselineCompletionFailureKeepsPendingAndWatermark(t *testing.T
 	afterRetry, err := repository.NewSubscriptionRepository(fx.db).GetByID(sub.ID)
 	require.NoError(t, err)
 	assert.False(t, afterRetry.RSSBaselinePending)
-	assert.Nil(t, afterRetry.LastRSSPubTime)
+	require.NotNil(t, afterRetry.LastRSSPubTime)
+	assert.Equal(t, items[1].PubTime, *afterRetry.LastRSSPubTime)
 	assert.NotNil(t, afterRetry.LastCheckTime)
+	require.NoError(t, fx.db.Model(&model.EpisodeResourceCandidate{}).Count(&candidateCount).Error)
+	assert.EqualValues(t, 1, candidateCount)
+	missing, err := fx.episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 2)
+	require.NoError(t, err)
+	assert.Equal(t, model.EpisodeStatusMissing, missing.Status)
 }
 
 func TestRSSSourceBaselineDoesNotCompleteAfterConcurrentSourceChange(t *testing.T) {
@@ -401,8 +442,30 @@ func TestRSSSourceBaselineDoesNotCompleteAfterConcurrentSourceChange(t *testing.
 }
 
 func TestRSSSourceBaselineDoesNotCompleteAfterABASourceChange(t *testing.T) {
-	fx := newSchedulerLedgerFixture(t, nil)
+	item := schedulerRSSItem(1, "aba-new-source-candidate", time.Now().UTC().Add(-time.Hour))
+	fx := newSchedulerLedgerFixture(t, []rss.RSSItem{item})
 	created := fx.createSubscription(t)
+	oldDownload := model.Download{
+		SubscriptionID: created.ID,
+		Title:          "old source episode 1",
+		Episode:        1,
+		TorrentURL:     "https://old.example/episode-1.torrent",
+		TorrentHash:    "aba-old-source",
+		Status:         model.DownloadStatusCompleted,
+		Purpose:        model.DownloadPurposeNormal,
+	}
+	require.NoError(t, fx.db.Create(&oldDownload).Error)
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID:    created.ID,
+		Episode:           1,
+		Status:            model.EpisodeStatusDownloaded,
+		StatusSource:      model.EpisodeStatusSourceAutomatic,
+		ActiveDownloadID:  &oldDownload.ID,
+		ActiveTorrentHash: oldDownload.TorrentHash,
+		ActiveTorrentURL:  oldDownload.TorrentURL,
+		ActiveTitle:       oldDownload.Title,
+	}
+	require.NoError(t, fx.db.Create(&ledger).Error)
 	require.NoError(t, fx.db.Model(&model.Subscription{}).Where("id = ?", created.ID).Update("rss_baseline_pending", true).Error)
 
 	snapshot, err := repository.NewSubscriptionRepository(fx.db).GetByID(created.ID)
@@ -411,36 +474,19 @@ func TestRSSSourceBaselineDoesNotCompleteAfterABASourceChange(t *testing.T) {
 	require.NotNil(t, snapshot.LastRSSPubTime)
 	originalWatermark := *snapshot.LastRSSPubTime
 	originalURL := snapshot.RssURL
+	changedAt := snapshot.UpdatedAt.Add(time.Second)
+	revertedAt := changedAt.Add(time.Second)
+	require.NoError(t, fx.db.Exec(
+		"UPDATE subscriptions SET rss_url = ?, rss_baseline_pending = ?, updated_at = ? WHERE id = ?",
+		"https://intermediate.example/feed", true, changedAt, snapshot.ID,
+	).Error)
+	require.NoError(t, fx.db.Exec(
+		"UPDATE subscriptions SET rss_url = ?, rss_baseline_pending = ?, updated_at = ? WHERE id = ?",
+		originalURL, true, revertedAt, snapshot.ID,
+	).Error)
 
-	callbackName := "test:rss_baseline_aba"
-	callbackRan := false
-	require.NoError(t, fx.db.Callback().Update().Before("gorm:update").Register(callbackName, func(tx *gorm.DB) {
-		if callbackRan || tx.Statement.Table != (model.Subscription{}).TableName() {
-			return
-		}
-		callbackRan = true
-		changedAt := snapshot.UpdatedAt.Add(time.Second)
-		revertedAt := changedAt.Add(time.Second)
-		db := tx.Session(&gorm.Session{NewDB: true, SkipHooks: true})
-		if err := db.Exec(
-			"UPDATE subscriptions SET rss_url = ?, rss_baseline_pending = ?, updated_at = ? WHERE id = ?",
-			"https://intermediate.example/feed", true, changedAt, snapshot.ID,
-		).Error; err != nil {
-			tx.AddError(err)
-			return
-		}
-		if err := db.Exec(
-			"UPDATE subscriptions SET rss_url = ?, rss_baseline_pending = ?, updated_at = ? WHERE id = ?",
-			originalURL, true, revertedAt, snapshot.ID,
-		).Error; err != nil {
-			tx.AddError(err)
-		}
-	}))
-	t.Cleanup(func() { _ = fx.db.Callback().Update().Remove(callbackName) })
-
-	err = fx.scheduler.reconcileRSSBaseline(snapshot, nil)
+	err = fx.scheduler.reconcileRSSBaseline(snapshot, []rss.RSSItem{item})
 	require.ErrorContains(t, err, "source changed")
-	require.True(t, callbackRan)
 
 	got, err := repository.NewSubscriptionRepository(fx.db).GetByID(snapshot.ID)
 	require.NoError(t, err)
@@ -448,6 +494,12 @@ func TestRSSSourceBaselineDoesNotCompleteAfterABASourceChange(t *testing.T) {
 	assert.True(t, got.RSSBaselinePending)
 	require.NotNil(t, got.LastRSSPubTime)
 	assert.Equal(t, originalWatermark, *got.LastRSSPubTime)
+	var candidateCount int64
+	require.NoError(t, fx.db.Model(&model.EpisodeResourceCandidate{}).Count(&candidateCount).Error)
+	assert.Zero(t, candidateCount)
+	unchanged, err := fx.episodeRepo.GetBySubscriptionAndEpisode(snapshot.ID, 1)
+	require.NoError(t, err)
+	assert.Equal(t, oldDownload.TorrentHash, unchanged.ActiveTorrentHash)
 }
 
 func TestSmartFetchAlwaysFetchesPendingRSSBaselineAfterCalendarGuard(t *testing.T) {

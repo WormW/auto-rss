@@ -417,33 +417,49 @@ func (s *scheduler) reconcileRSSBaseline(sub *model.Subscription, items []rss.RS
 		return errors.New("episode service is required")
 	}
 
-	var maxPubTime *time.Time
-	for _, item := range items {
-		if !item.PubTime.IsZero() && (maxPubTime == nil || item.PubTime.After(*maxPubTime)) {
-			pubCopy := item.PubTime
-			maxPubTime = &pubCopy
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var current model.Subscription
+		err := tx.Where(
+			"id = ? AND rss_url = ? AND rss_baseline_pending = ? AND updated_at = ?",
+			sub.ID,
+			sub.RssURL,
+			true,
+			sub.UpdatedAt,
+		).First(&current).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("rss source changed while baseline was running")
 		}
-		relativeEpisode := sub.RelativeEpisode(item.Episode)
-		if relativeEpisode <= 0 {
-			continue
-		}
-		if sub.TotalEpisodes > 0 && relativeEpisode > sub.TotalEpisodes {
-			continue
-		}
-		_, err := s.episodeService.EvaluateRSSItem(context.Background(), sub, episode.RSSResource{
-			OriginalEpisode: item.Episode,
-			Resource:        rssItemResource(&item),
-			Fansub:          item.Fansub,
-			Language:        string(item.Language),
-			PubTime:         item.PubTime,
-			SourceRSSURL:    sub.RssURL,
-		}, true)
 		if err != nil {
 			return err
 		}
-	}
 
-	return s.db.Transaction(func(tx *gorm.DB) error {
+		txEpisodeService := episode.NewService(repository.NewEpisodeRepository(tx))
+		var maxPubTime *time.Time
+		for _, item := range items {
+			relativeEpisode := sub.RelativeEpisode(item.Episode)
+			if relativeEpisode <= 0 {
+				continue
+			}
+			if sub.TotalEpisodes > 0 && relativeEpisode > sub.TotalEpisodes {
+				continue
+			}
+			if !item.PubTime.IsZero() && (maxPubTime == nil || item.PubTime.After(*maxPubTime)) {
+				pubCopy := item.PubTime
+				maxPubTime = &pubCopy
+			}
+			_, err := txEpisodeService.EvaluateRSSItem(context.Background(), sub, episode.RSSResource{
+				OriginalEpisode: item.Episode,
+				Resource:        rssItemResource(&item),
+				Fansub:          item.Fansub,
+				Language:        string(item.Language),
+				PubTime:         item.PubTime,
+				SourceRSSURL:    sub.RssURL,
+			}, true)
+			if err != nil {
+				return err
+			}
+		}
+
 		now := time.Now()
 		updates := map[string]any{
 			"last_rss_pub_time":    maxPubTime,

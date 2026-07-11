@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -304,6 +305,18 @@ func normalizeSubscriptionSource(subscription *model.Subscription) {
 	}
 }
 
+func validSubscriptionEpisodeTotal(total int) bool {
+	return total >= 0 && total <= model.MaxSubscriptionEpisodes
+}
+
+func parseSubscriptionEpisodeTotal(value any) (int, bool) {
+	total, ok := value.(float64)
+	if !ok || math.Trunc(total) != total || total < 0 || total > model.MaxSubscriptionEpisodes {
+		return 0, false
+	}
+	return int(total), true
+}
+
 // Preview 预览订阅规则会匹配到的 RSS 条目
 func (h *SubscriptionHandler) Preview(c *gin.Context) {
 	var req SubscriptionPreviewRequest
@@ -536,6 +549,13 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		})
 		return
 	}
+	if !validSubscriptionEpisodeTotal(subscription.TotalEpisodes) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": fmt.Sprintf("total_episodes must be between 0 and %d", model.MaxSubscriptionEpisodes),
+		})
+		return
+	}
 
 	logger.Info("Creating new subscription",
 		"name", subscription.Name,
@@ -581,7 +601,10 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 			if err := h.repo.CreateInTx(tx, &subscription); err != nil {
 				return err
 			}
-			return h.episodeRepo.EnsureRangeInTx(tx, subscription.ID, subscription.TotalEpisodes)
+			if subscription.TotalEpisodes > 0 {
+				return h.episodeRepo.EnsureRangeInTx(tx, subscription.ID, subscription.TotalEpisodes)
+			}
+			return nil
 		})
 	} else {
 		createErr = h.repo.Create(&subscription)
@@ -642,6 +665,7 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 	originalName := existing.Name
 	originalSeason := existing.Season
 	originalRSSURL := strings.TrimSpace(existing.RssURL)
+	originalTotalEpisodes := existing.TotalEpisodes
 
 	var updates map[string]interface{}
 	if err := c.ShouldBindJSON(&updates); err != nil {
@@ -654,6 +678,20 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 			"message": "Invalid request body",
 		})
 		return
+	}
+	requestedTotalEpisodes := existing.TotalEpisodes
+	totalEpisodesUpdated := false
+	if value, exists := updates["total_episodes"]; exists {
+		var valid bool
+		requestedTotalEpisodes, valid = parseSubscriptionEpisodeTotal(value)
+		if !valid {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"code":    400,
+				"message": fmt.Sprintf("total_episodes must be an integer between 0 and %d", model.MaxSubscriptionEpisodes),
+			})
+			return
+		}
+		totalEpisodesUpdated = true
 	}
 
 	logger.Info("Updating subscription",
@@ -685,8 +723,8 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 	if bangumiID, ok := updates["bangumi_id"].(float64); ok {
 		existing.BangumiID = int(bangumiID)
 	}
-	if totalEps, ok := updates["total_episodes"].(float64); ok {
-		existing.TotalEpisodes = int(totalEps)
+	if totalEpisodesUpdated {
+		existing.TotalEpisodes = requestedTotalEpisodes
 	}
 	if epOffset, ok := updates["episode_offset"].(float64); ok {
 		existing.EpisodeOffset = int(epOffset)
@@ -756,7 +794,10 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 			if err := h.repo.UpdateInTx(tx, existing); err != nil {
 				return err
 			}
-			return h.episodeRepo.EnsureRangeInTx(tx, existing.ID, existing.TotalEpisodes)
+			if existing.TotalEpisodes > originalTotalEpisodes {
+				return h.episodeRepo.EnsureRangeInTx(tx, existing.ID, existing.TotalEpisodes)
+			}
+			return nil
 		})
 	} else {
 		updateErr = h.repo.Update(existing)

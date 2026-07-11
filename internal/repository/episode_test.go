@@ -291,6 +291,39 @@ func TestEpisodeRepositoryEnsureRangeAndRefreshProgress(t *testing.T) {
 	assert.EqualValues(t, 4, count)
 }
 
+func TestEpisodeRepositoryEnsureRangeRejectsExcessiveTotal(t *testing.T) {
+	_, repo := setupEpisodeRepository(t)
+	err := repo.EnsureRange(1, 10001)
+	require.ErrorContains(t, err, "10000")
+}
+
+func TestEpisodeRepositoryEnsureRangeOnlyInsertsMissingEpisodes(t *testing.T) {
+	db, repo := setupEpisodeRepository(t)
+	existing := make([]model.SubscriptionEpisode, 0, 9)
+	for episodeNumber := 1; episodeNumber < 10; episodeNumber++ {
+		existing = append(existing, model.SubscriptionEpisode{
+			SubscriptionID: 1,
+			Episode:        episodeNumber,
+			Status:         model.EpisodeStatusMissing,
+			StatusSource:   model.EpisodeStatusSourceAutomatic,
+		})
+	}
+	require.NoError(t, db.Create(&existing).Error)
+	require.NoError(t, db.Exec(`
+		CREATE TRIGGER reject_existing_episode_reinsert
+		BEFORE INSERT ON subscription_episodes
+		WHEN NEW.episode < 10
+		BEGIN SELECT RAISE(ABORT, 'existing episode reinserted'); END;
+	`).Error)
+
+	require.NoError(t, repo.EnsureRange(1, 10))
+
+	var episodes []model.SubscriptionEpisode
+	require.NoError(t, db.Where("subscription_id = ?", 1).Order("episode").Find(&episodes).Error)
+	require.Len(t, episodes, 10)
+	assert.Equal(t, 10, episodes[9].Episode)
+}
+
 func TestEpisodeRepositoryRefreshProgressDoesNotOverwriteConcurrentSubscriptionFields(t *testing.T) {
 	db, repo := setupEpisodeRepository(t)
 	sub := model.Subscription{

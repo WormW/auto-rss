@@ -2,6 +2,8 @@ package model
 
 import "time"
 
+const MaxSubscriptionEpisodes = 10000
+
 // Subscription 订阅模型
 type Subscription struct {
 	ID              uint       `json:"id" gorm:"primaryKey"`

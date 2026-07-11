@@ -99,6 +99,21 @@ func TestSubscriptionHandlerCreateCalendarDoesNotSetRSSBaseline(t *testing.T) {
 	assert.False(t, sub.RSSBaselinePending)
 }
 
+func TestSubscriptionHandlerCreateRejectsInvalidEpisodeTotals(t *testing.T) {
+	for _, total := range []int{-1, 10001} {
+		t.Run(fmt.Sprintf("total_%d", total), func(t *testing.T) {
+			fx := newSubscriptionBaselineFixture(t)
+			w := performSubscriptionBaselineRequest(t, fx.handler, http.MethodPost, "/subscriptions", map[string]any{
+				"name": "Invalid Total", "rss_url": "https://invalid.example/feed", "total_episodes": total,
+			})
+			require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+			var count int64
+			require.NoError(t, fx.db.Model(&model.Subscription{}).Count(&count).Error)
+			assert.Zero(t, count)
+		})
+	}
+}
+
 func TestSubscriptionHandlerUpdateRSSURLControlsBaselineAndTrimsValue(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -178,14 +193,59 @@ func TestSubscriptionHandlerUpdateExpandsButDoesNotShrinkEpisodeRange(t *testing
 
 	w := performSubscriptionBaselineRequest(t, fx.handler, http.MethodPut, fmt.Sprintf("/subscriptions/%d", sub.ID), map[string]any{"total_episodes": 5})
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	episodeOperations := 0
+	callbackName := "test:no_episode_range_scan_on_shrink"
+	countEpisodeOperation := func(tx *gorm.DB) {
+		if tx.Statement.Table == (model.SubscriptionEpisode{}).TableName() {
+			episodeOperations++
+		}
+	}
+	require.NoError(t, fx.db.Callback().Query().Before("gorm:query").Register(callbackName, countEpisodeOperation))
+	require.NoError(t, fx.db.Callback().Create().Before("gorm:create").Register(callbackName, countEpisodeOperation))
+	t.Cleanup(func() {
+		_ = fx.db.Callback().Query().Remove(callbackName)
+		_ = fx.db.Callback().Create().Remove(callbackName)
+	})
 	w = performSubscriptionBaselineRequest(t, fx.handler, http.MethodPut, fmt.Sprintf("/subscriptions/%d", sub.ID), map[string]any{"total_episodes": 2})
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Zero(t, episodeOperations)
 
 	var episodes []model.SubscriptionEpisode
 	require.NoError(t, fx.db.Where("subscription_id = ?", sub.ID).Order("episode").Find(&episodes).Error)
 	require.Len(t, episodes, 5)
 	assert.Equal(t, 4, episodes[3].Episode)
 	assert.Equal(t, 5, episodes[4].Episode)
+}
+
+func TestSubscriptionHandlerUpdateRejectsInvalidEpisodeTotals(t *testing.T) {
+	tests := []struct {
+		name  string
+		total any
+	}{
+		{name: "fractional", total: 3.5},
+		{name: "negative", total: -1},
+		{name: "over limit", total: 10001},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := newSubscriptionBaselineFixture(t)
+			sub := model.Subscription{Name: "Original", RssURL: "https://range.example/feed", TotalEpisodes: 3}
+			require.NoError(t, fx.db.Create(&sub).Error)
+			require.NoError(t, repository.NewEpisodeRepository(fx.db).EnsureRange(sub.ID, 3))
+
+			w := performSubscriptionBaselineRequest(t, fx.handler, http.MethodPut, fmt.Sprintf("/subscriptions/%d", sub.ID), map[string]any{
+				"name": "Must Not Persist", "total_episodes": tt.total,
+			})
+			require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+			var got model.Subscription
+			require.NoError(t, fx.db.First(&got, sub.ID).Error)
+			assert.Equal(t, "Original", got.Name)
+			assert.Equal(t, 3, got.TotalEpisodes)
+			var episodeCount int64
+			require.NoError(t, fx.db.Model(&model.SubscriptionEpisode{}).Where("subscription_id = ?", sub.ID).Count(&episodeCount).Error)
+			assert.EqualValues(t, 3, episodeCount)
+		})
+	}
 }
 
 func TestSubscriptionHandlerCreateRollsBackSubscriptionWhenEpisodeRangeFails(t *testing.T) {

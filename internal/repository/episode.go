@@ -296,18 +296,39 @@ func (r *episodeRepository) EnsureRangeInTx(tx *gorm.DB, subscriptionID uint, to
 	if total <= 0 {
 		return nil
 	}
+	if total > model.MaxSubscriptionEpisodes {
+		return fmt.Errorf("total episodes cannot exceed %d", model.MaxSubscriptionEpisodes)
+	}
+
+	var existingEpisodes []int
+	if err := tx.Model(&model.SubscriptionEpisode{}).
+		Where("subscription_id = ? AND episode BETWEEN ? AND ?", subscriptionID, 1, total).
+		Pluck("episode", &existingEpisodes).Error; err != nil {
+		return err
+	}
+	present := make([]bool, total+1)
+	for _, episode := range existingEpisodes {
+		if episode > 0 && episode <= total {
+			present[episode] = true
+		}
+	}
+
+	entries := make([]model.SubscriptionEpisode, 0, total-len(existingEpisodes))
 	for episode := 1; episode <= total; episode++ {
-		entry := model.SubscriptionEpisode{
+		if present[episode] {
+			continue
+		}
+		entries = append(entries, model.SubscriptionEpisode{
 			SubscriptionID: subscriptionID,
 			Episode:        episode,
 			Status:         model.EpisodeStatusMissing,
 			StatusSource:   model.EpisodeStatusSourceAutomatic,
-		}
-		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&entry).Error; err != nil {
-			return err
-		}
+		})
 	}
-	return nil
+	if len(entries) == 0 {
+		return nil
+	}
+	return tx.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(&entries, 200).Error
 }
 
 func (r *episodeRepository) RefreshSubscriptionProgress(subscriptionID uint) error {
