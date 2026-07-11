@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -53,10 +55,13 @@ func TestSubscriptionDiagnosticsHandler_GetAggregatesHealth(t *testing.T) {
 		Episode:        3,
 		TorrentURL:     "magnet:?xt=urn:btih:2222222222222222222222222222222222222222",
 		TorrentHash:    "2222222222222222222222222222222222222222",
+		FilePath:       "/path-that-must-not-be-statted/test-anime-03.mkv",
 		Status:         model.DownloadStatusCompleted,
 	}))
 
-	handler := NewSubscriptionDiagnosticsHandler(subRepo, downloadRepo, configRepo, nil, t.TempDir())
+	basePath := t.TempDir()
+	require.NoError(t, os.MkdirAll(utils.GenerateDownloadPath(basePath, sub.Name), 0755))
+	handler := NewSubscriptionDiagnosticsHandler(subRepo, downloadRepo, configRepo, nil, basePath)
 	r := gin.New()
 	r.GET("/subscriptions/:id/diagnostics", handler.Get)
 
@@ -76,8 +81,16 @@ func TestSubscriptionDiagnosticsHandler_GetAggregatesHealth(t *testing.T) {
 	require.Equal(t, 1, resp.Data.Downloads.Failed)
 	require.Equal(t, 1, resp.Data.Downloads.Retryable)
 	require.Equal(t, []int{4, 5}, resp.Data.Files.MissingEpisodes)
+	require.Equal(t, 1, resp.Data.Files.CompletedWithFile)
+	require.Equal(t, 0, resp.Data.Files.CompletedMissingFile)
 	require.Len(t, resp.Data.Downloads.FailedItems, 1)
 	require.Equal(t, "qbittorrent", resp.Data.Downloads.FailedItems[0].Category)
+
+	checkByKey := map[string]SubscriptionDiagnosticCheck{}
+	for _, check := range resp.Data.Checks {
+		checkByKey[check.Key] = check
+	}
+	require.Contains(t, checkByKey["files"].Summary, "记录")
 
 	actionByKey := map[string]SubscriptionDiagnosticAction{}
 	for _, action := range resp.Data.Actions {

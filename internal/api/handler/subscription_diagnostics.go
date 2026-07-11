@@ -554,7 +554,7 @@ func (h *SubscriptionDiagnosticsHandler) buildFileDiagnostics(subscription *mode
 		if download.RenamedPath == "" && subscription.RenameEnabled {
 			files.MissingRenamed++
 		}
-		if downloadHasExistingFile(download) {
+		if downloadHasRecordedFilePath(download) {
 			files.CompletedWithFile++
 		} else {
 			files.CompletedMissingFile++
@@ -568,16 +568,16 @@ func (h *SubscriptionDiagnosticsHandler) buildFileDiagnostics(subscription *mode
 	switch {
 	case files.CompletedMissingFile > 0:
 		fileCheck.Status = SubscriptionDiagnosticWarning
-		fileCheck.Summary = fmt.Sprintf("%d 个已完成任务缺少本地文件路径", files.CompletedMissingFile)
-		fileCheck.Detail = "数据库记录显示已完成，但没有可确认存在的 file_path 或 renamed_path。"
+		fileCheck.Summary = fmt.Sprintf("%d 个已完成任务未记录文件路径", files.CompletedMissingFile)
+		fileCheck.Detail = "数据库记录显示已完成，但没有 file_path 或 renamed_path；如需核验磁盘文件，请使用扫描本地文件。"
 	case !files.FolderExists && len(downloads) > 0:
 		fileCheck.Status = SubscriptionDiagnosticWarning
 		fileCheck.Summary = "订阅目录不存在"
 		fileCheck.Detail = fmt.Sprintf("预期目录：%s", expectedPath)
 	case files.CompletedWithFile > 0:
 		fileCheck.Status = SubscriptionDiagnosticHealthy
-		fileCheck.Summary = fmt.Sprintf("%d 个已完成文件可确认", files.CompletedWithFile)
-		fileCheck.Detail = fmt.Sprintf("预期目录：%s", expectedPath)
+		fileCheck.Summary = fmt.Sprintf("%d 个已完成任务已记录文件路径", files.CompletedWithFile)
+		fileCheck.Detail = fmt.Sprintf("预期目录：%s；如需核验磁盘文件，请使用扫描本地文件。", expectedPath)
 	default:
 		fileCheck.Status = SubscriptionDiagnosticUnknown
 		fileCheck.Summary = "暂无可核对文件"
@@ -599,8 +599,8 @@ func (h *SubscriptionDiagnosticsHandler) buildFileDiagnostics(subscription *mode
 		organizerCheck.Detail = "可以触发重新整理或重命名来补齐目标路径。"
 	case files.CompletedWithFile > 0:
 		organizerCheck.Status = SubscriptionDiagnosticHealthy
-		organizerCheck.Summary = "整理状态正常"
-		organizerCheck.Detail = "已完成任务均有可核对的整理结果。"
+		organizerCheck.Summary = "整理路径已记录"
+		organizerCheck.Detail = "已完成任务具有数据库路径记录；磁盘存在性由扫描本地文件核验。"
 	default:
 		organizerCheck.Status = SubscriptionDiagnosticUnknown
 		organizerCheck.Summary = "暂无整理记录"
@@ -844,17 +844,8 @@ func computeMissingEpisodes(subscription *model.Subscription) []int {
 	return missing
 }
 
-func downloadHasExistingFile(download model.Download) bool {
-	for _, path := range []string{download.RenamedPath, download.FilePath} {
-		if strings.TrimSpace(path) == "" {
-			continue
-		}
-		info, err := os.Stat(path)
-		if err == nil && !info.IsDir() {
-			return true
-		}
-	}
-	return false
+func downloadHasRecordedFilePath(download model.Download) bool {
+	return strings.TrimSpace(download.RenamedPath) != "" || strings.TrimSpace(download.FilePath) != ""
 }
 
 func pathIsDir(path string) bool {
