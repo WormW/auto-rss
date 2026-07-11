@@ -29,6 +29,8 @@ type Download struct {
 	MediaLibraryRefreshError  string     `json:"media_library_refresh_error" gorm:"type:text"`
 	MediaLibraryRefreshedAt   *time.Time `json:"media_library_refreshed_at"`
 	Status                    string     `json:"status" gorm:"default:pending;index:idx_sub_status,priority:2"` // pending, downloading, stalled, completed, failed
+	Purpose                   string     `json:"purpose" gorm:"size:20;default:normal;index"`
+	ReplacementCandidateID    *uint      `json:"replacement_candidate_id" gorm:"index"`
 	QbTaskID                  string     `json:"qb_task_id"`
 	ErrorMessage              string     `json:"error_message" gorm:"type:text"`
 	DownloadedAt              *time.Time `json:"downloaded_at"`

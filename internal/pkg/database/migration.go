@@ -2,6 +2,8 @@ package database
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
@@ -30,6 +32,8 @@ func RunMigrations(db *gorm.DB) error {
 				return tx.AutoMigrate(
 					&model.Subscription{},
 					&model.Download{},
+					&model.SubscriptionEpisode{},
+					&model.EpisodeResourceCandidate{},
 					&model.Config{},
 					&model.DiskSample{},
 					&model.DiskCleanupRecord{},
@@ -43,6 +47,8 @@ func RunMigrations(db *gorm.DB) error {
 				return tx.Migrator().DropTable(
 					"subscriptions",
 					"downloads",
+					"subscription_episodes",
+					"episode_resource_candidates",
 					"configs",
 					"disk_samples",
 					"disk_cleanup_records",
@@ -156,6 +162,26 @@ func RunMigrations(db *gorm.DB) error {
 				return nil
 			},
 		},
+		{
+			ID: "202607110001", // add the subscription episode ledger
+			Migrate: func(tx *gorm.DB) error {
+				if err := tx.AutoMigrate(
+					&model.Subscription{},
+					&model.Download{},
+					&model.SubscriptionEpisode{},
+					&model.EpisodeResourceCandidate{},
+				); err != nil {
+					return err
+				}
+				return backfillSubscriptionEpisodes(tx)
+			},
+			Rollback: func(tx *gorm.DB) error {
+				return tx.Migrator().DropTable(
+					&model.EpisodeResourceCandidate{},
+					&model.SubscriptionEpisode{},
+				)
+			},
+		},
 	})
 
 	// 设置迁移超时
@@ -166,6 +192,153 @@ func RunMigrations(db *gorm.DB) error {
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
 	return m.Migrate()
+}
+
+func backfillSubscriptionEpisodes(db *gorm.DB) error {
+	var subscriptions []model.Subscription
+	if err := db.Order("id ASC").Find(&subscriptions).Error; err != nil {
+		return err
+	}
+
+	var downloads []model.Download
+	if err := db.
+		Where("episode > 0").
+		Where("status IN ?", []string{
+			model.DownloadStatusCompleted,
+			model.DownloadStatusOrganizing,
+			model.DownloadStatusDownloading,
+			model.DownloadStatusPending,
+			model.DownloadStatusStalled,
+			model.DownloadStatusFailed,
+		}).
+		Find(&downloads).Error; err != nil {
+		return err
+	}
+
+	downloadsBySubscription := make(map[uint][]model.Download)
+	for _, download := range downloads {
+		downloadsBySubscription[download.SubscriptionID] = append(downloadsBySubscription[download.SubscriptionID], download)
+	}
+
+	for _, subscription := range subscriptions {
+		preferred := make(map[int]model.Download)
+		for _, download := range downloadsBySubscription[subscription.ID] {
+			relativeEpisode := subscription.RelativeEpisode(download.Episode)
+			if relativeEpisode <= 0 {
+				continue
+			}
+			current, exists := preferred[relativeEpisode]
+			if !exists || downloadPreferredForEpisode(download, current) {
+				preferred[relativeEpisode] = download
+			}
+		}
+
+		episodes := make([]int, 0, len(preferred))
+		for episode := range preferred {
+			episodes = append(episodes, episode)
+		}
+		sort.Ints(episodes)
+		for _, episode := range episodes {
+			download := preferred[episode]
+			activeDownloadID := download.ID
+			ledgerEntry := model.SubscriptionEpisode{
+				SubscriptionID:    subscription.ID,
+				Episode:           episode,
+				Status:            episodeStatusForDownload(download.Status),
+				ActiveDownloadID:  &activeDownloadID,
+				ActiveTorrentHash: download.TorrentHash,
+				ActiveTorrentURL:  download.TorrentURL,
+				ActiveTitle:       download.Title,
+				StatusSource:      model.EpisodeStatusSourceMigration,
+				DownloadedAt:      download.DownloadedAt,
+			}
+			if err := db.Where(
+				"subscription_id = ? AND episode = ?",
+				subscription.ID,
+				episode,
+			).FirstOrCreate(&ledgerEntry).Error; err != nil {
+				return err
+			}
+		}
+
+		knownEpisodes := subscription.TotalEpisodes
+		if knownEpisodes <= 0 {
+			knownEpisodes = subscription.RelativeEpisode(subscription.LatestEpisode)
+		}
+		for episode := 1; episode <= knownEpisodes; episode++ {
+			ledgerEntry := model.SubscriptionEpisode{
+				SubscriptionID: subscription.ID,
+				Episode:        episode,
+				Status:         model.EpisodeStatusMissing,
+				StatusSource:   model.EpisodeStatusSourceMigration,
+			}
+			if err := db.Where(
+				"subscription_id = ? AND episode = ?",
+				subscription.ID,
+				episode,
+			).FirstOrCreate(&ledgerEntry).Error; err != nil {
+				return err
+			}
+		}
+
+		if strings.TrimSpace(subscription.RssURL) != "" && !subscription.IsCalendarOnly() {
+			if err := db.Model(&model.Subscription{}).
+				Where("id = ?", subscription.ID).
+				Update("rss_baseline_pending", true).Error; err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func downloadPreferredForEpisode(candidate, current model.Download) bool {
+	candidatePriority := downloadMigrationPriority(candidate.Status)
+	currentPriority := downloadMigrationPriority(current.Status)
+	if candidatePriority != currentPriority {
+		return candidatePriority > currentPriority
+	}
+
+	candidateRenamed := strings.TrimSpace(candidate.RenamedPath) != ""
+	currentRenamed := strings.TrimSpace(current.RenamedPath) != ""
+	if candidateRenamed != currentRenamed {
+		return candidateRenamed
+	}
+	if !candidate.UpdatedAt.Equal(current.UpdatedAt) {
+		return candidate.UpdatedAt.After(current.UpdatedAt)
+	}
+	return candidate.ID > current.ID
+}
+
+func downloadMigrationPriority(status string) int {
+	switch status {
+	case model.DownloadStatusCompleted:
+		return 3
+	case model.DownloadStatusOrganizing,
+		model.DownloadStatusDownloading,
+		model.DownloadStatusPending,
+		model.DownloadStatusStalled:
+		return 2
+	case model.DownloadStatusFailed:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func episodeStatusForDownload(status string) string {
+	switch status {
+	case model.DownloadStatusCompleted:
+		return model.EpisodeStatusDownloaded
+	case model.DownloadStatusOrganizing,
+		model.DownloadStatusDownloading,
+		model.DownloadStatusPending,
+		model.DownloadStatusStalled:
+		return model.EpisodeStatusDownloading
+	default:
+		return model.EpisodeStatusMissing
+	}
 }
 
 // GetCurrentVersion 获取当前迁移版本
@@ -198,6 +371,8 @@ func ResetMigrations(db *gorm.DB) error {
 				return tx.AutoMigrate(
 					&model.Subscription{},
 					&model.Download{},
+					&model.SubscriptionEpisode{},
+					&model.EpisodeResourceCandidate{},
 					&model.Config{},
 					&model.DiskSample{},
 					&model.DiskCleanupRecord{},
@@ -210,6 +385,8 @@ func ResetMigrations(db *gorm.DB) error {
 				return tx.Migrator().DropTable(
 					"subscriptions",
 					"downloads",
+					"subscription_episodes",
+					"episode_resource_candidates",
 					"configs",
 					"rss_sources",
 					"logs",
