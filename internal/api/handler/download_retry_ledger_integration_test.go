@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -17,7 +18,60 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestManualRetryKeepsEpisodeAttachedThroughCompletion(t *testing.T) {
+func TestTerminalManualRetryDoesNotStealEpisodeFromOtherDownload(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "manual-retry-conflict.db")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(
+		&model.Subscription{}, &model.Download{}, &model.SubscriptionEpisode{}, &model.EpisodeResourceCandidate{},
+	))
+	sub := model.Subscription{Name: "Retry Conflict", Status: "active"}
+	require.NoError(t, db.Create(&sub).Error)
+	oldDownload := model.Download{
+		SubscriptionID: sub.ID, Title: "old terminal", Episode: 1,
+		TorrentURL: "magnet:old", TorrentHash: "old-hash", Status: model.DownloadStatusFailed,
+		RetryCount: 3, MaxRetries: 3, LastError: "retry exhausted",
+	}
+	require.NoError(t, db.Create(&oldDownload).Error)
+	otherDownload := model.Download{
+		SubscriptionID: sub.ID, Title: "new owner", Episode: 1,
+		TorrentURL: "magnet:new", TorrentHash: "new-hash", Status: model.DownloadStatusDownloading,
+	}
+	require.NoError(t, db.Create(&otherDownload).Error)
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID: sub.ID, Episode: 1, Status: model.EpisodeStatusDownloading,
+		StatusSource: model.EpisodeStatusSourceAutomatic, ActiveDownloadID: &otherDownload.ID,
+		ActiveTorrentHash: otherDownload.TorrentHash, ActiveTorrentURL: otherDownload.TorrentURL,
+		ActiveTitle: otherDownload.Title,
+	}
+	require.NoError(t, db.Create(&ledger).Error)
+	downloadRepo := repository.NewDownloadRepository(db)
+	episodeRepo := repository.NewEpisodeRepository(db)
+	episodeService := episodeservice.NewService(episodeRepo)
+	handler := NewDownloadHandler(downloadRepo, nil, nil, episodeService)
+	router := gin.New()
+	router.POST("/downloads/:id/retry", handler.Retry)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(
+		http.MethodPost,
+		fmt.Sprintf("/downloads/%d/retry", oldDownload.ID),
+		nil,
+	))
+
+	require.Equal(t, http.StatusInternalServerError, response.Code, response.Body.String())
+	persistedOld, err := downloadRepo.GetByID(oldDownload.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.DownloadStatusFailed, persistedOld.Status)
+	assert.Equal(t, 3, persistedOld.RetryCount)
+	assert.Equal(t, "old-hash", persistedOld.TorrentHash)
+	after, err := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
+	require.NoError(t, err)
+	assert.Equal(t, model.EpisodeStatusDownloading, after.Status)
+	require.NotNil(t, after.ActiveDownloadID)
+	assert.Equal(t, otherDownload.ID, *after.ActiveDownloadID)
+}
+
+func TestTerminalManualRetryReclaimsEpisodeThroughCompletion(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "manual-retry-ledger.db")), &gorm.Config{})
 	require.NoError(t, err)
@@ -38,6 +92,7 @@ func TestManualRetryKeepsEpisodeAttachedThroughCompletion(t *testing.T) {
 		TorrentURL:     "magnet:?xt=urn:btih:manual-retry",
 		TorrentHash:    "manual-old-hash",
 		Status:         model.DownloadStatusDownloading,
+		RetryCount:     3,
 		MaxRetries:     3,
 	}
 	require.NoError(t, db.Create(&download).Error)
@@ -60,9 +115,13 @@ func TestManualRetryKeepsEpisodeAttachedThroughCompletion(t *testing.T) {
 	_, err = downloader.NewStatusSync(downloadRepo, nil, episodeService).
 		UpdateStatus(persisted, &downloader.TorrentInfo{Hash: download.TorrentHash, State: downloader.StateError})
 	require.NoError(t, err)
+	failedLedger, err := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
+	require.NoError(t, err)
+	require.Equal(t, model.EpisodeStatusMissing, failedLedger.Status)
+	require.Nil(t, failedLedger.ActiveDownloadID)
 
 	qb := &mockQBittorrentClient{}
-	handler := NewDownloadHandler(downloadRepo, qb, nil)
+	handler := NewDownloadHandler(downloadRepo, qb, nil, episodeService)
 	router := gin.New()
 	router.POST("/downloads/:id/retry", handler.Retry)
 	req := httptest.NewRequest(http.MethodPost, "/downloads/1/retry", nil)

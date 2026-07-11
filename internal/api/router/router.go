@@ -134,8 +134,8 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 
 	// 初始化处理器
 	subscriptionHandler := handler.NewSubscriptionHandler(subscriptionRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath, episodeRepo)
-	subscriptionDiagnosticsHandler := handler.NewSubscriptionDiagnosticsHandler(subscriptionRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath)
-	downloadHandler := handler.NewDownloadHandler(downloadRepo, qbClient, configRepo)
+	subscriptionDiagnosticsHandler := handler.NewSubscriptionDiagnosticsHandler(subscriptionRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath, episodeService)
+	downloadHandler := handler.NewDownloadHandler(downloadRepo, qbClient, configRepo, episodeService)
 	downloadHistoryHandler := handler.NewDownloadHistoryHandler(downloadRepo)
 	rssHandler := handler.NewRSSHandler(rssScheduler)
 	configHandler := handler.NewConfigHandler(configRepo)

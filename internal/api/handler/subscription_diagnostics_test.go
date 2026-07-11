@@ -11,6 +11,7 @@ import (
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
+	episodeservice "github.com/WormW/auto-rss/internal/service/episode"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
@@ -22,7 +23,9 @@ func TestSubscriptionDiagnosticsHandler_GetAggregatesHealth(t *testing.T) {
 
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.Subscription{}, &model.Download{}, &model.Config{}))
+	require.NoError(t, db.AutoMigrate(
+		&model.Subscription{}, &model.Download{}, &model.SubscriptionEpisode{}, &model.EpisodeResourceCandidate{}, &model.Config{},
+	))
 
 	subRepo := repository.NewSubscriptionRepository(db)
 	downloadRepo := repository.NewDownloadRepository(db)
@@ -106,7 +109,9 @@ func TestSubscriptionDiagnosticsHandler_RetryFailedResetsRetryableDownloads(t *t
 
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.Subscription{}, &model.Download{}, &model.Config{}))
+	require.NoError(t, db.AutoMigrate(
+		&model.Subscription{}, &model.Download{}, &model.SubscriptionEpisode{}, &model.EpisodeResourceCandidate{}, &model.Config{},
+	))
 
 	subRepo := repository.NewSubscriptionRepository(db)
 	downloadRepo := repository.NewDownloadRepository(db)
@@ -126,6 +131,13 @@ func TestSubscriptionDiagnosticsHandler_RetryFailedResetsRetryableDownloads(t *t
 		LastError:      "timeout",
 	}
 	require.NoError(t, downloadRepo.Create(&failed))
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID: sub.ID,
+		Episode:        1,
+		Status:         model.EpisodeStatusMissing,
+		StatusSource:   model.EpisodeStatusSourceAutomatic,
+	}
+	require.NoError(t, db.Create(&ledger).Error)
 	require.NoError(t, downloadRepo.Create(&model.Download{
 		SubscriptionID: sub.ID,
 		Title:          "Retry Anime 02",
@@ -135,7 +147,8 @@ func TestSubscriptionDiagnosticsHandler_RetryFailedResetsRetryableDownloads(t *t
 	}))
 
 	qb := &mockQBittorrentClient{}
-	handler := NewSubscriptionDiagnosticsHandler(subRepo, downloadRepo, nil, qb, t.TempDir())
+	episodeRepo := repository.NewEpisodeRepository(db)
+	handler := NewSubscriptionDiagnosticsHandler(subRepo, downloadRepo, nil, qb, t.TempDir(), episodeservice.NewService(episodeRepo))
 	r := gin.New()
 	r.POST("/subscriptions/:id/diagnostics/retry-failed", handler.RetryFailed)
 
@@ -153,6 +166,17 @@ func TestSubscriptionDiagnosticsHandler_RetryFailedResetsRetryableDownloads(t *t
 	require.Equal(t, 1, resp.Data.Retried)
 	require.Equal(t, 1, resp.Data.Skipped)
 	require.Equal(t, 0, resp.Data.Failed)
+	require.Len(t, resp.Data.Results, 2)
+	var retryResult *SubscriptionRetryResult
+	for i := range resp.Data.Results {
+		if resp.Data.Results[i].ID == failed.ID {
+			retryResult = &resp.Data.Results[i]
+			break
+		}
+	}
+	require.NotNil(t, retryResult)
+	require.Equal(t, model.DownloadStatusPending, retryResult.Status)
+	require.Equal(t, "已重置为待下载，等待后台调度", retryResult.Message)
 
 	updated, err := downloadRepo.GetByID(failed.ID)
 	require.NoError(t, err)
@@ -164,4 +188,9 @@ func TestSubscriptionDiagnosticsHandler_RetryFailedResetsRetryableDownloads(t *t
 	require.True(t, qb.deleteWithPayloadCalled)
 	require.Equal(t, "old-hash", qb.deletedHash)
 	require.False(t, qb.addCalled, "DownloadMonitor must own the first qBittorrent Add")
+	after, err := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
+	require.NoError(t, err)
+	require.Equal(t, model.EpisodeStatusDownloading, after.Status)
+	require.NotNil(t, after.ActiveDownloadID)
+	require.Equal(t, failed.ID, *after.ActiveDownloadID)
 }

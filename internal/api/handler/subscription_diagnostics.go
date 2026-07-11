@@ -37,6 +37,7 @@ type SubscriptionDiagnosticsHandler struct {
 	qbClient         downloader.QBittorrentClient
 	downloadPath     string
 	rssHealthChecker *rss.RSSHealthChecker
+	requeueSvc       DownloadRequeueService
 }
 
 type SubscriptionDiagnosticCheck struct {
@@ -147,7 +148,12 @@ func NewSubscriptionDiagnosticsHandler(
 	configRepo repository.ConfigRepository,
 	qbClient downloader.QBittorrentClient,
 	downloadPath string,
+	requeueSvc ...DownloadRequeueService,
 ) *SubscriptionDiagnosticsHandler {
+	var requeue DownloadRequeueService
+	if len(requeueSvc) > 0 {
+		requeue = requeueSvc[0]
+	}
 	return &SubscriptionDiagnosticsHandler{
 		subscriptionRepo: subscriptionRepo,
 		downloadRepo:     downloadRepo,
@@ -155,6 +161,7 @@ func NewSubscriptionDiagnosticsHandler(
 		qbClient:         qbClient,
 		downloadPath:     downloadPath,
 		rssHealthChecker: rss.NewHealthChecker(subscriptionRepo),
+		requeueSvc:       requeue,
 	}
 }
 
@@ -267,13 +274,8 @@ func (h *SubscriptionDiagnosticsHandler) RetryFailed(c *gin.Context) {
 
 		response.Retried++
 		result.Success = true
-		if h.qbClient != nil {
-			result.Status = model.DownloadStatusDownloading
-			result.Message = "已重新添加到 qBittorrent"
-		} else {
-			result.Status = model.DownloadStatusPending
-			result.Message = "已重置为待下载，等待后台调度"
-		}
+		result.Status = model.DownloadStatusPending
+		result.Message = "已重置为待下载，等待后台调度"
 		response.Results = append(response.Results, result)
 	}
 
@@ -746,14 +748,14 @@ func (h *SubscriptionDiagnosticsHandler) retryDownload(subscription *model.Subsc
 		}
 	}
 
-	download.RetryCount = 0
-	download.RetryReason = "user_retry"
-	download.NextRetryAt = nil
-	download.LastError = ""
-	download.Status = model.DownloadStatusPending
-	download.TorrentHash = ""
-
-	if err := h.downloadRepo.Update(download); err != nil {
+	var err error
+	if h.requeueSvc != nil {
+		err = h.requeueSvc.RequeueDownload(download, subscription)
+	} else {
+		resetDownloadForManualRetry(download)
+		err = h.downloadRepo.Update(download)
+	}
+	if err != nil {
 		return fmt.Errorf("重置下载任务失败: %w", err)
 	}
 	return nil

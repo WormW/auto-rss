@@ -423,6 +423,118 @@ func TestDownloadLifecyclePassthroughsPreserveLedgerState(t *testing.T) {
 	assert.Nil(t, failed.ActiveDownloadID)
 }
 
+func TestRequeueDownloadIsIdempotentForSameActiveDownload(t *testing.T) {
+	fx := newServiceFixture(t)
+	sub := model.Subscription{Name: "requeue same", Season: 1}
+	require.NoError(t, fx.db.Create(&sub).Error)
+	download := model.Download{
+		SubscriptionID: sub.ID, Title: "same", Episode: 1,
+		TorrentURL: "magnet:same", TorrentHash: "same-hash", Status: model.DownloadStatusFailed,
+		RetryCount: 1, MaxRetries: 3, LastError: "timeout",
+	}
+	require.NoError(t, fx.db.Create(&download).Error)
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID: sub.ID, Episode: 1, Status: model.EpisodeStatusDownloading,
+		StatusSource: model.EpisodeStatusSourceAutomatic, ActiveDownloadID: &download.ID,
+		ActiveTorrentHash: download.TorrentHash,
+	}
+	require.NoError(t, fx.db.Create(&ledger).Error)
+
+	require.NoError(t, fx.service.RequeueDownload(&download, &sub))
+
+	assert.Equal(t, model.DownloadStatusPending, download.Status)
+	assert.Empty(t, download.TorrentHash)
+	after, err := fx.repo.GetBySubscriptionAndEpisode(sub.ID, 1)
+	require.NoError(t, err)
+	assert.Equal(t, model.EpisodeStatusDownloading, after.Status)
+	require.NotNil(t, after.ActiveDownloadID)
+	assert.Equal(t, download.ID, *after.ActiveDownloadID)
+}
+
+func TestRequeueDownloadRejectsOwnedTerminalEpisodeStates(t *testing.T) {
+	for _, status := range []string{
+		model.EpisodeStatusDownloaded,
+		model.EpisodeStatusMarkedDownloaded,
+		model.EpisodeStatusIgnored,
+	} {
+		t.Run(status, func(t *testing.T) {
+			fx := newServiceFixture(t)
+			sub := model.Subscription{Name: status, Season: 1}
+			require.NoError(t, fx.db.Create(&sub).Error)
+			download := model.Download{
+				SubscriptionID: sub.ID, Title: status, Episode: 1,
+				TorrentURL: "magnet:" + status, TorrentHash: "hash-" + status,
+				Status: model.DownloadStatusFailed, RetryCount: 3, MaxRetries: 3,
+			}
+			require.NoError(t, fx.db.Create(&download).Error)
+			ledger := model.SubscriptionEpisode{
+				SubscriptionID: sub.ID, Episode: 1, Status: status,
+				StatusSource: model.EpisodeStatusSourceUser,
+			}
+			require.NoError(t, fx.db.Create(&ledger).Error)
+
+			err := fx.service.RequeueDownload(&download, &sub)
+			require.Error(t, err)
+			assert.Equal(t, model.DownloadStatusFailed, download.Status)
+			assert.Equal(t, "hash-"+status, download.TorrentHash)
+		})
+	}
+}
+
+func TestRequeueDownloadCollectionOnlyResetsDownload(t *testing.T) {
+	fx := newServiceFixture(t)
+	download := model.Download{
+		Title: "collection", Episode: 0, TorrentURL: "magnet:collection", TorrentHash: "collection-hash",
+		Status: model.DownloadStatusFailed, RetryCount: 2, MaxRetries: 3, LastError: "timeout",
+	}
+	require.NoError(t, fx.db.Create(&download).Error)
+
+	require.NoError(t, fx.service.RequeueDownload(&download, nil))
+
+	assert.Equal(t, model.DownloadStatusPending, download.Status)
+	assert.Empty(t, download.TorrentHash)
+	var ledgerCount int64
+	require.NoError(t, fx.db.Model(&model.SubscriptionEpisode{}).Count(&ledgerCount).Error)
+	assert.Zero(t, ledgerCount)
+}
+
+func TestRequeueDownloadSaveFailureRollsBackEpisodeClaim(t *testing.T) {
+	fx := newServiceFixture(t)
+	sub := model.Subscription{Name: "requeue rollback", Season: 1}
+	require.NoError(t, fx.db.Create(&sub).Error)
+	download := model.Download{
+		SubscriptionID: sub.ID, Title: "rollback", Episode: 1,
+		TorrentURL: "magnet:rollback", TorrentHash: "rollback-hash",
+		Status: model.DownloadStatusFailed, RetryCount: 3, MaxRetries: 3,
+	}
+	require.NoError(t, fx.db.Create(&download).Error)
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID: sub.ID, Episode: 1, Status: model.EpisodeStatusMissing,
+		StatusSource: model.EpisodeStatusSourceAutomatic,
+	}
+	require.NoError(t, fx.db.Create(&ledger).Error)
+	require.NoError(t, fx.db.Exec(`
+		CREATE TRIGGER fail_requeue_download
+		BEFORE UPDATE OF status ON downloads
+		WHEN NEW.status = 'pending'
+		BEGIN
+			SELECT RAISE(ABORT, 'injected requeue save failure');
+		END;
+	`).Error)
+
+	err := fx.service.RequeueDownload(&download, &sub)
+	require.Error(t, err)
+	assert.Equal(t, model.DownloadStatusFailed, download.Status)
+	assert.Equal(t, "rollback-hash", download.TorrentHash)
+	after, reloadErr := fx.repo.GetBySubscriptionAndEpisode(sub.ID, 1)
+	require.NoError(t, reloadErr)
+	assert.Equal(t, model.EpisodeStatusMissing, after.Status)
+	assert.Nil(t, after.ActiveDownloadID)
+	var persisted model.Download
+	require.NoError(t, fx.db.First(&persisted, download.ID).Error)
+	assert.Equal(t, model.DownloadStatusFailed, persisted.Status)
+}
+
 func ledgerForMatrix(status, hash, url string) *model.SubscriptionEpisode {
 	return &model.SubscriptionEpisode{
 		Episode:           1,

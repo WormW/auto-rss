@@ -200,6 +200,75 @@ func (s *Service) DetachDownload(downloadID uint) error {
 	return s.repository.DetachDownload(downloadID)
 }
 
+func (s *Service) RequeueDownload(download *model.Download, sub *model.Subscription) error {
+	if download == nil {
+		return errors.New("download is required")
+	}
+	original := *download
+	resource := model.EpisodeResource{Hash: download.TorrentHash, URL: download.TorrentURL, Title: download.Title}
+	resetDownloadForRetry(download)
+
+	err := s.repository.RunInTransaction(func(tx *gorm.DB) error {
+		if download.Episode > 0 {
+			if sub == nil {
+				return errors.New("subscription is required")
+			}
+			relativeEpisode := sub.RelativeEpisode(download.Episode)
+			if relativeEpisode <= 0 {
+				return fmt.Errorf("download episode %d is outside subscription range", download.Episode)
+			}
+			var ledger model.SubscriptionEpisode
+			if err := tx.Where("subscription_id = ? AND episode = ?", sub.ID, relativeEpisode).First(&ledger).Error; err != nil {
+				return err
+			}
+			switch ledger.Status {
+			case model.EpisodeStatusMissing:
+				if ledger.ActiveDownloadID != nil {
+					return fmt.Errorf("episode %d is already owned by download %d", relativeEpisode, *ledger.ActiveDownloadID)
+				}
+				result := tx.Model(&model.SubscriptionEpisode{}).
+					Where("id = ? AND status = ? AND active_download_id IS NULL", ledger.ID, model.EpisodeStatusMissing).
+					Updates(map[string]any{
+						"status":              model.EpisodeStatusDownloading,
+						"status_source":       model.EpisodeStatusSourceAutomatic,
+						"active_download_id":  download.ID,
+						"active_torrent_hash": resource.Hash,
+						"active_torrent_url":  resource.URL,
+						"active_title":        resource.Title,
+						"downloaded_at":       nil,
+					})
+				if result.Error != nil {
+					return result.Error
+				}
+				if result.RowsAffected != 1 {
+					return fmt.Errorf("episode %d changed while requeueing download %d", relativeEpisode, download.ID)
+				}
+			case model.EpisodeStatusDownloading:
+				if ledger.ActiveDownloadID == nil || *ledger.ActiveDownloadID != download.ID {
+					return fmt.Errorf("episode %d is already owned by another download", relativeEpisode)
+				}
+			default:
+				return fmt.Errorf("episode %d cannot be requeued from status %s", relativeEpisode, ledger.Status)
+			}
+		}
+		return tx.Save(download).Error
+	})
+	if err != nil {
+		*download = original
+	}
+	return err
+}
+
+func resetDownloadForRetry(download *model.Download) {
+	download.RetryCount = 0
+	download.RetryReason = "user_retry"
+	download.NextRetryAt = nil
+	download.LastError = ""
+	download.ErrorMessage = ""
+	download.Status = model.DownloadStatusPending
+	download.TorrentHash = ""
+}
+
 func (s *Service) EnsureRange(subscriptionID uint, totalEpisodes int) error {
 	return s.repository.EnsureRange(subscriptionID, totalEpisodes)
 }

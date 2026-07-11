@@ -17,6 +17,7 @@ type DownloadHandler struct {
 	repo       repository.DownloadRepository
 	qbClient   downloader.QBittorrentClient
 	configRepo repository.ConfigRepository
+	requeueSvc DownloadRequeueService
 }
 
 type DownloadDiagnosticAction struct {
@@ -39,8 +40,12 @@ type DownloadDiagnostics struct {
 }
 
 // NewDownloadHandler 创建下载处理器实例
-func NewDownloadHandler(repo repository.DownloadRepository, qbClient downloader.QBittorrentClient, configRepo repository.ConfigRepository) *DownloadHandler {
-	return &DownloadHandler{repo: repo, qbClient: qbClient, configRepo: configRepo}
+func NewDownloadHandler(repo repository.DownloadRepository, qbClient downloader.QBittorrentClient, configRepo repository.ConfigRepository, requeueSvc ...DownloadRequeueService) *DownloadHandler {
+	var requeue DownloadRequeueService
+	if len(requeueSvc) > 0 {
+		requeue = requeueSvc[0]
+	}
+	return &DownloadHandler{repo: repo, qbClient: qbClient, configRepo: configRepo, requeueSvc: requeue}
 }
 
 // GetByID 获取下载任务详情
@@ -330,16 +335,13 @@ func (h *DownloadHandler) Retry(c *gin.Context) {
 		}
 	}
 
-	// 3. 重置重试相关字段
-	download.RetryCount = 0
-	download.RetryReason = "user_retry"
-	download.NextRetryAt = nil
-	download.LastError = ""
-	download.Status = "pending"
-	download.TorrentHash = "" // 清除旧hash
-
-	// 4. 保存重置后的状态
-	if err := h.repo.Update(download); err != nil {
+	if h.requeueSvc != nil {
+		err = h.requeueSvc.RequeueDownload(download, &download.Subscription)
+	} else {
+		resetDownloadForManualRetry(download)
+		err = h.repo.Update(download)
+	}
+	if err != nil {
 		logger.Error("Failed to reset download for retry",
 			"download_id", id,
 			"error", err.Error())
