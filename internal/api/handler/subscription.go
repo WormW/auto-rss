@@ -330,7 +330,7 @@ func episodeDecisionClosesItem(action, reason string) bool {
 	case episode.DecisionDownload, episode.DecisionCandidate, episode.DecisionIgnored:
 		return true
 	case episode.DecisionSkip:
-		return reason == "resource_already_known" || reason == "unsupported_episode_status" || reason == "non_positive_relative_episode"
+		return reason == "resource_already_known" || reason == "unsupported_episode_status"
 	default:
 		return false
 	}
@@ -444,7 +444,11 @@ func (h *SubscriptionHandler) Preview(c *gin.Context) {
 				reason = filterReason
 			}
 		}
-		if action == "download" && item.Episode > 0 {
+		if action == "download" && strings.TrimSpace(item.TorrentURL) == "" && strings.TrimSpace(item.TorrentHash) != "" {
+			action = "skip"
+			reason = "torrent_url_missing"
+		}
+		if action == "download" {
 			if processedEpisodes[item.Episode] {
 				action = "skip"
 				reason = "同一集已有更靠前的 RSS 条目"
@@ -1360,6 +1364,7 @@ func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Tas
 	candidateCount := 0
 	maxPubTime := subscription.LastRSSPubTime
 	var committedSubscription model.Subscription
+	stagedDownloads := make([]model.Download, 0)
 	manager.UpdateProgress(25, "分析RSS条目...")
 	snapshotUpdatedAt := subscription.UpdatedAt
 	err = h.episodeRepo.RunInTransaction(func(tx *gorm.DB) error {
@@ -1450,6 +1455,10 @@ func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Tas
 				terminal()
 				continue
 			}
+			if strings.TrimSpace(item.TorrentURL) == "" && strings.TrimSpace(item.TorrentHash) != "" {
+				terminal()
+				continue
+			}
 			if processedEpisodes[item.Episode] {
 				logger.Debug("Skipping older version in RSS feed", "episode", item.Episode, "title", item.Title)
 				terminal()
@@ -1489,12 +1498,7 @@ func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Tas
 					return fmt.Errorf("failed to attach episode %d download: %w", item.Episode, err)
 				}
 				collectedCount++
-				logger.Info("Download outbox task created",
-					"subscription_id", id,
-					"download_id", download.ID,
-					"episode", item.Episode,
-					"title", item.Title,
-					"trigger_context", "manual_collect")
+				stagedDownloads = append(stagedDownloads, *download)
 			case episode.DecisionCandidate:
 				candidateCount++
 			}
@@ -1531,6 +1535,14 @@ func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Tas
 		subscription.LastRSSPubTime = &pubCopy
 	} else {
 		subscription.LastRSSPubTime = nil
+	}
+	for _, download := range stagedDownloads {
+		logger.Info("Download outbox task created",
+			"subscription_id", id,
+			"download_id", download.ID,
+			"episode", download.Episode,
+			"title", download.Title,
+			"trigger_context", "manual_collect")
 	}
 
 	logger.Info("Episode collection completed",

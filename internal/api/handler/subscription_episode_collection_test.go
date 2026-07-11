@@ -255,6 +255,7 @@ func TestEpisodeDecisionClosesItem(t *testing.T) {
 		{action: "skip", reason: "resource_already_known", want: true},
 		{action: "skip", reason: "unsupported_episode_status", want: true},
 		{action: "skip", reason: "resource_identity_missing", want: false},
+		{action: "skip", reason: "non_positive_relative_episode", want: false},
 	}
 	for _, tt := range tests {
 		assert.Equal(t, tt.want, episodeDecisionClosesItem(tt.action, tt.reason), "%s/%s", tt.action, tt.reason)
@@ -262,6 +263,58 @@ func TestEpisodeDecisionClosesItem(t *testing.T) {
 }
 
 func TestPreviewAndCollectUseSameEpisodeClosingRules(t *testing.T) {
+	t.Run("episode zero is skipped consistently", func(t *testing.T) {
+		fx := newEpisodeCollectionFixture(t)
+		sub := fx.createSubscription(t, nil)
+		items := []rss.RSSItem{{
+			Title: "Ledger Show episode zero", Episode: 0, TorrentURL: "magnet:?xt=urn:btih:episode-zero", TorrentHash: "episode-zero",
+		}}
+
+		w, preview, summary := performEpisodePreviewItems(t, fx.handler, sub, items)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		require.Len(t, preview, 1)
+		assert.Equal(t, "skip", preview[0].Action)
+		assert.Equal(t, "non_positive_relative_episode", preview[0].Reason)
+		assert.Equal(t, float64(0), summary["download_items"])
+
+		fx.handler.rssParser = &mockRSSParser{items: items}
+		completed, err := runEpisodeCollectionTask(t, fx.handler, &sub)
+		require.NoError(t, err)
+		requireCollectionResult(t, completed, 0, 0, 0)
+		var downloads, ledgers int64
+		require.NoError(t, fx.db.Model(&model.Download{}).Count(&downloads).Error)
+		require.NoError(t, fx.db.Model(&model.SubscriptionEpisode{}).Count(&ledgers).Error)
+		assert.Zero(t, downloads)
+		assert.Zero(t, ledgers)
+	})
+
+	t.Run("hash only resource stays open for executable URL", func(t *testing.T) {
+		fx := newEpisodeCollectionFixture(t)
+		sub := fx.createSubscription(t, nil)
+		items := []rss.RSSItem{
+			{Title: "Ledger Show 01 hash only", Episode: 1, TorrentHash: "hash-only"},
+			{Title: "Ledger Show 01 valid", Episode: 1, TorrentURL: "magnet:?xt=urn:btih:executable", TorrentHash: "executable"},
+		}
+
+		w, preview, summary := performEpisodePreviewItems(t, fx.handler, sub, items)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		require.Len(t, preview, 2)
+		assert.Equal(t, "skip", preview[0].Action)
+		assert.Equal(t, "torrent_url_missing", preview[0].Reason)
+		assert.Equal(t, "download", preview[1].Action)
+		assert.Equal(t, float64(1), summary["download_items"])
+
+		fx.handler.rssParser = &mockRSSParser{items: items}
+		completed, err := runEpisodeCollectionTask(t, fx.handler, &sub)
+		require.NoError(t, err)
+		requireCollectionResult(t, completed, 1, 0, 0)
+		var downloads []model.Download
+		require.NoError(t, fx.db.Find(&downloads).Error)
+		require.Len(t, downloads, 1)
+		assert.Equal(t, "executable", downloads[0].TorrentHash)
+		assert.NotEmpty(t, downloads[0].TorrentURL)
+	})
+
 	t.Run("known resource closes before different resource", func(t *testing.T) {
 		fx := newEpisodeCollectionFixture(t)
 		sub := fx.createSubscription(t, nil)
