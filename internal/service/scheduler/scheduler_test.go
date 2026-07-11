@@ -184,7 +184,39 @@ func TestRSSCheckDoesNotRepeatKnownResourceAcrossEntriesOrRuns(t *testing.T) {
 	assert.Equal(t, "same-hash", ledger.ActiveTorrentHash)
 }
 
-func TestProcessDownloadItemQBFailureRestoresLedgerClaim(t *testing.T) {
+func TestRSSCheckLedgerFailureDoesNotAdvanceWatermarkAndRetriesNextRun(t *testing.T) {
+	pubTime := time.Now().UTC().Add(-time.Hour)
+	item := schedulerRSSItem(8, "retry-watermark-hash", pubTime)
+	fx := newSchedulerLedgerFixture(t, []rss.RSSItem{item})
+	sub := fx.createSubscription(t)
+	originalWatermark := *sub.LastRSSPubTime
+	require.NoError(t, fx.db.Exec(`
+		CREATE TRIGGER block_episode_observe
+		BEFORE INSERT ON subscription_episodes
+		BEGIN
+			SELECT RAISE(ABORT, 'observe blocked');
+		END;
+	`).Error)
+
+	fx.scheduler.checkRSSFeeds()
+
+	afterFailure, err := repository.NewSubscriptionRepository(fx.db).GetByID(sub.ID)
+	require.NoError(t, err)
+	require.NotNil(t, afterFailure.LastRSSPubTime)
+	assert.Equal(t, originalWatermark, *afterFailure.LastRSSPubTime)
+	assert.Zero(t, fx.qb.addCalls)
+
+	require.NoError(t, fx.db.Exec("DROP TRIGGER block_episode_observe").Error)
+	fx.scheduler.checkRSSFeeds()
+
+	afterRetry, err := repository.NewSubscriptionRepository(fx.db).GetByID(sub.ID)
+	require.NoError(t, err)
+	require.NotNil(t, afterRetry.LastRSSPubTime)
+	assert.Equal(t, pubTime, *afterRetry.LastRSSPubTime)
+	assert.Equal(t, 1, fx.qb.addCalls)
+}
+
+func TestProcessDownloadItemQBFailureKeepsAttachedLedgerForRetry(t *testing.T) {
 	fx := newSchedulerLedgerFixture(t, nil)
 	fx.qb.addErr = errors.New("qB unavailable")
 	sub := fx.createSubscription(t)
@@ -202,14 +234,58 @@ func TestProcessDownloadItemQBFailureRestoresLedgerClaim(t *testing.T) {
 	var download model.Download
 	require.NoError(t, fx.db.Where("torrent_hash = ?", item.TorrentHash).First(&download).Error)
 	assert.Equal(t, model.DownloadStatusFailed, download.Status)
+	assert.Equal(t, "qB unavailable", download.ErrorMessage)
+	assert.Equal(t, "qB unavailable", download.LastError)
 	ledger, err := fx.episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 4)
 	require.NoError(t, err)
-	assert.Equal(t, model.EpisodeStatusMissing, ledger.Status)
-	assert.Nil(t, ledger.ActiveDownloadID)
-	assert.Empty(t, ledger.ActiveTorrentHash)
-	_, claimed, err := fx.episodeRepo.ClaimForDownload(sub.ID, 4, model.EpisodeResource{Hash: item.TorrentHash})
+	assert.Equal(t, model.EpisodeStatusDownloading, ledger.Status)
+	require.NotNil(t, ledger.ActiveDownloadID)
+	assert.Equal(t, download.ID, *ledger.ActiveDownloadID)
+	assert.Equal(t, item.TorrentHash, ledger.ActiveTorrentHash)
+	_, claimed, err := fx.episodeRepo.ClaimForDownload(sub.ID, 4, model.EpisodeResource{Hash: "other-hash"})
 	require.NoError(t, err)
-	assert.True(t, claimed)
+	assert.False(t, claimed)
+}
+
+func TestProcessDownloadItemPostQBUpdateFailureKeepsPendingDurableIntent(t *testing.T) {
+	fx := newSchedulerLedgerFixture(t, nil)
+	sub := fx.createSubscription(t)
+	item := schedulerRSSItem(9, "durable-intent-hash", time.Now().UTC())
+	resource := model.EpisodeResource{Hash: item.TorrentHash, URL: item.TorrentURL, Title: item.Title}
+	decision, err := fx.episodeService.EvaluateRSSItem(t.Context(), &sub, episode.RSSResource{
+		OriginalEpisode: item.Episode,
+		Resource:        resource,
+	}, false)
+	require.NoError(t, err)
+	require.Equal(t, episode.DecisionDownload, decision.Action)
+	failingRepo := &failOnceDownloadRepository{DownloadRepository: fx.downloadRepo, failNextUpdate: true}
+	fx.scheduler.downloadRepo = failingRepo
+	fx.qb.returnHash = item.TorrentHash
+
+	created, err := fx.scheduler.processDownloadItem(&sub, &item, decision.EpisodeID)
+	require.ErrorContains(t, err, "failed to update download status")
+	assert.False(t, created)
+	assert.Equal(t, []string{downloader.AutoRssCategory}, fx.qb.addCategories)
+
+	var pending model.Download
+	require.NoError(t, fx.db.Where("torrent_hash = ?", item.TorrentHash).First(&pending).Error)
+	assert.Equal(t, model.DownloadStatusPending, pending.Status)
+	ledger, err := fx.episodeRepo.GetBySubscriptionAndEpisode(sub.ID, item.Episode)
+	require.NoError(t, err)
+	assert.Equal(t, model.EpisodeStatusDownloading, ledger.Status)
+	require.NotNil(t, ledger.ActiveDownloadID)
+	assert.Equal(t, pending.ID, *ledger.ActiveDownloadID)
+
+	statusSync := downloader.NewStatusSync(fx.downloadRepo, nil)
+	changed, err := statusSync.UpdateStatus(&pending, &downloader.TorrentInfo{
+		Hash:  item.TorrentHash,
+		State: downloader.StateDownloading,
+	})
+	require.NoError(t, err)
+	assert.True(t, changed)
+	reconciled, err := fx.downloadRepo.GetByID(pending.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.DownloadStatusDownloading, reconciled.Status)
 }
 
 func TestProcessDownloadItemCreateFailureReleasesOnlyMatchingClaim(t *testing.T) {
@@ -326,14 +402,20 @@ func (p *schedulerRSSParser) SetProxy(string) error                    { return 
 
 type schedulerQBClient struct {
 	smallTorrentGuardQBClient
-	addCalls    int
-	deleteCalls int
-	addErr      error
+	addCalls      int
+	deleteCalls   int
+	addErr        error
+	returnHash    string
+	addCategories []string
 }
 
-func (q *schedulerQBClient) AddTorrent(string, string, string) (string, error) {
+func (q *schedulerQBClient) AddTorrent(_ string, _ string, category string) (string, error) {
 	q.addCalls++
-	return "added-hash", q.addErr
+	q.addCategories = append(q.addCategories, category)
+	if q.returnHash != "" {
+		return q.returnHash, q.addErr
+	}
+	return "", q.addErr
 }
 
 func (q *schedulerQBClient) DeleteTorrentWithPayload(string) error {
@@ -342,3 +424,16 @@ func (q *schedulerQBClient) DeleteTorrentWithPayload(string) error {
 }
 
 var _ downloader.QBittorrentClient = (*schedulerQBClient)(nil)
+
+type failOnceDownloadRepository struct {
+	repository.DownloadRepository
+	failNextUpdate bool
+}
+
+func (r *failOnceDownloadRepository) Update(download *model.Download) error {
+	if r.failNextUpdate {
+		r.failNextUpdate = false
+		return errors.New("injected download update failure")
+	}
+	return r.DownloadRepository.Update(download)
+}

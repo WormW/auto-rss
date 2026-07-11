@@ -275,6 +275,7 @@ func (s *scheduler) checkRSSFeeds() {
 		}
 
 		maxPubTime := sub.LastRSSPubTime
+		retryableProcessingFailure := false
 		for _, item := range items {
 			if !item.PubTime.IsZero() {
 				if maxPubTime == nil || item.PubTime.After(*maxPubTime) {
@@ -325,6 +326,7 @@ func (s *scheduler) checkRSSFeeds() {
 			}
 
 			if _, err := s.episodeService.ObserveRSSItem(&sub, item.Episode); err != nil {
+				retryableProcessingFailure = true
 				logger.Error("Failed to observe RSS episode",
 					"subscription_id", sub.ID,
 					"episode", item.Episode,
@@ -349,7 +351,11 @@ func (s *scheduler) checkRSSFeeds() {
 				continue
 			}
 
-			if s.downloadPreflightSkips(&sub, &item) {
+			preflight := s.downloadPreflight(&sub, &item)
+			if preflight.skip {
+				if preflight.retryable {
+					retryableProcessingFailure = true
+				}
 				continue
 			}
 
@@ -363,6 +369,7 @@ func (s *scheduler) checkRSSFeeds() {
 				SourceRSSURL:    sub.RssURL,
 			}, false)
 			if err != nil {
+				retryableProcessingFailure = true
 				logger.Error("Failed to evaluate RSS item against episode ledger",
 					"subscription_id", sub.ID,
 					"episode", item.Episode,
@@ -375,13 +382,18 @@ func (s *scheduler) checkRSSFeeds() {
 
 			_, err = s.processDownloadItem(&sub, &item, decision.EpisodeID)
 			if err != nil {
+				retryableProcessingFailure = true
 				// 错误已在 processDownloadItem 中记录
 				continue
 			}
 		}
 
 		// 使用事务更新订阅检查时间
-		if err := s.updateSubscriptionCheckTime(&sub, maxPubTime); err != nil {
+		watermark := maxPubTime
+		if retryableProcessingFailure {
+			watermark = sub.LastRSSPubTime
+		}
+		if err := s.updateSubscriptionCheckTime(&sub, watermark); err != nil {
 			logger.Error("Failed to update subscription check time",
 				"subscription", sub.Name,
 				"subscription_id", sub.ID,
@@ -557,7 +569,7 @@ func (s *scheduler) processDownloadItem(sub *model.Subscription, item *rss.RSSIt
 	downloadPath := utils.GenerateDownloadPath(basePath, sub.Name)
 
 	// 添加到 qBittorrent（在事务外，因为可能涉及网络操作）
-	_, err = s.qbClient.AddTorrent(item.TorrentURL, downloadPath, "")
+	addedHash, err := s.qbClient.AddTorrent(item.TorrentURL, downloadPath, downloader.AutoRssCategory)
 	if err != nil {
 		logger.Error("Failed to add torrent to qBittorrent",
 			"task_action", "add_torrent",
@@ -569,17 +581,20 @@ func (s *scheduler) processDownloadItem(sub *model.Subscription, item *rss.RSSIt
 			"trigger_context", "scheduler_rss_check",
 			"error", err)
 
-		// 更新下载状态并将 episode 恢复为 missing，允许后续再次 claim。
+		// 保留 attached ledger，让 RetryService 和 Monitor 继续收敛该任务。
 		download.Status = model.DownloadStatusFailed
 		download.ErrorMessage = err.Error()
-		var recoveryErrors []error
+		download.LastError = err.Error()
 		if updateErr := s.downloadRepo.Update(download); updateErr != nil {
-			recoveryErrors = append(recoveryErrors, fmt.Errorf("failed to mark download %d failed: %w", download.ID, updateErr))
+			return false, errors.Join(
+				fmt.Errorf("failed to add torrent to qBittorrent: %w", err),
+				fmt.Errorf("failed to mark download %d failed: %w", download.ID, updateErr),
+			)
 		}
-		if ledgerErr := s.episodeService.MarkDownloadFailed(download.ID); ledgerErr != nil {
-			recoveryErrors = append(recoveryErrors, fmt.Errorf("failed to restore episode ledger for download %d: %w", download.ID, ledgerErr))
-		}
-		return false, errors.Join(append([]error{fmt.Errorf("failed to add torrent to qBittorrent: %w", err)}, recoveryErrors...)...)
+		return false, fmt.Errorf("failed to add torrent to qBittorrent: %w", err)
+	}
+	if hash := strings.TrimSpace(addedHash); hash != "" {
+		download.TorrentHash = hash
 	}
 
 	logger.Debug("Torrent added with path",
@@ -603,19 +618,25 @@ func (s *scheduler) processDownloadItem(sub *model.Subscription, item *rss.RSSIt
 	return true, nil
 }
 
-func (s *scheduler) downloadPreflightSkips(sub *model.Subscription, item *rss.RSSItem) bool {
+type downloadPreflightResult struct {
+	skip      bool
+	retryable bool
+	reason    string
+}
+
+func (s *scheduler) downloadPreflight(sub *model.Subscription, item *rss.RSSItem) downloadPreflightResult {
 	if disk.IsDownloadsPaused() {
 		logger.Info("Skipping download creation because downloads are paused",
 			"subscription", sub.Name,
 			"title", item.Title)
-		return true
+		return downloadPreflightResult{skip: true, retryable: true, reason: "downloads_paused"}
 	}
 	minSizeBytes := minTorrentSizeBytes(s.configRepo)
 	if shouldSkipSmallTorrent(item, minSizeBytes) {
 		s.logSmallTorrentSkip(sub, item, minSizeBytes)
-		return true
+		return downloadPreflightResult{skip: true, reason: "torrent_below_minimum_size"}
 	}
-	return false
+	return downloadPreflightResult{}
 }
 
 func rssItemResource(item *rss.RSSItem) model.EpisodeResource {

@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -191,6 +192,24 @@ func (f *SmartFetchFilter) EvaluateSubscription(sub *model.Subscription) (Subscr
 		return status, needsUpdate
 	}
 
+	// 台账不可用时不能将订阅误判为完整，即使订阅已达到完结停止窗口。
+	var missingEpisodes []int
+	if f.strategy.CheckLocalComplete && sub.TotalEpisodes > 0 {
+		var err error
+		missingEpisodes, err = f.getMissingEpisodes(sub)
+		if err != nil {
+			logger.Error("Episode ledger unavailable for completeness check",
+				"subscription_id", sub.ID,
+				"error", err.Error())
+			status.ShouldFetch = true
+			status.FetchReason = "episode_ledger_unavailable"
+			status.Explanation = "剧集台账暂不可用，本轮保守执行拉取。"
+			status.NextFetchInterval = f.strategy.NormalInterval
+			return status, needsUpdate
+		}
+		status.MissingEpisodes = missingEpisodes
+	}
+
 	// 1. 检查是否已完结且跳过已完结
 	isCompleted := status.IsCompleted
 
@@ -226,13 +245,6 @@ func (f *SmartFetchFilter) EvaluateSubscription(sub *model.Subscription) (Subscr
 	// 2. 检查是否在活跃窗口期（更新日前后）
 	inWindow, daysUntilAir := f.isInActiveWindow(sub)
 	status.IsInActiveWindow = inWindow
-
-	// 3. 检查本地完整性
-	var missingEpisodes []int
-	if f.strategy.CheckLocalComplete && sub.TotalEpisodes > 0 {
-		missingEpisodes = f.getMissingEpisodes(sub)
-		status.MissingEpisodes = missingEpisodes
-	}
 
 	// 决策逻辑
 	switch {
@@ -389,42 +401,39 @@ func (f *SmartFetchFilter) isInActiveWindow(sub *model.Subscription) (bool, int)
 }
 
 // getMissingEpisodes 获取缺少的集数
-func (f *SmartFetchFilter) getMissingEpisodes(sub *model.Subscription) []int {
+func (f *SmartFetchFilter) getMissingEpisodes(sub *model.Subscription) ([]int, error) {
 	if sub.TotalEpisodes <= 0 {
 		// 不知道总集数，无法判断
-		return nil
+		return nil, nil
 	}
 	if f.episodeRepo == nil {
-		logger.Warn("Skipping local completeness check because episode repository is nil",
-			"subscription_id", sub.ID)
-		return nil
-	}
-
-	if err := f.episodeRepo.EnsureRange(sub.ID, sub.TotalEpisodes); err != nil {
-		logger.Error("Failed to ensure episode ledger range for completeness check",
-			"subscription_id", sub.ID,
-			"error", err.Error())
-		return nil
+		return nil, errors.New("episode repository is nil")
 	}
 	episodes, err := f.episodeRepo.ListBySubscription(sub.ID)
 	if err != nil {
-		logger.Error("Failed to list episode ledger for completeness check",
-			"subscription_id", sub.ID,
-			"error", err.Error())
-		return nil
+		return nil, fmt.Errorf("list episode ledger: %w", err)
 	}
 
-	var missing []int
+	statusByEpisode := make(map[int]string, len(episodes))
 	for _, ledger := range episodes {
-		if ledger.Episode < 1 || ledger.Episode > sub.TotalEpisodes {
-			continue
+		if ledger.Episode >= 1 && ledger.Episode <= sub.TotalEpisodes {
+			statusByEpisode[ledger.Episode] = ledger.Status
 		}
-		if ledger.Status == model.EpisodeStatusMissing {
-			missing = append(missing, ledger.Episode)
+	}
+	var missing []int
+	for episode := 1; episode <= sub.TotalEpisodes; episode++ {
+		switch statusByEpisode[episode] {
+		case model.EpisodeStatusDownloading,
+			model.EpisodeStatusDownloaded,
+			model.EpisodeStatusMarkedDownloaded,
+			model.EpisodeStatusIgnored:
+			continue
+		default:
+			missing = append(missing, episode)
 		}
 	}
 
-	return missing
+	return missing, nil
 }
 
 // parseWeekday 解析星期字符串为数字 (0-6)

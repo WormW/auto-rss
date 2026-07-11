@@ -46,7 +46,67 @@ func TestSmartFetchMissingEpisodesUsesEpisodeLedgerStatuses(t *testing.T) {
 
 	filter := NewSmartFetchFilter(repository.NewDownloadRepository(db), episodeRepo)
 
-	assert.Equal(t, []int{5}, filter.getMissingEpisodes(&sub))
+	missing, err := filter.getMissingEpisodes(&sub)
+	require.NoError(t, err)
+	assert.Equal(t, []int{5}, missing)
+}
+
+func TestEvaluateSubscriptionTreatsEmptyLedgerAsAllMissingWithoutWriting(t *testing.T) {
+	db := setupTestDB(t)
+	episodeRepo := repository.NewEpisodeRepository(db)
+	sub := model.Subscription{ID: 1, Name: "empty ledger", TotalEpisodes: 3, AirDay: "1"}
+	require.NoError(t, db.Create(&sub).Error)
+	filter := NewSmartFetchFilter(repository.NewDownloadRepository(db), episodeRepo)
+
+	status, _ := filter.EvaluateSubscription(&sub)
+
+	assert.Equal(t, []int{1, 2, 3}, status.MissingEpisodes)
+	assert.True(t, status.ShouldFetch)
+	var count int64
+	require.NoError(t, db.Model(&model.SubscriptionEpisode{}).Count(&count).Error)
+	assert.Zero(t, count, "smart fetch status evaluation must be read-only")
+}
+
+func TestEvaluateSubscriptionFetchesConservativelyWhenLedgerUnavailable(t *testing.T) {
+	tests := []struct {
+		name   string
+		filter func(*testing.T, *gorm.DB) *SmartFetchFilter
+	}{
+		{
+			name: "nil repository",
+			filter: func(_ *testing.T, db *gorm.DB) *SmartFetchFilter {
+				return NewSmartFetchFilter(repository.NewDownloadRepository(db), nil)
+			},
+		},
+		{
+			name: "query error",
+			filter: func(t *testing.T, db *gorm.DB) *SmartFetchFilter {
+				t.Helper()
+				require.NoError(t, db.Migrator().DropTable(&model.SubscriptionEpisode{}))
+				return NewSmartFetchFilter(repository.NewDownloadRepository(db), repository.NewEpisodeRepository(db))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := setupTestDB(t)
+			filter := tt.filter(t, db)
+			completedAt := time.Now().Add(-40 * 24 * time.Hour)
+			status, _ := filter.EvaluateSubscription(&model.Subscription{
+				ID:             1,
+				Name:           tt.name,
+				TotalEpisodes:  3,
+				CurrentEpisode: 3,
+				CompletedAt:    &completedAt,
+				AirDay:         "1",
+			})
+
+			assert.True(t, status.ShouldFetch)
+			assert.Equal(t, "episode_ledger_unavailable", status.FetchReason)
+			assert.Equal(t, DefaultSmartFetchStrategy().NormalInterval, status.NextFetchInterval)
+		})
+	}
 }
 
 type smartFetchConfigRepoStub struct {
