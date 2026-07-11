@@ -127,7 +127,7 @@ func (s *statusSync) UpdateStatus(download *model.Download, torrent *TorrentInfo
 			"error", err.Error())
 		return false, err
 	}
-	if newStatus == model.DownloadStatusFailed && s.episodeService != nil {
+	if newStatus == model.DownloadStatusFailed && s.episodeService != nil && shouldReleaseEpisodeAfterFailure(download) {
 		if err := s.episodeService.MarkDownloadFailed(download.ID); err != nil {
 			return false, err
 		}
@@ -185,7 +185,7 @@ func (s *statusSync) Reconcile(torrents []*TorrentInfo, downloadingTasks, stalle
 				"error", updateErr.Error())
 			continue
 		}
-		if s.episodeService != nil {
+		if s.episodeService != nil && shouldReleaseEpisodeAfterFailure(download) {
 			if markErr := s.episodeService.MarkDownloadFailed(download.ID); markErr != nil {
 				logger.Error("Failed to release episode after download reconciliation",
 					"download_id", download.ID,

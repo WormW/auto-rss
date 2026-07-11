@@ -315,10 +315,10 @@ func TestStatusSync_UpdateStatus_SetsErrorMessage(t *testing.T) {
 	}
 }
 
-func TestStatusSyncFailedStatusMarksEpisodeFailed(t *testing.T) {
+func TestStatusSyncTerminalFailureMarksEpisodeFailed(t *testing.T) {
 	episodes := &mockEpisodeCompletionService{}
 	sync := NewStatusSync(&mockDownloadRepo{}, nil, episodes)
-	download := &model.Download{ID: 42, Status: model.DownloadStatusDownloading}
+	download := &model.Download{ID: 42, Status: model.DownloadStatusDownloading, RetryCount: 3, MaxRetries: 3}
 
 	changed, err := sync.UpdateStatus(download, &TorrentInfo{Hash: "failed-42", State: StateError})
 	if err != nil {
@@ -326,6 +326,40 @@ func TestStatusSyncFailedStatusMarksEpisodeFailed(t *testing.T) {
 	}
 	if !changed {
 		t.Fatal("failed status should be reported as changed")
+	}
+	if len(episodes.failedIDs) != 1 || episodes.failedIDs[0] != download.ID {
+		t.Fatalf("failed episode calls = %v, want [%d]", episodes.failedIDs, download.ID)
+	}
+}
+
+func TestStatusSyncRetryableAndUnlimitedFailuresKeepEpisodeAttached(t *testing.T) {
+	for _, download := range []*model.Download{
+		{ID: 43, Status: model.DownloadStatusDownloading, RetryCount: 0, MaxRetries: 3},
+		{ID: 44, Status: model.DownloadStatusDownloading, RetryCount: 100, MaxRetries: 0},
+	} {
+		episodes := &mockEpisodeCompletionService{}
+		sync := NewStatusSync(&mockDownloadRepo{}, nil, episodes)
+		changed, err := sync.UpdateStatus(download, &TorrentInfo{Hash: "retryable", State: StateError})
+		if err != nil {
+			t.Fatalf("UpdateStatus: %v", err)
+		}
+		if !changed {
+			t.Fatal("failed status should be reported as changed")
+		}
+		if len(episodes.failedIDs) != 0 {
+			t.Fatalf("retryable failure released episodes: %v", episodes.failedIDs)
+		}
+	}
+}
+
+func TestStatusSyncNonRetryableFailureMarksEpisodeFailed(t *testing.T) {
+	episodes := &mockEpisodeCompletionService{}
+	sync := NewStatusSync(&mockDownloadRepo{}, nil, episodes)
+	download := &model.Download{ID: 45, Status: model.DownloadStatusDownloading, MaxRetries: 3, LastError: "invalid torrent"}
+
+	_, err := sync.UpdateStatus(download, &TorrentInfo{Hash: "invalid", State: StateError})
+	if err != nil {
+		t.Fatalf("UpdateStatus: %v", err)
 	}
 	if len(episodes.failedIDs) != 1 || episodes.failedIDs[0] != download.ID {
 		t.Fatalf("failed episode calls = %v, want [%d]", episodes.failedIDs, download.ID)
@@ -512,6 +546,44 @@ func TestStatusSync_Reconcile(t *testing.T) {
 
 			if reconciled > 0 && len(updatedDownloads) != reconciled {
 				t.Errorf("Expected %d downloads to be updated, got %d", reconciled, len(updatedDownloads))
+			}
+		})
+	}
+}
+
+func TestStatusSyncReconcileOnlyReleasesTerminalFailures(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		retryCount  int
+		maxRetries  int
+		wantRelease bool
+	}{
+		{name: "retryable", retryCount: 0, maxRetries: 3},
+		{name: "unlimited", retryCount: 100, maxRetries: 0},
+		{name: "exhausted", retryCount: 3, maxRetries: 3, wantRelease: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			episodes := &mockEpisodeCompletionService{}
+			sync := NewStatusSync(&mockDownloadRepo{}, nil, episodes)
+			download := model.Download{
+				ID: 60, Status: model.DownloadStatusDownloading, TorrentHash: "missing",
+				RetryCount: tt.retryCount, MaxRetries: tt.maxRetries,
+				UpdatedAt: time.Now().Add(-2 * ReconcileGracePeriod),
+			}
+
+			reconciled, _, err := sync.Reconcile(nil, []model.Download{download}, nil)
+			if err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			if reconciled != 1 {
+				t.Fatalf("reconciled = %d, want 1", reconciled)
+			}
+			if tt.wantRelease {
+				if len(episodes.failedIDs) != 1 || episodes.failedIDs[0] != download.ID {
+					t.Fatalf("terminal release calls = %v", episodes.failedIDs)
+				}
+			} else if len(episodes.failedIDs) != 0 {
+				t.Fatalf("retryable reconcile released episode: %v", episodes.failedIDs)
 			}
 		})
 	}

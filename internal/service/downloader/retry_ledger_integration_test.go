@@ -2,15 +2,159 @@ package downloader
 
 import (
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/repository"
+	episodeservice "github.com/WormW/auto-rss/internal/service/episode"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+func TestRetryableFailureKeepsEpisodeAttachedThroughRetryCompletion(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/retry-completion.db"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(
+		&model.Subscription{},
+		&model.Download{},
+		&model.Config{},
+		&model.SubscriptionEpisode{},
+		&model.EpisodeResourceCandidate{},
+	))
+	sub := model.Subscription{Name: "Retry Completion", Status: "active", RenameEnabled: false}
+	require.NoError(t, db.Create(&sub).Error)
+	sub.RenameEnabled = false
+	require.NoError(t, db.Model(&sub).Update("rename_enabled", false).Error)
+	download := model.Download{
+		SubscriptionID: sub.ID,
+		Title:          "Retry Completion - 01",
+		Episode:        1,
+		TorrentURL:     "magnet:?xt=urn:btih:retry-completion",
+		TorrentHash:    "initial-hash",
+		Status:         model.DownloadStatusDownloading,
+		MaxRetries:     3,
+	}
+	require.NoError(t, db.Create(&download).Error)
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID:    sub.ID,
+		Episode:           1,
+		Status:            model.EpisodeStatusDownloading,
+		StatusSource:      model.EpisodeStatusSourceAutomatic,
+		ActiveDownloadID:  &download.ID,
+		ActiveTorrentHash: download.TorrentHash,
+		ActiveTorrentURL:  download.TorrentURL,
+		ActiveTitle:       download.Title,
+	}
+	require.NoError(t, db.Create(&ledger).Error)
+	downloadRepo := repository.NewDownloadRepository(db)
+	episodeRepo := repository.NewEpisodeRepository(db)
+	episodeService := episodeservice.NewService(episodeRepo)
+
+	persisted, err := downloadRepo.GetByID(download.ID)
+	require.NoError(t, err)
+	statusSync := NewStatusSync(downloadRepo, nil, episodeService)
+	changed, err := statusSync.UpdateStatus(persisted, &TorrentInfo{Hash: download.TorrentHash, State: StateError})
+	require.NoError(t, err)
+	require.True(t, changed)
+	afterFailure, err := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
+	require.NoError(t, err)
+	assert.Equal(t, model.EpisodeStatusDownloading, afterFailure.Status)
+	require.NotNil(t, afterFailure.ActiveDownloadID)
+	assert.Equal(t, download.ID, *afterFailure.ActiveDownloadID)
+
+	qb := &retryLedgerQBClient{returnHash: "retried-actual-hash"}
+	monitor := NewDownloadMonitor(
+		db,
+		qb,
+		downloadRepo,
+		repository.NewSubscriptionRepository(db),
+		repository.NewConfigRepository(db),
+		"",
+		episodeService,
+	)
+	monitor.SetNotificationService(nil)
+	monitor.checkDownloads()
+	retried, err := downloadRepo.GetByID(download.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.DownloadStatusDownloading, retried.Status)
+	assert.Equal(t, "retried-actual-hash", retried.TorrentHash)
+	require.Len(t, qb.torrents, 1)
+	qb.torrents[0].State = StateCompleted
+	qb.torrents[0].Progress = 1
+	qb.torrents[0].SavePath = "/downloads/retry-completion"
+	monitor.checkDownloads()
+
+	completed, err := downloadRepo.GetByID(download.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.DownloadStatusCompleted, completed.Status)
+	afterCompletion, err := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
+	require.NoError(t, err)
+	assert.Equal(t, model.EpisodeStatusDownloaded, afterCompletion.Status)
+	require.NotNil(t, afterCompletion.ActiveDownloadID)
+	assert.Equal(t, download.ID, *afterCompletion.ActiveDownloadID)
+}
+
+func TestFailureTerminalityUpdatesRealEpisodeLedger(t *testing.T) {
+	tests := []struct {
+		name         string
+		retryCount   int
+		maxRetries   int
+		lastError    string
+		wantStatus   string
+		wantAttached bool
+	}{
+		{name: "retryable", retryCount: 0, maxRetries: 3, wantStatus: model.EpisodeStatusDownloading, wantAttached: true},
+		{name: "unlimited", retryCount: 100, maxRetries: 0, wantStatus: model.EpisodeStatusDownloading, wantAttached: true},
+		{name: "exhausted", retryCount: 3, maxRetries: 3, wantStatus: model.EpisodeStatusMissing},
+		{name: "non_retryable", retryCount: 0, maxRetries: 3, lastError: "invalid torrent", wantStatus: model.EpisodeStatusMissing},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "terminality.db")), &gorm.Config{})
+			require.NoError(t, err)
+			require.NoError(t, db.AutoMigrate(
+				&model.Subscription{}, &model.Download{}, &model.SubscriptionEpisode{}, &model.EpisodeResourceCandidate{},
+			))
+			sub := model.Subscription{Name: "Terminality " + tt.name, Status: "active"}
+			require.NoError(t, db.Create(&sub).Error)
+			download := model.Download{
+				SubscriptionID: sub.ID, Title: tt.name, Episode: 1,
+				TorrentURL: "magnet:" + tt.name, TorrentHash: "hash-" + tt.name,
+				Status: model.DownloadStatusDownloading, RetryCount: tt.retryCount,
+				MaxRetries: tt.maxRetries, LastError: tt.lastError,
+			}
+			require.NoError(t, db.Create(&download).Error)
+			require.NoError(t, db.Model(&download).Update("max_retries", tt.maxRetries).Error)
+			ledger := model.SubscriptionEpisode{
+				SubscriptionID: sub.ID, Episode: 1, Status: model.EpisodeStatusDownloading,
+				StatusSource: model.EpisodeStatusSourceAutomatic, ActiveDownloadID: &download.ID,
+				ActiveTorrentHash: download.TorrentHash,
+			}
+			require.NoError(t, db.Create(&ledger).Error)
+			downloadRepo := repository.NewDownloadRepository(db)
+			episodeRepo := repository.NewEpisodeRepository(db)
+			persisted, err := downloadRepo.GetByID(download.ID)
+			require.NoError(t, err)
+
+			_, err = NewStatusSync(downloadRepo, nil, episodeservice.NewService(episodeRepo)).
+				UpdateStatus(persisted, &TorrentInfo{Hash: download.TorrentHash, State: StateError})
+			require.NoError(t, err)
+
+			after, err := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantStatus, after.Status)
+			if tt.wantAttached {
+				require.NotNil(t, after.ActiveDownloadID)
+				assert.Equal(t, download.ID, *after.ActiveDownloadID)
+			} else {
+				assert.Nil(t, after.ActiveDownloadID)
+			}
+		})
+	}
+}
 
 func TestDownloadMonitorOwnsFirstAddAndReplacesRSSHash(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/retry-ledger.db"), &gorm.Config{})
@@ -141,7 +285,7 @@ func TestDownloadMonitorLeavesPendingOutboxUntouchedWhileDownloadsPaused(t *test
 	assert.Equal(t, AutoRssCategory, qb.categoryForHash("paused-actual-hash"))
 }
 
-func TestDownloadMonitorMarksEpisodeFailedWhenPendingAddFails(t *testing.T) {
+func TestDownloadMonitorMarksEpisodeFailedWhenPendingAddExhaustsRetries(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/pending-failure.db"), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&model.Subscription{}, &model.Download{}, &model.Config{}))
@@ -153,6 +297,7 @@ func TestDownloadMonitorMarksEpisodeFailedWhenPendingAddFails(t *testing.T) {
 		Episode:        1,
 		TorrentURL:     "magnet:?xt=urn:btih:pending-failure",
 		Status:         model.DownloadStatusPending,
+		RetryCount:     1,
 		MaxRetries:     1,
 	}
 	require.NoError(t, db.Create(&download).Error)

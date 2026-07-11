@@ -85,6 +85,10 @@ func (s *RetryService) ShouldRetry(download *model.Download) (bool, string) {
 
 // isRetryableError 检查错误是否可重试
 func (s *RetryService) isRetryableError(errMsg string) bool {
+	return isRetryableErrorMessage(errMsg)
+}
+
+func isRetryableErrorMessage(errMsg string) bool {
 	if errMsg == "" {
 		return true
 	}
@@ -109,6 +113,20 @@ func (s *RetryService) isRetryableError(errMsg string) bool {
 	}
 
 	return true
+}
+
+func shouldReleaseEpisodeAfterFailure(download *model.Download) bool {
+	if download == nil {
+		return false
+	}
+	if download.MaxRetries > 0 && download.RetryCount >= download.MaxRetries {
+		return true
+	}
+	errMessage := download.LastError
+	if errMessage == "" {
+		errMessage = download.ErrorMessage
+	}
+	return !isRetryableErrorMessage(errMessage)
 }
 
 // PrepareRetry 准备重试

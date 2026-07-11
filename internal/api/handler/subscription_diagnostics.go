@@ -756,25 +756,6 @@ func (h *SubscriptionDiagnosticsHandler) retryDownload(subscription *model.Subsc
 	if err := h.downloadRepo.Update(download); err != nil {
 		return fmt.Errorf("重置下载任务失败: %w", err)
 	}
-
-	if h.qbClient == nil {
-		return nil
-	}
-
-	downloadPath := utils.GenerateDownloadPath(h.resolveBaseDownloadPath(), subscription.Name)
-	torrentHash, err := h.qbClient.AddTorrent(download.TorrentURL, downloadPath, "")
-	if err != nil {
-		download.Status = model.DownloadStatusFailed
-		download.LastError = err.Error()
-		_ = h.downloadRepo.Update(download)
-		return fmt.Errorf("重新添加种子失败: %w", err)
-	}
-
-	download.Status = model.DownloadStatusDownloading
-	download.TorrentHash = torrentHash
-	if err := h.downloadRepo.Update(download); err != nil {
-		return fmt.Errorf("更新下载任务状态失败: %w", err)
-	}
 	return nil
 }
 

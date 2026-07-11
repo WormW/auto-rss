@@ -2,11 +2,41 @@ package repository
 
 import (
 	"testing"
+	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+func TestDownloadRepositoryUnlimitedRetryIsReady(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("failed to open test DB: %v", err)
+	}
+	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}); err != nil {
+		t.Fatalf("failed to migrate test DB: %v", err)
+	}
+	past := time.Now().Add(-time.Minute)
+	download := model.Download{
+		Title: "unlimited retry", TorrentURL: "magnet:unlimited", Status: model.DownloadStatusFailed,
+		RetryCount: 100, MaxRetries: 0, NextRetryAt: &past,
+	}
+	if err := db.Create(&download).Error; err != nil {
+		t.Fatalf("create download: %v", err)
+	}
+	if err := db.Model(&download).Update("max_retries", 0).Error; err != nil {
+		t.Fatalf("set unlimited retries: %v", err)
+	}
+
+	ready, err := NewDownloadRepository(db).GetFailedDownloadsReadyForRetry(10)
+	if err != nil {
+		t.Fatalf("GetFailedDownloadsReadyForRetry: %v", err)
+	}
+	if len(ready) != 1 || ready[0].ID != download.ID {
+		t.Fatalf("ready downloads = %#v, want unlimited retry download %d", ready, download.ID)
+	}
+}
 
 func TestDownloadRepository_StalledDownloadingFilter(t *testing.T) {
 	// Setup in-memory test DB

@@ -274,7 +274,7 @@ func (m *DownloadMonitor) processPendingDownloads() {
 				logger.Error("Failed to mark download as failed",
 					"download_id", download.ID,
 					"error", markErr.Error())
-			} else if m.episodeService != nil {
+			} else if m.episodeService != nil && shouldReleaseEpisodeAfterFailure(&download) {
 				if episodeErr := m.episodeService.MarkDownloadFailed(download.ID); episodeErr != nil {
 					logger.Error("Failed to release episode after pending download failure",
 						"download_id", download.ID,

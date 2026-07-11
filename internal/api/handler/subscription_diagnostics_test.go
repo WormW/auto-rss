@@ -134,7 +134,8 @@ func TestSubscriptionDiagnosticsHandler_RetryFailedResetsRetryableDownloads(t *t
 		Status:         model.DownloadStatusFailed,
 	}))
 
-	handler := NewSubscriptionDiagnosticsHandler(subRepo, downloadRepo, nil, nil, t.TempDir())
+	qb := &mockQBittorrentClient{}
+	handler := NewSubscriptionDiagnosticsHandler(subRepo, downloadRepo, nil, qb, t.TempDir())
 	r := gin.New()
 	r.POST("/subscriptions/:id/diagnostics/retry-failed", handler.RetryFailed)
 
@@ -160,4 +161,7 @@ func TestSubscriptionDiagnosticsHandler_RetryFailedResetsRetryableDownloads(t *t
 	require.Empty(t, updated.TorrentHash)
 	require.Empty(t, updated.LastError)
 	require.Equal(t, "user_retry", updated.RetryReason)
+	require.True(t, qb.deleteWithPayloadCalled)
+	require.Equal(t, "old-hash", qb.deletedHash)
+	require.False(t, qb.addCalled, "DownloadMonitor must own the first qBittorrent Add")
 }

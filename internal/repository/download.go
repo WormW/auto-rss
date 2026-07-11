@@ -237,7 +237,7 @@ func (r *downloadRepository) GetFailedDownloadsReadyForRetry(limit int) ([]model
 	var downloads []model.Download
 	now := time.Now()
 
-	err := r.db.Where("status = ? AND retry_count < max_retries AND (next_retry_at IS NULL OR next_retry_at <= ?)",
+	err := r.db.Where("status = ? AND (max_retries = 0 OR retry_count < max_retries) AND (next_retry_at IS NULL OR next_retry_at <= ?)",
 		"failed", now).
 		Order("next_retry_at ASC").
 		Limit(limit).
