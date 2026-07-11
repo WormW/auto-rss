@@ -1,6 +1,7 @@
 package organizer
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,7 +18,7 @@ import (
 // FileMover 文件移动服务
 type FileMover interface {
 	// Move 移动文件（支持跨文件系统）
-	Move(src, dest string) error
+	Move(src, dest string) (string, error)
 
 	// Copy 复制文件
 	Copy(src, dest string) error
@@ -42,47 +43,55 @@ type FileMover interface {
 // fileMover 文件移动服务实现
 type fileMover struct {
 	videoExts []string
+	rename    func(string, string) error
+	remove    func(string) error
 }
 
 // NewFileMover 创建文件移动服务
 func NewFileMover() FileMover {
 	return &fileMover{
 		videoExts: []string{".mkv", ".mp4", ".avi", ".flv", ".ts", ".m2ts", ".mov", ".wmv"},
+		rename:    os.Rename,
+		remove:    os.Remove,
 	}
 }
 
 // Move 移动文件（支持跨文件系统）
-func (m *fileMover) Move(src, dest string) error {
-	// 如果目标文件已存在，添加后缀
+func (m *fileMover) Move(src, dest string) (string, error) {
 	if _, err := os.Stat(dest); err == nil {
-		// 文件已存在，添加时间戳后缀
-		ext := filepath.Ext(dest)
-		base := strings.TrimSuffix(dest, ext)
-		timestamp := time.Now().Format("20060102_150405")
-		dest = fmt.Sprintf("%s_%s%s", base, timestamp, ext)
-
-		logger.Warn("Target file already exists, using new name", "new_path", dest)
+		return "", fmt.Errorf("destination already exists: %s", dest)
 	}
 
 	// 尝试重命名（如果在同一文件系统上）
-	err := os.Rename(src, dest)
+	rename := m.rename
+	if rename == nil {
+		rename = os.Rename
+	}
+	remove := m.remove
+	if remove == nil {
+		remove = os.Remove
+	}
+	err := rename(src, dest)
 	if err == nil {
-		return nil
+		return dest, nil
 	}
 
 	// 如果重命名失败（跨文件系统），则复制后删除
 	logger.Debug("Rename failed, trying copy + delete", "error", err)
 
 	if err := m.Copy(src, dest); err != nil {
-		return fmt.Errorf("failed to copy file: %w", err)
+		return "", fmt.Errorf("failed to copy file: %w", err)
 	}
 
-	if err := os.Remove(src); err != nil {
-		logger.Warn("Failed to remove source file after copy", "path", src, "error", err)
-		// 不返回错误，因为文件已成功复制
+	if err := remove(src); err != nil {
+		moveErr := fmt.Errorf("failed to remove source after copy: %w", err)
+		if cleanupErr := remove(dest); cleanupErr != nil {
+			return "", errors.Join(moveErr, fmt.Errorf("failed to remove copied destination: %w", cleanupErr))
+		}
+		return "", moveErr
 	}
 
-	return nil
+	return dest, nil
 }
 
 // Copy 复制文件
@@ -135,11 +144,7 @@ func (m *fileMover) MoveWithFallback(src, dest string) (string, error) {
 		logger.Warn("Target file already exists, using new name", "new_path", finalDest)
 	}
 
-	if err := m.Move(src, finalDest); err != nil {
-		return "", err
-	}
-
-	return finalDest, nil
+	return m.Move(src, finalDest)
 }
 
 // CleanEmptyDirs 递归清理空目录

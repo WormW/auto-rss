@@ -17,7 +17,9 @@ import (
 
 type failingOrganizerMover struct{ FileMover }
 
-func (f *failingOrganizerMover) Move(string, string) error { return errors.New("move failed") }
+func (f *failingOrganizerMover) Move(string, string) (string, error) {
+	return "", errors.New("move failed")
+}
 
 type organizerEpisodeCompletionMock struct {
 	completedInTx bool

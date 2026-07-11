@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/repository"
@@ -15,15 +16,27 @@ import (
 	"gorm.io/gorm"
 )
 
+type blockingRecoveryMover struct {
+	FileMover
+	started chan struct{}
+	release chan struct{}
+}
+
+func (m *blockingRecoveryMover) Move(src, dest string) (string, error) {
+	close(m.started)
+	<-m.release
+	return m.FileMover.Move(src, dest)
+}
+
 type compensationFailMover struct {
 	FileMover
 	calls int
 }
 
-func (m *compensationFailMover) Move(src, dest string) error {
+func (m *compensationFailMover) Move(src, dest string) (string, error) {
 	m.calls++
 	if m.calls == 2 {
-		return errors.New("injected compensation failure")
+		return "", errors.New("injected compensation failure")
 	}
 	return m.FileMover.Move(src, dest)
 }
@@ -288,6 +301,93 @@ func TestFileOrganizerRecoveryFailureKeepsCheckpoint(t *testing.T) {
 	assert.Equal(t, model.DownloadStatusOrganizing, persisted.Status)
 	assert.Equal(t, fx.sourcePath, persisted.FilePath)
 	assert.Equal(t, target, persisted.RenamedPath)
+}
+
+func TestFileOrganizerRecoveryRejectsDistinctSourceAndTarget(t *testing.T) {
+	fx := newOrganizerLedgerFixture(t)
+	info := fx.organizer.parser.Parse(filepath.Base(fx.sourcePath))
+	target := fx.organizer.generateNewPath(fx.subscription, info)
+	require.NoError(t, os.MkdirAll(filepath.Dir(target), 0755))
+	require.NoError(t, os.WriteFile(target, []byte("different"), 0600))
+	require.NoError(t, fx.db.Model(&model.Download{}).Where("id = ?", fx.download.ID).Updates(map[string]any{
+		"status": model.DownloadStatusOrganizing, "file_path": fx.sourcePath, "renamed_path": target,
+	}).Error)
+
+	fx.organizer.recoverOrganizingDownloads()
+
+	persisted, err := fx.downloadRepo.GetByID(fx.download.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.DownloadStatusOrganizing, persisted.Status)
+	sourceBytes, err := os.ReadFile(fx.sourcePath)
+	require.NoError(t, err)
+	targetBytes, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, "video", string(sourceBytes))
+	assert.Equal(t, "different", string(targetBytes))
+}
+
+func TestFileOrganizerStopCancelsSleepingHandlerAndIsIdempotent(t *testing.T) {
+	fx := newOrganizerLedgerFixture(t)
+	fx.organizer.stabilizeTime = time.Hour
+	fx.organizer.handleNewFile(fx.sourcePath)
+	fx.organizer.Stop()
+	fx.organizer.Stop()
+
+	_, err := os.Stat(fx.sourcePath)
+	require.NoError(t, err)
+	persisted, err := fx.downloadRepo.GetByID(fx.download.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.DownloadStatusDownloading, persisted.Status)
+}
+
+func TestFileOrganizerStopWaitsForBlockedRecoveryWithoutCompleting(t *testing.T) {
+	fx := newOrganizerLedgerFixture(t)
+	info := fx.organizer.parser.Parse(filepath.Base(fx.sourcePath))
+	target := fx.organizer.generateNewPath(fx.subscription, info)
+	require.NoError(t, fx.db.Model(&model.Download{}).Where("id = ?", fx.download.ID).Updates(map[string]any{
+		"status": model.DownloadStatusOrganizing, "file_path": fx.sourcePath, "renamed_path": target,
+	}).Error)
+	blocker := &blockingRecoveryMover{FileMover: NewFileMover(), started: make(chan struct{}), release: make(chan struct{})}
+	fx.organizer.mover = blocker
+	require.True(t, fx.organizer.startTask(fx.organizer.recoverOrganizingDownloads))
+	<-blocker.started
+	stopped := make(chan struct{})
+	go func() { fx.organizer.Stop(); close(stopped) }()
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned before blocked recovery exited")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(blocker.release)
+	<-stopped
+	persisted, err := fx.downloadRepo.GetByID(fx.download.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.DownloadStatusOrganizing, persisted.Status)
+}
+
+func TestFileOrganizerRecoveryKeysetProcessesBeyondFailedFirstThousand(t *testing.T) {
+	fx := newOrganizerLedgerFixture(t)
+	missingSource := filepath.Join(fx.watchDir, "missing.mkv")
+	missingTarget := filepath.Join(fx.destDir, "missing.mkv")
+	require.NoError(t, fx.db.Exec(`
+		WITH RECURSIVE seq(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM seq WHERE x < 1000)
+		INSERT INTO downloads (subscription_id,title,episode,torrent_url,torrent_hash,file_path,renamed_path,status,created_at,updated_at)
+		SELECT ?, 'failed-' || x, 0, 'magnet:failed-' || x, 'failed-keyset-' || x, ?, ?, 'organizing', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM seq
+	`, fx.subscription.ID, missingSource, missingTarget).Error)
+	validSource := filepath.Join(fx.watchDir, "[Group] Organizer Ledger - 02 [1080p].mkv")
+	require.NoError(t, os.WriteFile(validSource, []byte("episode2"), 0600))
+	info := fx.organizer.parser.Parse(filepath.Base(validSource))
+	validTarget := fx.organizer.generateNewPath(fx.subscription, info)
+	valid := model.Download{SubscriptionID: fx.subscription.ID, Title: "episode2", Episode: 2, TorrentURL: "magnet:valid-keyset", TorrentHash: "valid-keyset", FilePath: validSource, RenamedPath: validTarget, Status: model.DownloadStatusOrganizing}
+	require.NoError(t, fx.downloadRepo.Create(&valid))
+	ledger := model.SubscriptionEpisode{SubscriptionID: fx.subscription.ID, Episode: 2, Status: model.EpisodeStatusDownloading, StatusSource: model.EpisodeStatusSourceAutomatic, ActiveDownloadID: &valid.ID, ActiveTorrentHash: valid.TorrentHash}
+	require.NoError(t, fx.db.Create(&ledger).Error)
+
+	fx.organizer.recoverOrganizingDownloads()
+
+	persisted, err := fx.downloadRepo.GetByID(valid.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.DownloadStatusCompleted, persisted.Status)
 }
 
 func TestFileOrganizerReportsPersistenceAndCompensationFailures(t *testing.T) {

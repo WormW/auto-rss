@@ -1,14 +1,43 @@
 package organizer
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
 )
+
+func TestFileMoverCopyRemoveFailureCleansDestination(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "source.mkv")
+	dest := filepath.Join(dir, "dest.mkv")
+	if err := os.WriteFile(src, []byte("video"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mover := &fileMover{
+		videoExts: []string{".mkv"},
+		rename:    func(string, string) error { return errors.New("cross-device") },
+		remove: func(path string) error {
+			if path == src {
+				return errors.New("source busy")
+			}
+			return os.Remove(path)
+		},
+	}
+
+	if _, err := mover.Move(src, dest); err == nil {
+		t.Fatal("expected source removal failure")
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Fatalf("source must remain: %v", err)
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatalf("copied destination must be removed, err=%v", err)
+	}
+}
 
 func TestFileMover_IsVideoFile(t *testing.T) {
 	mover := NewFileMover()
@@ -103,7 +132,7 @@ func TestFileMover_Move(t *testing.T) {
 
 	// Test move
 	destFile := filepath.Join(tempDir, "dest.txt")
-	if err := mover.Move(srcFile, destFile); err != nil {
+	if _, err := mover.Move(srcFile, destFile); err != nil {
 		t.Errorf("Move() error = %v", err)
 	}
 
@@ -139,9 +168,9 @@ func TestFileMover_Move_DestinationExists(t *testing.T) {
 		t.Fatalf("Failed to create destination file: %v", err)
 	}
 
-	// Test move - should create file with timestamp suffix
-	if err := mover.Move(srcFile, destFile); err != nil {
-		t.Errorf("Move() error = %v", err)
+	// Existing destinations are explicit conflicts.
+	if _, err := mover.Move(srcFile, destFile); err == nil {
+		t.Error("Move() expected destination conflict")
 	}
 
 	// Verify original destination still exists
@@ -149,21 +178,8 @@ func TestFileMover_Move_DestinationExists(t *testing.T) {
 		t.Error("Original destination file should still exist")
 	}
 
-	// Verify source was moved to a new file with timestamp suffix
-	entries, err := os.ReadDir(tempDir)
-	if err != nil {
-		t.Fatalf("Failed to read directory: %v", err)
-	}
-
-	foundMoved := false
-	for _, entry := range entries {
-		if strings.Contains(entry.Name(), "dest_") && strings.HasSuffix(entry.Name(), ".txt") {
-			foundMoved = true
-			break
-		}
-	}
-	if !foundMoved {
-		t.Error("Expected to find moved file with timestamp suffix")
+	if _, err := os.Stat(srcFile); err != nil {
+		t.Error("Source file should remain after destination conflict")
 	}
 }
 
@@ -421,7 +437,7 @@ func TestFileMover_Move_CrossDevice(t *testing.T) {
 
 	// Move to same directory (should use rename)
 	destFile := filepath.Join(tempDir, "dest.txt")
-	if err := mover.Move(srcFile, destFile); err != nil {
+	if _, err := mover.Move(srcFile, destFile); err != nil {
 		t.Errorf("Move() error = %v", err)
 	}
 
