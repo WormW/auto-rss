@@ -20,6 +20,7 @@ import (
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/downloader"
+	"github.com/WormW/auto-rss/internal/service/episode"
 	"github.com/WormW/auto-rss/internal/service/recovery"
 	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/WormW/auto-rss/internal/service/scheduler"
@@ -115,7 +116,7 @@ func setupRouterForTestWithConfig(t *testing.T, authEnabled bool, configure func
 	appCtx := newTestAppContext(db, cfg)
 
 	original := newScheduler
-	newScheduler = func(*gorm.DB, repository.SubscriptionRepository, repository.DownloadRepository, repository.ConfigRepository, string, rss.Parser, downloader.QBittorrentClient) scheduler.Scheduler {
+	newScheduler = func(*gorm.DB, repository.SubscriptionRepository, repository.DownloadRepository, repository.ConfigRepository, string, rss.Parser, downloader.QBittorrentClient, *episode.Service) scheduler.Scheduler {
 		return &mockScheduler{}
 	}
 	t.Cleanup(func() { newScheduler = original })
@@ -134,7 +135,7 @@ func TestSetup_ReturnsErrorWhenSchedulerStartFailsAndBlockingEnabled(t *testing.
 	qbClient := downloader.NewQBittorrentClient()
 
 	original := newScheduler
-	newScheduler = func(*gorm.DB, repository.SubscriptionRepository, repository.DownloadRepository, repository.ConfigRepository, string, rss.Parser, downloader.QBittorrentClient) scheduler.Scheduler {
+	newScheduler = func(*gorm.DB, repository.SubscriptionRepository, repository.DownloadRepository, repository.ConfigRepository, string, rss.Parser, downloader.QBittorrentClient, *episode.Service) scheduler.Scheduler {
 		return &mockScheduler{startErr: errors.New("boom")}
 	}
 	defer func() { newScheduler = original }()

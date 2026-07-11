@@ -27,6 +27,7 @@ import (
 	"github.com/WormW/auto-rss/internal/service/calendar"
 	"github.com/WormW/auto-rss/internal/service/disk"
 	"github.com/WormW/auto-rss/internal/service/downloader"
+	"github.com/WormW/auto-rss/internal/service/episode"
 	"github.com/WormW/auto-rss/internal/service/medialibrary"
 	"github.com/WormW/auto-rss/internal/service/notification"
 	"github.com/WormW/auto-rss/internal/service/rss"
@@ -36,8 +37,8 @@ import (
 	"gorm.io/gorm"
 )
 
-var newScheduler = func(db *gorm.DB, subscriptionRepo repository.SubscriptionRepository, downloadRepo repository.DownloadRepository, configRepo repository.ConfigRepository, rssInterval string, rssParser rss.Parser, qbClient downloader.QBittorrentClient) scheduler.Scheduler {
-	return scheduler.NewScheduler(db, subscriptionRepo, downloadRepo, configRepo, rssInterval, rssParser, qbClient)
+var newScheduler = func(db *gorm.DB, subscriptionRepo repository.SubscriptionRepository, downloadRepo repository.DownloadRepository, configRepo repository.ConfigRepository, rssInterval string, rssParser rss.Parser, qbClient downloader.QBittorrentClient, episodeService *episode.Service) scheduler.Scheduler {
+	return scheduler.NewScheduler(db, subscriptionRepo, downloadRepo, configRepo, rssInterval, rssParser, qbClient, episodeService)
 }
 
 // Setup 设置路由
@@ -92,12 +93,14 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	// 初始化仓储
 	subscriptionRepo := repository.NewSubscriptionRepository(db)
 	downloadRepo := repository.NewDownloadRepository(db)
+	episodeRepo := repository.NewEpisodeRepository(db)
+	episodeService := episode.NewService(episodeRepo)
 	configRepo := repository.NewConfigRepository(db)
 	rssSourceRepo := repository.NewRSSSourceRepository(db)
 	logRepo := repository.NewLogRepository(db)
 
 	// 初始化调度器
-	rssScheduler := newScheduler(db, subscriptionRepo, downloadRepo, configRepo, cfg.RSSInterval, rssParser, qbClient)
+	rssScheduler := newScheduler(db, subscriptionRepo, downloadRepo, configRepo, cfg.RSSInterval, rssParser, qbClient, episodeService)
 
 	// 初始化通知服务
 	notificationSvc := notification.NewService(db)
@@ -130,7 +133,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	jwtService := auth.NewJWTService(cfg, refreshTokenRepo)
 
 	// 初始化处理器
-	subscriptionHandler := handler.NewSubscriptionHandler(subscriptionRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath)
+	subscriptionHandler := handler.NewSubscriptionHandler(subscriptionRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath, episodeRepo)
 	subscriptionDiagnosticsHandler := handler.NewSubscriptionDiagnosticsHandler(subscriptionRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath)
 	downloadHandler := handler.NewDownloadHandler(downloadRepo, qbClient, configRepo)
 	downloadHistoryHandler := handler.NewDownloadHistoryHandler(downloadRepo)

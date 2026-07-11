@@ -9,6 +9,7 @@ import (
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -22,12 +23,30 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("Failed to connect to test database: %v", err)
 	}
 
-	err = db.AutoMigrate(&model.Subscription{}, &model.Download{})
+	err = db.AutoMigrate(&model.Subscription{}, &model.Download{}, &model.SubscriptionEpisode{}, &model.EpisodeResourceCandidate{})
 	if err != nil {
 		t.Fatalf("Failed to migrate test database: %v", err)
 	}
 
 	return db
+}
+
+func TestSmartFetchMissingEpisodesUsesEpisodeLedgerStatuses(t *testing.T) {
+	db := setupTestDB(t)
+	episodeRepo := repository.NewEpisodeRepository(db)
+	sub := model.Subscription{ID: 1, Name: "ledger completeness", TotalEpisodes: 5}
+	require.NoError(t, db.Create(&sub).Error)
+	require.NoError(t, episodeRepo.EnsureRange(sub.ID, sub.TotalEpisodes))
+	require.NoError(t, episodeRepo.SetStatus(sub.ID, []int{1}, model.EpisodeStatusDownloaded, model.EpisodeStatusSourceAutomatic))
+	require.NoError(t, episodeRepo.SetStatus(sub.ID, []int{2}, model.EpisodeStatusMarkedDownloaded, model.EpisodeStatusSourceUser))
+	require.NoError(t, episodeRepo.SetStatus(sub.ID, []int{3}, model.EpisodeStatusIgnored, model.EpisodeStatusSourceUser))
+	_, claimed, err := episodeRepo.ClaimForDownload(sub.ID, 4, model.EpisodeResource{Hash: "active"})
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	filter := NewSmartFetchFilter(repository.NewDownloadRepository(db), episodeRepo)
+
+	assert.Equal(t, []int{5}, filter.getMissingEpisodes(&sub))
 }
 
 type smartFetchConfigRepoStub struct {
@@ -79,7 +98,7 @@ func TestEvaluateSubscription_CompletedStopDays(t *testing.T) {
 	downloadRepo := repository.NewDownloadRepository(db)
 
 	// 创建过滤器
-	filter := NewSmartFetchFilter(downloadRepo)
+	filter := NewSmartFetchFilter(downloadRepo, repository.NewEpisodeRepository(db))
 	strategy := DefaultSmartFetchStrategy()
 	strategy.CompletedStopDays = 30 // 30天后停止检查
 	filter.SetStrategy(strategy)
@@ -183,7 +202,7 @@ func TestEvaluateSubscription_CompletedStopDaysZero(t *testing.T) {
 	db := setupTestDB(t)
 
 	// 测试 CompletedStopDays = 0（不停止检查）
-	filter := NewSmartFetchFilter(repository.NewDownloadRepository(db))
+	filter := NewSmartFetchFilter(repository.NewDownloadRepository(db), repository.NewEpisodeRepository(db))
 	strategy := DefaultSmartFetchStrategy()
 	strategy.CompletedStopDays = 0 // 0表示不停止检查
 	filter.SetStrategy(strategy)
@@ -207,7 +226,7 @@ func TestEvaluateSubscription_CompletedStopDaysZero(t *testing.T) {
 }
 
 func TestEvaluateSubscription_ClearsStaleCompletedAtForOffsetSubscription(t *testing.T) {
-	filter := NewSmartFetchFilter(nil)
+	filter := NewSmartFetchFilter(nil, nil)
 	completedAt := time.Now().Add(-40 * 24 * time.Hour)
 	sub := &model.Subscription{
 		Name:           "偏移订阅",
@@ -227,7 +246,7 @@ func TestEvaluateSubscription_ClearsStaleCompletedAtForOffsetSubscription(t *tes
 
 func TestEvaluateSubscription_SmartFetchGlobalDisabled(t *testing.T) {
 	db := setupTestDB(t)
-	filter := NewSmartFetchFilter(repository.NewDownloadRepository(db))
+	filter := NewSmartFetchFilter(repository.NewDownloadRepository(db), repository.NewEpisodeRepository(db))
 	filter.LoadConfigFromDB(&smartFetchConfigRepoStub{
 		values: map[string]string{
 			"smart_fetch.enabled": "false",
@@ -250,7 +269,7 @@ func TestEvaluateSubscription_SmartFetchGlobalDisabled(t *testing.T) {
 
 func TestEvaluateSubscription_SubscriptionOverrideNever(t *testing.T) {
 	db := setupTestDB(t)
-	filter := NewSmartFetchFilter(repository.NewDownloadRepository(db))
+	filter := NewSmartFetchFilter(repository.NewDownloadRepository(db), repository.NewEpisodeRepository(db))
 
 	status, _ := filter.EvaluateSubscription(&model.Subscription{
 		ID:                 1,
@@ -267,7 +286,7 @@ func TestEvaluateSubscription_SubscriptionOverrideNever(t *testing.T) {
 }
 
 func TestEvaluateSubscription_CalendarOnlySkipsRSSFetch(t *testing.T) {
-	filter := NewSmartFetchFilter(nil)
+	filter := NewSmartFetchFilter(nil, nil)
 
 	status, needsUpdate := filter.EvaluateSubscription(&model.Subscription{
 		ID:         1,
@@ -286,7 +305,7 @@ func TestEvaluateSubscription_CalendarOnlySkipsRSSFetch(t *testing.T) {
 }
 
 func TestIsCompleted(t *testing.T) {
-	filter := NewSmartFetchFilter(nil)
+	filter := NewSmartFetchFilter(nil, nil)
 
 	tests := []struct {
 		name   string

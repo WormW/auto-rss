@@ -33,6 +33,7 @@ import (
 type SubscriptionHandler struct {
 	repo           repository.SubscriptionRepository
 	downloadRepo   repository.DownloadRepository
+	episodeRepo    repository.EpisodeRepository
 	configRepo     repository.ConfigRepository
 	bangumiService *bangumi.BangumiService
 	imageService   *bangumi.ImageService
@@ -101,6 +102,7 @@ func NewSubscriptionHandler(
 	configRepo repository.ConfigRepository,
 	qbClient downloader.QBittorrentClient,
 	downloadPath string,
+	episodeRepos ...repository.EpisodeRepository,
 ) *SubscriptionHandler {
 	// Create internal services
 	bgService := bangumi.NewBangumiService()
@@ -113,9 +115,15 @@ func NewSubscriptionHandler(
 	batchImporter := subscription.NewBatchImporter(mikanService, enricher, repo, configRepo)
 	collectionDownloader := subscription.NewCollectionDownloader(qbClient, downloadRepo, configRepo, downloadPath)
 
+	var episodeRepo repository.EpisodeRepository
+	if len(episodeRepos) > 0 {
+		episodeRepo = episodeRepos[0]
+	}
+
 	return &SubscriptionHandler{
 		repo:                 repo,
 		downloadRepo:         downloadRepo,
+		episodeRepo:          episodeRepo,
 		configRepo:           configRepo,
 		bangumiService:       bgService,
 		imageService:         imgService,
@@ -1045,7 +1053,7 @@ func (h *SubscriptionHandler) ListSmartFetchStatus(c *gin.Context) {
 		return
 	}
 
-	filter := scheduler.NewSmartFetchFilter(h.downloadRepo)
+	filter := scheduler.NewSmartFetchFilter(h.downloadRepo, h.episodeRepo)
 	filter.LoadConfigFromDB(h.configRepo)
 	now := time.Now()
 	items := make([]SubscriptionSmartFetchStatus, 0, len(subscriptionsWithStats))

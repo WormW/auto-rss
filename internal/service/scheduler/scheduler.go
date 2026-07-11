@@ -1,6 +1,8 @@
 package scheduler
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -13,6 +15,7 @@ import (
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/disk"
 	"github.com/WormW/auto-rss/internal/service/downloader"
+	"github.com/WormW/auto-rss/internal/service/episode"
 	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/robfig/cron/v3"
 	"gorm.io/gorm"
@@ -39,6 +42,7 @@ type scheduler struct {
 	rssCheckInterval string
 	rssParser        rss.Parser
 	qbClient         downloader.QBittorrentClient
+	episodeService   *episode.Service
 	rssCheckRunning  atomic.Bool
 	smartFetchFilter *SmartFetchFilter // 智能拉取过滤器
 }
@@ -52,6 +56,7 @@ func NewScheduler(
 	rssCheckInterval string,
 	rssParser rss.Parser,
 	qbClient downloader.QBittorrentClient,
+	episodeService *episode.Service,
 ) Scheduler {
 	return &scheduler{
 		db:               db,
@@ -62,7 +67,8 @@ func NewScheduler(
 		rssCheckInterval: rssCheckInterval,
 		rssParser:        rssParser,
 		qbClient:         qbClient,
-		smartFetchFilter: NewSmartFetchFilter(downloadRepo),
+		episodeService:   episodeService,
+		smartFetchFilter: NewSmartFetchFilter(downloadRepo, repository.NewEpisodeRepository(db)),
 	}
 }
 
@@ -280,17 +286,6 @@ func (s *scheduler) checkRSSFeeds() {
 				}
 			}
 
-			// 检查是否已存在相同 hash
-			existing, _ := s.downloadRepo.GetByHash(item.TorrentHash)
-			if existing != nil {
-				continue
-			}
-
-			// 应用关键词过滤
-			if !s.matchesFilter(&sub, item.Title) {
-				continue
-			}
-
 			// 只处理订阅创建时间之后发布的条目（定时检查不收集历史种子）
 			if !item.PubTime.IsZero() && item.PubTime.Before(sub.CreatedAt) {
 				logger.Debug("Skipping item published before subscription creation",
@@ -302,19 +297,14 @@ func (s *scheduler) checkRSSFeeds() {
 			}
 
 			// 计算相对集数（考虑偏移）
-			offset := sub.EpisodeOffset
-			relativeEpisode := item.Episode
-			if offset > 0 {
-				relativeEpisode = item.Episode - offset
-				// 如果相对集数 <= 0，说明这集在偏移之前，跳过
-				if relativeEpisode <= 0 {
-					logger.Debug("Skipping episode before offset",
-						"subscription", sub.Name,
-						"episode", item.Episode,
-						"offset", offset,
-						"relative_episode", relativeEpisode)
-					continue
-				}
+			relativeEpisode := sub.RelativeEpisode(item.Episode)
+			if relativeEpisode <= 0 {
+				logger.Debug("Skipping episode before offset",
+					"subscription", sub.Name,
+					"episode", item.Episode,
+					"offset", sub.EpisodeOffset,
+					"relative_episode", relativeEpisode)
+				continue
 			}
 
 			// 如果设置了总集数，只收集在范围内的
@@ -327,71 +317,29 @@ func (s *scheduler) checkRSSFeeds() {
 				continue
 			}
 
-			// 检查同一订阅的同一集数是否已存在（考虑语言）
-			shouldDownload := true
-			skipReason := ""
-			var replaceDownloadID uint = 0
-
-			if item.Episode > 0 {
-				// 初始化语言过滤器
-				langFilter := NewLanguageFilter(s.downloadRepo)
-
-				// 检查语言策略
-				allowed, reason, replaceID := langFilter.CheckLanguageAllow(&sub, item.Episode, item.Language, item.Title)
-				shouldDownload = allowed
-				skipReason = reason
-				replaceDownloadID = replaceID
-
-				minSizeBytes := minTorrentSizeBytes(s.configRepo)
-				if shouldSkipSmallTorrent(&item, minSizeBytes) {
-					s.logSmallTorrentSkip(&sub, &item, minSizeBytes)
-					continue
-				}
-
-				// 如果需要替换现有下载（更高版本），先在 qBittorrent 中删除旧种子
-				// 数据库记录将在 processDownloadItem 的事务中删除
-				if replaceDownloadID > 0 {
-					existingEpisode, _ := s.downloadRepo.GetByID(replaceDownloadID)
-					if existingEpisode != nil {
-						logger.Info("Found newer version, replacing old download",
-							"task_action", "replace_old_task",
-							"subscription", sub.Name,
-							"subscription_id", sub.ID,
-							"download_id", existingEpisode.ID,
-							"episode", item.Episode,
-							"language", item.Language,
-							"old_title", existingEpisode.Title,
-							"new_title", item.Title,
-							"trigger_context", "scheduler_rss_check")
-
-						// 如果旧任务有 qBittorrent hash，尝试删除种子（数据库记录在 processDownloadItem 事务中处理）
-						if existingEpisode.TorrentHash != "" {
-							logger.Info("Deleting old qBittorrent torrent with payload for replacement",
-								"task_action", "replace_old_task_delete_payload",
-								"subscription_id", sub.ID,
-								"download_id", existingEpisode.ID,
-								"episode", item.Episode,
-								"torrent_hash_prefix", utils.HashPrefix(existingEpisode.TorrentHash),
-								"file_path", existingEpisode.FilePath,
-								"renamed_path", existingEpisode.RenamedPath,
-								"trigger_context", "scheduler_rss_check")
-							if err := s.qbClient.DeleteTorrentWithPayload(existingEpisode.TorrentHash); err != nil {
-								logger.Error("Failed to delete old torrent from qBittorrent",
-									"task_action", "replace_old_task_delete_torrent",
-									"subscription_id", sub.ID,
-									"download_id", existingEpisode.ID,
-									"episode", item.Episode,
-									"torrent_hash_prefix", utils.HashPrefix(existingEpisode.TorrentHash),
-									"trigger_context", "scheduler_rss_check",
-									"error", err)
-							}
-						}
-					}
-				}
+			if s.episodeService == nil {
+				logger.Error("Skipping RSS item because episode service is unavailable",
+					"subscription_id", sub.ID,
+					"episode", item.Episode)
+				continue
 			}
 
-			// 根据语言策略决定是否跳过
-			if !shouldDownload {
+			if _, err := s.episodeService.ObserveRSSItem(&sub, item.Episode); err != nil {
+				logger.Error("Failed to observe RSS episode",
+					"subscription_id", sub.ID,
+					"episode", item.Episode,
+					"error", err)
+				continue
+			}
+
+			// 被资源过滤器拒绝的条目也已经贡献 latest known episode。
+			if !s.matchesFilter(&sub, item.Title) {
+				continue
+			}
+
+			langFilter := NewLanguageFilter(s.downloadRepo)
+			allowed, skipReason := langFilter.CheckLanguageAllow(&sub, item.Language)
+			if !allowed {
 				logger.Debug("Skipping download based on language policy",
 					"subscription", sub.Name,
 					"episode", item.Episode,
@@ -401,8 +349,31 @@ func (s *scheduler) checkRSSFeeds() {
 				continue
 			}
 
-			// 使用事务方法处理下载创建
-			_, err := s.processDownloadItem(&sub, &item, replaceDownloadID)
+			if s.downloadPreflightSkips(&sub, &item) {
+				continue
+			}
+
+			resource := rssItemResource(&item)
+			decision, err := s.episodeService.EvaluateRSSItem(context.Background(), &sub, episode.RSSResource{
+				OriginalEpisode: item.Episode,
+				Resource:        resource,
+				Fansub:          item.Fansub,
+				Language:        string(item.Language),
+				PubTime:         item.PubTime,
+				SourceRSSURL:    sub.RssURL,
+			}, false)
+			if err != nil {
+				logger.Error("Failed to evaluate RSS item against episode ledger",
+					"subscription_id", sub.ID,
+					"episode", item.Episode,
+					"error", err)
+				continue
+			}
+			if decision.Action != episode.DecisionDownload {
+				continue
+			}
+
+			_, err = s.processDownloadItem(&sub, &item, decision.EpisodeID)
 			if err != nil {
 				// 错误已在 processDownloadItem 中记录
 				continue
@@ -510,19 +481,30 @@ func parseSchedulerRuleToken(token string) (string, bool) {
 
 // processDownloadItem 处理单个下载条目（在事务中）
 // 返回是否成功创建下载任务
-func (s *scheduler) processDownloadItem(sub *model.Subscription, item *rss.RSSItem, replaceDownloadID uint) (bool, error) {
+func (s *scheduler) processDownloadItem(sub *model.Subscription, item *rss.RSSItem, episodeID uint) (bool, error) {
+	resource := rssItemResource(item)
+	if s.episodeService == nil {
+		return false, errors.New("episode service is required")
+	}
+	releaseClaim := func(cause error) error {
+		if err := s.episodeService.ReleaseDownloadClaim(episodeID, resource); err != nil {
+			return errors.Join(cause, fmt.Errorf("failed to release episode download claim: %w", err))
+		}
+		return cause
+	}
+
 	// 检查是否因磁盘空间危险而暂停下载
 	if disk.IsDownloadsPaused() {
 		logger.Info("Skipping download creation because downloads are paused",
 			"subscription", sub.Name,
 			"title", item.Title)
-		return false, nil
+		return false, releaseClaim(nil)
 	}
 
 	minSizeBytes := minTorrentSizeBytes(s.configRepo)
 	if shouldSkipSmallTorrent(item, minSizeBytes) {
 		s.logSmallTorrentSkip(sub, item, minSizeBytes)
-		return false, nil
+		return false, releaseClaim(nil)
 	}
 
 	// 创建下载任务
@@ -534,28 +516,24 @@ func (s *scheduler) processDownloadItem(sub *model.Subscription, item *rss.RSSIt
 		Language:       string(item.Language),
 		TorrentURL:     item.TorrentURL,
 		TorrentHash:    item.TorrentHash,
-		Status:         "pending",
+		Status:         model.DownloadStatusPending,
+		Purpose:        model.DownloadPurposeNormal,
 	}
 
 	// 使用事务包装数据库操作
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		// 如果需要替换旧下载，先删除旧记录
-		if replaceDownloadID > 0 {
-			if err := tx.Delete(&model.Download{}, replaceDownloadID).Error; err != nil {
-				return fmt.Errorf("failed to delete old download: %w", err)
-			}
-		}
-
 		// 创建新下载记录
 		if err := tx.Create(download).Error; err != nil {
 			return fmt.Errorf("failed to create download: %w", err)
 		}
-
+		if err := s.episodeService.AttachDownloadInTx(tx, episodeID, download.ID); err != nil {
+			return fmt.Errorf("failed to attach download to episode: %w", err)
+		}
 		return nil
 	})
 
 	if err != nil {
-		return false, err
+		return false, releaseClaim(err)
 	}
 
 	logger.Info("Download task created",
@@ -591,11 +569,17 @@ func (s *scheduler) processDownloadItem(sub *model.Subscription, item *rss.RSSIt
 			"trigger_context", "scheduler_rss_check",
 			"error", err)
 
-		// 更新下载状态为失败
-		download.Status = "failed"
+		// 更新下载状态并将 episode 恢复为 missing，允许后续再次 claim。
+		download.Status = model.DownloadStatusFailed
 		download.ErrorMessage = err.Error()
-		s.downloadRepo.Update(download)
-		return false, err
+		var recoveryErrors []error
+		if updateErr := s.downloadRepo.Update(download); updateErr != nil {
+			recoveryErrors = append(recoveryErrors, fmt.Errorf("failed to mark download %d failed: %w", download.ID, updateErr))
+		}
+		if ledgerErr := s.episodeService.MarkDownloadFailed(download.ID); ledgerErr != nil {
+			recoveryErrors = append(recoveryErrors, fmt.Errorf("failed to restore episode ledger for download %d: %w", download.ID, ledgerErr))
+		}
+		return false, errors.Join(append([]error{fmt.Errorf("failed to add torrent to qBittorrent: %w", err)}, recoveryErrors...)...)
 	}
 
 	logger.Debug("Torrent added with path",
@@ -608,14 +592,34 @@ func (s *scheduler) processDownloadItem(sub *model.Subscription, item *rss.RSSIt
 		"trigger_context", "scheduler_rss_check")
 
 	// 更新状态为 downloading
-	download.Status = "downloading"
+	download.Status = model.DownloadStatusDownloading
 	if err := s.downloadRepo.Update(download); err != nil {
 		logger.Error("Failed to update download status",
 			"download_id", download.ID,
 			"error", err)
+		return false, fmt.Errorf("failed to update download status: %w", err)
 	}
 
 	return true, nil
+}
+
+func (s *scheduler) downloadPreflightSkips(sub *model.Subscription, item *rss.RSSItem) bool {
+	if disk.IsDownloadsPaused() {
+		logger.Info("Skipping download creation because downloads are paused",
+			"subscription", sub.Name,
+			"title", item.Title)
+		return true
+	}
+	minSizeBytes := minTorrentSizeBytes(s.configRepo)
+	if shouldSkipSmallTorrent(item, minSizeBytes) {
+		s.logSmallTorrentSkip(sub, item, minSizeBytes)
+		return true
+	}
+	return false
+}
+
+func rssItemResource(item *rss.RSSItem) model.EpisodeResource {
+	return model.EpisodeResource{Hash: item.TorrentHash, URL: item.TorrentURL, Title: item.Title}
 }
 
 func (s *scheduler) logSmallTorrentSkip(sub *model.Subscription, item *rss.RSSItem, minSizeBytes int64) {

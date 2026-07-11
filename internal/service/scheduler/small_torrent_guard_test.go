@@ -8,13 +8,14 @@ import (
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/downloader"
+	"github.com/WormW/auto-rss/internal/service/episode"
 	"github.com/WormW/auto-rss/internal/service/rss"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
 
-func TestProcessDownloadItemSmallTorrentGuard(t *testing.T) {
+func TestProcessDownloadItemSmallTorrentGuardReleasesClaim(t *testing.T) {
 	tests := []struct {
 		name              string
 		sizeBytes         int64
@@ -53,6 +54,8 @@ func TestProcessDownloadItemSmallTorrentGuard(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			db := setupSmallTorrentGuardDB(t)
 			downloadRepo := repository.NewDownloadRepository(db)
+			episodeRepo := repository.NewEpisodeRepository(db)
+			episodeService := episode.NewService(episodeRepo)
 			qb := &smallTorrentGuardQBClient{}
 			configRepo := &smallTorrentGuardConfigRepo{values: map[string]string{}}
 			if tt.configuredMinimum != "" {
@@ -60,10 +63,11 @@ func TestProcessDownloadItemSmallTorrentGuard(t *testing.T) {
 			}
 
 			s := &scheduler{
-				db:           db,
-				downloadRepo: downloadRepo,
-				configRepo:   configRepo,
-				qbClient:     qb,
+				db:             db,
+				downloadRepo:   downloadRepo,
+				configRepo:     configRepo,
+				qbClient:       qb,
+				episodeService: episodeService,
 			}
 			sub := &model.Subscription{
 				ID:        1,
@@ -78,7 +82,12 @@ func TestProcessDownloadItemSmallTorrentGuard(t *testing.T) {
 				SizeBytes:   tt.sizeBytes,
 			}
 
-			created, err := s.processDownloadItem(sub, item, 0)
+			resource := model.EpisodeResource{Hash: item.TorrentHash, URL: item.TorrentURL, Title: item.Title}
+			claimedEpisode, claimed, err := episodeRepo.ClaimForDownload(sub.ID, item.Episode, resource)
+			if err != nil || !claimed {
+				t.Fatalf("claim episode: claimed=%v err=%v", claimed, err)
+			}
+			created, err := s.processDownloadItem(sub, item, claimedEpisode.ID)
 			if err != nil {
 				t.Fatalf("processDownloadItem() error = %v", err)
 			}
@@ -96,19 +105,40 @@ func TestProcessDownloadItemSmallTorrentGuard(t *testing.T) {
 			if count != tt.wantDownloads {
 				t.Fatalf("download count = %d, want %d", count, tt.wantDownloads)
 			}
+
+			ledger, err := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, item.Episode)
+			if err != nil {
+				t.Fatalf("get ledger: %v", err)
+			}
+			if tt.wantAdded {
+				if ledger.Status != model.EpisodeStatusDownloading || ledger.ActiveDownloadID == nil {
+					t.Fatalf("ledger after download = status:%s active:%v", ledger.Status, ledger.ActiveDownloadID)
+				}
+			} else {
+				if ledger.Status != model.EpisodeStatusMissing || ledger.ActiveDownloadID != nil || ledger.ActiveTorrentHash != "" {
+					t.Fatalf("ledger after guard = status:%s active:%v hash:%q", ledger.Status, ledger.ActiveDownloadID, ledger.ActiveTorrentHash)
+				}
+				_, claimedAgain, err := episodeRepo.ClaimForDownload(sub.ID, item.Episode, resource)
+				if err != nil || !claimedAgain {
+					t.Fatalf("claim after guard: claimed=%v err=%v", claimedAgain, err)
+				}
+			}
 		})
 	}
 }
 
-func TestProcessDownloadItemSmallTorrentGuardLeavesReplacedDownloadIntact(t *testing.T) {
+func TestProcessDownloadItemSmallTorrentGuardReleasesClaimAndLeavesExistingDownloadIntact(t *testing.T) {
 	db := setupSmallTorrentGuardDB(t)
 	downloadRepo := repository.NewDownloadRepository(db)
+	episodeRepo := repository.NewEpisodeRepository(db)
+	episodeService := episode.NewService(episodeRepo)
 	qb := &smallTorrentGuardQBClient{}
 	s := &scheduler{
-		db:           db,
-		downloadRepo: downloadRepo,
-		configRepo:   &smallTorrentGuardConfigRepo{values: map[string]string{}},
-		qbClient:     qb,
+		db:             db,
+		downloadRepo:   downloadRepo,
+		configRepo:     &smallTorrentGuardConfigRepo{values: map[string]string{}},
+		qbClient:       qb,
+		episodeService: episodeService,
 	}
 	existing := &model.Download{
 		SubscriptionID: 1,
@@ -121,17 +151,20 @@ func TestProcessDownloadItemSmallTorrentGuardLeavesReplacedDownloadIntact(t *tes
 		t.Fatalf("create existing download: %v", err)
 	}
 
-	created, err := s.processDownloadItem(
-		&model.Subscription{ID: 1, Name: "Guarded Anime"},
-		&rss.RSSItem{
-			Title:       "Guarded Anime - 01 v2",
-			TorrentURL:  "https://example.test/guarded-01-v2.torrent",
-			TorrentHash: "guarded-01-v2",
-			Episode:     1,
-			SizeBytes:   defaultMinTorrentSizeBytes - 1,
-		},
-		existing.ID,
-	)
+	sub := &model.Subscription{ID: 1, Name: "Guarded Anime"}
+	item := &rss.RSSItem{
+		Title:       "Guarded Anime - 01 v2",
+		TorrentURL:  "https://example.test/guarded-01-v2.torrent",
+		TorrentHash: "guarded-01-v2",
+		Episode:     1,
+		SizeBytes:   defaultMinTorrentSizeBytes - 1,
+	}
+	resource := model.EpisodeResource{Hash: item.TorrentHash, URL: item.TorrentURL, Title: item.Title}
+	claimedEpisode, claimed, err := episodeRepo.ClaimForDownload(sub.ID, item.Episode, resource)
+	if err != nil || !claimed {
+		t.Fatalf("claim episode: claimed=%v err=%v", claimed, err)
+	}
+	created, err := s.processDownloadItem(sub, item, claimedEpisode.ID)
 	if err != nil {
 		t.Fatalf("processDownloadItem() error = %v", err)
 	}
@@ -152,6 +185,13 @@ func TestProcessDownloadItemSmallTorrentGuardLeavesReplacedDownloadIntact(t *tes
 	if downloads[0].ID != existing.ID || downloads[0].Status != model.DownloadStatusDownloading {
 		t.Fatalf("existing download changed = id:%d status:%s", downloads[0].ID, downloads[0].Status)
 	}
+	ledger, err := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, item.Episode)
+	if err != nil {
+		t.Fatalf("get ledger: %v", err)
+	}
+	if ledger.Status != model.EpisodeStatusMissing || ledger.ActiveDownloadID != nil {
+		t.Fatalf("guard left claim behind: status=%s active=%v", ledger.Status, ledger.ActiveDownloadID)
+	}
 }
 
 func setupSmallTorrentGuardDB(t *testing.T) *gorm.DB {
@@ -162,7 +202,7 @@ func setupSmallTorrentGuardDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}, &model.Config{}); err != nil {
+	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}, &model.Config{}, &model.SubscriptionEpisode{}, &model.EpisodeResourceCandidate{}); err != nil {
 		t.Fatalf("migrate sqlite: %v", err)
 	}
 	return db

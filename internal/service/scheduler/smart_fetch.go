@@ -63,13 +63,15 @@ type SubscriptionFetchStatus struct {
 type SmartFetchFilter struct {
 	strategy     *SmartFetchStrategy
 	downloadRepo repository.DownloadRepository
+	episodeRepo  repository.EpisodeRepository
 }
 
 // NewSmartFetchFilter 创建智能拉取过滤器
-func NewSmartFetchFilter(downloadRepo repository.DownloadRepository) *SmartFetchFilter {
+func NewSmartFetchFilter(downloadRepo repository.DownloadRepository, episodeRepo repository.EpisodeRepository) *SmartFetchFilter {
 	return &SmartFetchFilter{
 		strategy:     DefaultSmartFetchStrategy(),
 		downloadRepo: downloadRepo,
+		episodeRepo:  episodeRepo,
 	}
 }
 
@@ -392,38 +394,33 @@ func (f *SmartFetchFilter) getMissingEpisodes(sub *model.Subscription) []int {
 		// 不知道总集数，无法判断
 		return nil
 	}
-	if f.downloadRepo == nil {
-		logger.Warn("Skipping local completeness check because download repository is nil",
+	if f.episodeRepo == nil {
+		logger.Warn("Skipping local completeness check because episode repository is nil",
 			"subscription_id", sub.ID)
 		return nil
 	}
 
-	// 获取已下载的集数
-	downloads, err := f.downloadRepo.ListBySubscriptionID(sub.ID)
+	if err := f.episodeRepo.EnsureRange(sub.ID, sub.TotalEpisodes); err != nil {
+		logger.Error("Failed to ensure episode ledger range for completeness check",
+			"subscription_id", sub.ID,
+			"error", err.Error())
+		return nil
+	}
+	episodes, err := f.episodeRepo.ListBySubscription(sub.ID)
 	if err != nil {
-		logger.Error("Failed to get downloads for completeness check",
+		logger.Error("Failed to list episode ledger for completeness check",
 			"subscription_id", sub.ID,
 			"error", err.Error())
 		return nil
 	}
 
-	// 构建已下载集数集合
-	downloadedEpisodes := make(map[int]bool)
-	for _, d := range downloads {
-		if d.Episode > 0 && (d.Status == "completed" || d.Status == "downloading") {
-			downloadedEpisodes[d.Episode] = true
-		}
-	}
-
-	// 计算偏移
-	offset := sub.EpisodeOffset
-
-	// 找出缺失的集数
 	var missing []int
-	for ep := 1; ep <= sub.TotalEpisodes; ep++ {
-		actualEp := ep + offset
-		if !downloadedEpisodes[actualEp] {
-			missing = append(missing, ep)
+	for _, ledger := range episodes {
+		if ledger.Episode < 1 || ledger.Episode > sub.TotalEpisodes {
+			continue
+		}
+		if ledger.Status == model.EpisodeStatusMissing {
+			missing = append(missing, ledger.Episode)
 		}
 	}
 

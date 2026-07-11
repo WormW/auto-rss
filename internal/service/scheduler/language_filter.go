@@ -19,31 +19,13 @@ func NewLanguageFilter(downloadRepo repository.DownloadRepository) *LanguageFilt
 }
 
 // CheckLanguageAllow 检查是否应该下载该语言的条目
-// 返回值：
-//   - allowed: 是否允许下载
-//   - reason: 决策原因
-//   - existingIDs: 需要替换的已存在下载ID（如更高版本）
 func (f *LanguageFilter) CheckLanguageAllow(
 	sub *model.Subscription,
-	episode int,
 	itemLang rss.LanguageType,
-	itemTitle string,
-) (allowed bool, reason string, replaceDownloadID uint) {
+) (allowed bool, reason string) {
 	// 如果语言未知，允许下载
 	if itemLang == rss.LangUnknown {
-		return true, "language_unknown", 0
-	}
-
-	// 获取该订阅该集数的所有下载记录
-	existingDownloads, err := f.downloadRepo.GetBySubscriptionAndEpisodeWithLang(sub.ID, episode)
-	if err != nil {
-		// 查询失败时，保守起见允许下载
-		return true, "query_failed_allow", 0
-	}
-
-	// 如果没有现有下载，允许下载
-	if len(existingDownloads) == 0 {
-		return true, "no_existing_download", 0
+		return true, "language_unknown"
 	}
 
 	// 获取用户的语言偏好
@@ -52,27 +34,7 @@ func (f *LanguageFilter) CheckLanguageAllow(
 	// 获取历史统计（用于 auto 模式）
 	historyStats := f.getLanguageStats(sub.ID)
 
-	// 构建已存在的语言列表
-	var existingLangs []rss.LanguageType
-	for _, d := range existingDownloads {
-		existingLangs = append(existingLangs, rss.LanguageType(d.Language))
-	}
-
-	// 检查是否应该下载
-	allowed, reason = rss.ShouldDownload(preference, itemLang, existingLangs, historyStats)
-
-	// 如果不允许下载，直接返回
-	if !allowed {
-		return false, reason, 0
-	}
-
-	// 检查是否需要替换现有版本（相同语言但更高版本号）
-	replaceDownloadID = f.findReplaceTarget(existingDownloads, itemLang, itemTitle)
-	if replaceDownloadID > 0 {
-		reason = reason + "_replace_existing"
-	}
-
-	return true, reason, replaceDownloadID
+	return rss.ShouldDownload(preference, itemLang, nil, historyStats)
 }
 
 // getLanguageStats 获取订阅的历史语言统计
@@ -94,31 +56,6 @@ func (f *LanguageFilter) getLanguageStats(subID uint) map[rss.LanguageType]int {
 	}
 
 	return stats
-}
-
-// findReplaceTarget 查找需要替换的现有下载
-// 当同一语言的新版本(v2等)出现时，替换旧版本
-func (f *LanguageFilter) findReplaceTarget(
-	existingDownloads []model.Download,
-	newLang rss.LanguageType,
-	newTitle string,
-) uint {
-	newVersion := parseTitleVersion(newTitle)
-
-	for _, d := range existingDownloads {
-		// 只考虑相同语言的
-		if rss.LanguageType(d.Language) != newLang {
-			continue
-		}
-
-		// 检查版本号
-		oldVersion := parseTitleVersion(d.Title)
-		if newVersion > oldVersion {
-			return d.ID
-		}
-	}
-
-	return 0
 }
 
 // UpdateSubscriptionPreference 更新订阅的语言偏好（基于历史自动学习）
