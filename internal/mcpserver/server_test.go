@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -443,9 +444,15 @@ func TestMCPRecoveryPreviewSummaryBoundsAllSampleFields(t *testing.T) {
 }
 
 func TestMCPRecoveryPreviewInputDoesNotExposeApplyMode(t *testing.T) {
-	inputType := fmt.Sprintf("%#v", PreviewRecoveryInput{})
-	if strings.Contains(strings.ToLower(inputType), "dry") {
-		t.Fatalf("PreviewRecoveryInput exposes dry-run/apply control: %s", inputType)
+	inputType := reflect.TypeOf(PreviewRecoveryInput{})
+	for i := 0; i < inputType.NumField(); i++ {
+		field := inputType.Field(i)
+		for _, fieldPart := range []string{field.Name, field.Tag.Get("json")} {
+			normalized := strings.ToLower(fieldPart)
+			if strings.Contains(normalized, "dry") || strings.Contains(normalized, "apply") {
+				t.Fatalf("PreviewRecoveryInput exposes dry-run/apply control in field %s: %q", field.Name, fieldPart)
+			}
+		}
 	}
 
 	input := PreviewRecoveryInput{SubscriptionID: 7}
