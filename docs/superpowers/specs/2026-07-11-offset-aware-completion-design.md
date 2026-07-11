@@ -1,52 +1,52 @@
-# Offset-Aware Episode Completion Design
+# 偏移集数场景下的完结判定设计
 
-## Problem
+## 问题
 
-`current_episode` and `latest_episode` store the original episode number parsed from RSS or download records. `total_episodes` stores the number of episodes in the selected season, while `episode_offset` maps original episode numbers into that season.
+`current_episode` 和 `latest_episode` 保存从 RSS 或下载记录中解析出的原始集号。`total_episodes` 保存当前季度的总集数，`episode_offset` 用于将原始集号映射为当前季度内的相对集数。
 
-Completion and progress currently compare the original episode number directly with `total_episodes`. A subscription with offset 170 and 52 episodes is therefore marked complete as soon as its original episode number is at least 52, instead of when it reaches episode 222.
+当前的完结判定和进度计算直接将原始集号与 `total_episodes` 比较。因此，对于偏移 170、总集数 52 的订阅，只要原始集号大于等于 52 就会被标记为完结，而正确的完结集号应该是 222。
 
-## Episode Semantics
+## 集数字段语义
 
-The existing storage contract remains unchanged:
+现有存储约定保持不变：
 
-- `current_episode`: highest collected original episode number.
-- `latest_episode`: highest known original episode number.
-- `episode_offset`: number subtracted from an original episode number to obtain its season-relative number.
-- `total_episodes`: number of episodes in the season.
+- `current_episode`：已收集剧集中的最大原始集号。
+- `latest_episode`：当前已知的最大原始集号。
+- `episode_offset`：从原始集号中减去该值，可以得到季度内的相对集数。
+- `total_episodes`：当前季度的总集数。
 
-For status and display calculations:
+状态和展示逻辑统一使用以下计算：
 
 ```text
 relative_episode = max(0, original_episode - episode_offset)
 completed = total_episodes > 0 && relative_current_episode >= total_episodes
 ```
 
-For offset 170 and total 52, original episode 221 is season episode 51 and remains in progress. Original episode 222 is season episode 52 and is complete.
+对于偏移 170、总集数 52 的订阅，原始第 221 集对应季度内第 51 集，应保持连载中；原始第 222 集对应季度内第 52 集，此时才判定完结。
 
-## Implementation
+## 实现方案
 
-Add model-level helpers that calculate relative current/latest episode numbers and completion status. Backend consumers use these helpers for smart-fetch decisions and calendar completion checks. The statistics SQL applies the equivalent expression so database counting matches the model behavior.
+在订阅模型中增加统一的辅助方法，用于计算相对当前集数、相对最新集数和完结状态。后端的智能拉取与日历完结判断统一使用这些方法。订阅统计查询使用等价的 SQL 表达式，确保数据库统计与模型行为一致。
 
-The subscriptions UI uses a shared local relative-episode calculation for completion tags, progress percentages, season completion styling, and date/year fallback checks involving `latest_episode`. Raw episode numbers remain available for download identity and collection filtering.
+订阅页面使用统一的相对集数计算，覆盖完结标签、进度百分比、季度完成样式，以及基于 `latest_episode` 和日期或年份的辅助完结判断。下载任务标识和剧集采集过滤仍然使用原始集号。
 
-No database migration or stored episode-number rewrite is required.
+本次修改不需要数据库迁移，也不改写已有集数数据。
 
-## Existing Incorrect State
+## 已有错误状态的处理
 
-`completed_at` may already have been populated by the old calculation. When a subscription is evaluated and is no longer complete under the corrected calculation, smart fetch clears `completed_at`. This prevents an old false-completion timestamp from immediately triggering the completed-age stop policy when the subscription eventually reaches its actual final episode.
+旧逻辑可能已经错误写入 `completed_at`。当智能拉取重新评估订阅，并根据新逻辑确认订阅尚未完结时，需要清空 `completed_at`。这样可以避免订阅未来真正完结时继续使用旧的错误时间戳，进而立即触发“完结超过指定天数后停止检查”的策略。
 
-## Tests
+## 测试范围
 
-Regression coverage will verify:
+回归测试需要覆盖：
 
-- Offset 170, total 52, current 221 is not complete.
-- Offset 170, total 52, current 222 is complete.
-- Offset zero retains the existing completion behavior.
-- Smart fetch clears a stale `completed_at` for an offset subscription that is not actually complete.
-- Repository completion statistics use offset-aware completion.
-- Frontend completion and progress calculations use relative episode numbers through the normal frontend test/build checks available in the repository.
+- 偏移 170、总集数 52、当前原始集号 221 时，不判定完结。
+- 偏移 170、总集数 52、当前原始集号 222 时，判定完结。
+- 偏移为 0 时保持原有完结行为。
+- 对于实际上尚未完结的偏移订阅，智能拉取会清除旧的错误 `completed_at`。
+- 订阅仓储的完结数量统计使用考虑偏移后的判定。
+- 通过项目现有的前端测试和构建检查，验证完结标签与进度计算使用相对集数。
 
-## Scope
+## 修改边界
 
-This change does not alter RSS parsing, download episode identity, file naming, missing-episode collection, or stored database values. It only makes completion and progress consumers respect the established offset mapping.
+本次修改不改变 RSS 解析、下载任务集号、文件命名、缺集采集逻辑或数据库中的已有集数值，只修正完结判定和进度展示，使其遵循既有的偏移映射规则。
