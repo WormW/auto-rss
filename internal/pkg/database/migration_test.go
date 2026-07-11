@@ -346,3 +346,114 @@ func TestRunMigrationsMarksExistingRSSSubscriptionsForSafeBaseline(t *testing.T)
 		t.Fatal("expected existing RSS subscription to require a safe baseline")
 	}
 }
+
+func TestBackfillSubscriptionEpisodesFailedDownloadRemainsUnclaimed(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("Failed to connect to test database: %v", err)
+	}
+	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}); err != nil {
+		t.Fatalf("Failed to migrate legacy schema: %v", err)
+	}
+
+	subscription := model.Subscription{Name: "Failed Download"}
+	if err := db.Create(&subscription).Error; err != nil {
+		t.Fatalf("Failed to create subscription: %v", err)
+	}
+	downloadedAt := time.Now().Add(-time.Hour)
+	download := model.Download{
+		SubscriptionID: subscription.ID,
+		Title:          "Failed Download 1",
+		Episode:        1,
+		TorrentURL:     "https://example.test/failed.torrent",
+		TorrentHash:    "failed-resource",
+		Status:         model.DownloadStatusFailed,
+		DownloadedAt:   &downloadedAt,
+	}
+	if err := db.Create(&download).Error; err != nil {
+		t.Fatalf("Failed to create failed download: %v", err)
+	}
+
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+
+	var episode model.SubscriptionEpisode
+	if err := db.Where("subscription_id = ? AND episode = ?", subscription.ID, 1).First(&episode).Error; err != nil {
+		t.Fatalf("Failed to load episode ledger: %v", err)
+	}
+	if episode.Status != model.EpisodeStatusMissing {
+		t.Fatalf("status = %q, want %q", episode.Status, model.EpisodeStatusMissing)
+	}
+	if episode.ActiveDownloadID != nil {
+		t.Fatalf("active download = %v, want nil", episode.ActiveDownloadID)
+	}
+	if episode.ActiveTorrentHash != "" || episode.ActiveTorrentURL != "" || episode.ActiveTitle != "" {
+		t.Fatalf("failed download remained active: hash=%q url=%q title=%q", episode.ActiveTorrentHash, episode.ActiveTorrentURL, episode.ActiveTitle)
+	}
+	if episode.DownloadedAt != nil {
+		t.Fatalf("downloaded_at = %v, want nil", episode.DownloadedAt)
+	}
+}
+
+func TestBackfillSubscriptionEpisodesRollsBackAllChangesOnFailure(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("Failed to connect to test database: %v", err)
+	}
+	if err := db.AutoMigrate(
+		&model.Subscription{},
+		&model.Download{},
+		&model.SubscriptionEpisode{},
+	); err != nil {
+		t.Fatalf("Failed to migrate schema: %v", err)
+	}
+
+	subscription := model.Subscription{
+		Name:   "Transactional Backfill",
+		RssURL: "https://example.test/transactional.xml",
+	}
+	if err := db.Create(&subscription).Error; err != nil {
+		t.Fatalf("Failed to create subscription: %v", err)
+	}
+	download := model.Download{
+		SubscriptionID: subscription.ID,
+		Title:          "Transactional Backfill 1",
+		Episode:        1,
+		TorrentURL:     "https://example.test/transactional-1.torrent",
+		TorrentHash:    "transactional-1",
+		Status:         model.DownloadStatusCompleted,
+	}
+	if err := db.Create(&download).Error; err != nil {
+		t.Fatalf("Failed to create download: %v", err)
+	}
+	if err := db.Exec(`
+		CREATE TRIGGER fail_rss_baseline
+		BEFORE UPDATE OF rss_baseline_pending ON subscriptions
+		WHEN NEW.rss_baseline_pending = 1
+		BEGIN
+			SELECT RAISE(FAIL, 'forced baseline failure');
+		END
+	`).Error; err != nil {
+		t.Fatalf("Failed to create failure trigger: %v", err)
+	}
+
+	if err := backfillSubscriptionEpisodes(db); err == nil {
+		t.Fatal("expected backfill to fail while updating RSS baseline")
+	}
+
+	var episodeCount int64
+	if err := db.Model(&model.SubscriptionEpisode{}).Count(&episodeCount).Error; err != nil {
+		t.Fatalf("Failed to count episode ledger: %v", err)
+	}
+	if episodeCount != 0 {
+		t.Fatalf("episode ledger count = %d, want 0 after rollback", episodeCount)
+	}
+	var reloaded model.Subscription
+	if err := db.First(&reloaded, subscription.ID).Error; err != nil {
+		t.Fatalf("Failed to reload subscription: %v", err)
+	}
+	if reloaded.RSSBaselinePending {
+		t.Fatal("RSS baseline marker should be rolled back")
+	}
+}

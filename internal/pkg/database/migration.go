@@ -195,6 +195,12 @@ func RunMigrations(db *gorm.DB) error {
 }
 
 func backfillSubscriptionEpisodes(db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		return backfillSubscriptionEpisodesInTx(tx)
+	})
+}
+
+func backfillSubscriptionEpisodesInTx(db *gorm.DB) error {
 	var subscriptions []model.Subscription
 	if err := db.Order("id ASC").Find(&subscriptions).Error; err != nil {
 		return err
@@ -240,18 +246,7 @@ func backfillSubscriptionEpisodes(db *gorm.DB) error {
 		sort.Ints(episodes)
 		for _, episode := range episodes {
 			download := preferred[episode]
-			activeDownloadID := download.ID
-			ledgerEntry := model.SubscriptionEpisode{
-				SubscriptionID:    subscription.ID,
-				Episode:           episode,
-				Status:            episodeStatusForDownload(download.Status),
-				ActiveDownloadID:  &activeDownloadID,
-				ActiveTorrentHash: download.TorrentHash,
-				ActiveTorrentURL:  download.TorrentURL,
-				ActiveTitle:       download.Title,
-				StatusSource:      model.EpisodeStatusSourceMigration,
-				DownloadedAt:      download.DownloadedAt,
-			}
+			ledgerEntry := subscriptionEpisodeFromDownload(subscription.ID, episode, download)
 			if err := db.Where(
 				"subscription_id = ? AND episode = ?",
 				subscription.ID,
@@ -309,6 +304,29 @@ func downloadPreferredForEpisode(candidate, current model.Download) bool {
 		return candidate.UpdatedAt.After(current.UpdatedAt)
 	}
 	return candidate.ID > current.ID
+}
+
+func subscriptionEpisodeFromDownload(subscriptionID uint, episode int, download model.Download) model.SubscriptionEpisode {
+	status := episodeStatusForDownload(download.Status)
+	ledgerEntry := model.SubscriptionEpisode{
+		SubscriptionID: subscriptionID,
+		Episode:        episode,
+		Status:         status,
+		StatusSource:   model.EpisodeStatusSourceMigration,
+	}
+	if status != model.EpisodeStatusDownloaded && status != model.EpisodeStatusDownloading {
+		return ledgerEntry
+	}
+
+	activeDownloadID := download.ID
+	ledgerEntry.ActiveDownloadID = &activeDownloadID
+	ledgerEntry.ActiveTorrentHash = download.TorrentHash
+	ledgerEntry.ActiveTorrentURL = download.TorrentURL
+	ledgerEntry.ActiveTitle = download.Title
+	if status == model.EpisodeStatusDownloaded {
+		ledgerEntry.DownloadedAt = download.DownloadedAt
+	}
+	return ledgerEntry
 }
 
 func downloadMigrationPriority(status string) int {
