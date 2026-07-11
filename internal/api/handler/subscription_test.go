@@ -129,6 +129,10 @@ func (m *mockSubscriptionRepo) Update(subscription *model.Subscription) error {
 	return nil
 }
 
+func (m *mockSubscriptionRepo) UpdateRSSWatermark(_ uint, _ string, _ *time.Time) error {
+	return nil
+}
+
 func (m *mockSubscriptionRepo) Delete(id uint) error {
 	if m.deleteFunc != nil {
 		return m.deleteFunc(id)
@@ -361,7 +365,9 @@ func TestSubscriptionHandler_ListSmartFetchStatus(t *testing.T) {
 }
 
 func TestSubscriptionHandler_PreviewAppliesRules(t *testing.T) {
-	handler := NewSubscriptionHandler(&mockSubscriptionRepo{}, &mockDownloadRepo{}, nil, nil, "/downloads")
+	fx := newEpisodeCollectionFixture(t)
+	handler := fx.handler
+	handler.downloadPath = "/downloads"
 	handler.rssParser = &mockRSSParser{items: []rss.RSSItem{
 		{
 			Title:       "[ANi] Test Anime - 01 [1080p][CHS]",
@@ -428,108 +434,66 @@ func TestSubscriptionHandler_PreviewAppliesRules(t *testing.T) {
 }
 
 func TestSubscriptionHandler_CollectEpisodesSmallTorrentGuard(t *testing.T) {
-	const (
-		defaultThreshold = int64(50 * 1024 * 1024)
-		subscriptionID   = uint(1)
-	)
+	const defaultThreshold = int64(50 * 1024 * 1024)
 
 	tests := []struct {
-		name              string
-		sizeBytes         int64
-		configValue       string
-		existingDownloads []model.Download
-		wantCreated       int
-		wantDeleted       int
-		wantQBAdds        int
+		name           string
+		sizeBytes      int64
+		configValue    string
+		existingOwned  bool
+		wantDownloads  int64
+		wantCandidates int64
 	}{
 		{
-			name:        "unknown size continues",
-			sizeBytes:   0,
-			wantCreated: 1,
-			wantQBAdds:  1,
+			name:          "unknown size continues",
+			sizeBytes:     0,
+			wantDownloads: 1,
 		},
 		{
-			name:        "under threshold skips with default",
-			sizeBytes:   defaultThreshold - 1,
-			wantCreated: 0,
-			wantQBAdds:  0,
+			name:          "under threshold skips with default",
+			sizeBytes:     defaultThreshold - 1,
+			wantDownloads: 0,
 		},
 		{
-			name:        "over threshold continues",
-			sizeBytes:   defaultThreshold,
-			wantCreated: 1,
-			wantQBAdds:  1,
+			name:          "over threshold continues",
+			sizeBytes:     defaultThreshold,
+			wantDownloads: 1,
 		},
 		{
-			name:        "zero config bypasses guard",
-			sizeBytes:   defaultThreshold - 1,
-			configValue: "0",
-			wantCreated: 1,
-			wantQBAdds:  1,
+			name:          "zero config bypasses guard",
+			sizeBytes:     defaultThreshold - 1,
+			configValue:   "0",
+			wantDownloads: 1,
 		},
 		{
-			name:      "under threshold replacement does not delete existing",
-			sizeBytes: defaultThreshold - 1,
-			existingDownloads: []model.Download{
-				{
-					ID:             99,
-					SubscriptionID: subscriptionID,
-					Title:          "Existing Anime 01",
-					Episode:        1,
-					TorrentHash:    "existing-hash",
-					Status:         model.DownloadStatusDownloading,
-				},
-			},
-			wantCreated: 0,
-			wantDeleted: 0,
-			wantQBAdds:  0,
+			name:          "under threshold different resource keeps owned download",
+			sizeBytes:     defaultThreshold - 1,
+			existingOwned: true,
+			wantDownloads: 1,
 		},
 		{
-			name:      "over threshold replacement deletes after guard",
-			sizeBytes: defaultThreshold,
-			existingDownloads: []model.Download{
-				{
-					ID:             99,
-					SubscriptionID: subscriptionID,
-					Title:          "Existing Anime 01",
-					Episode:        1,
-					TorrentHash:    "existing-hash",
-					Status:         model.DownloadStatusDownloading,
-				},
-			},
-			wantCreated: 1,
-			wantDeleted: 1,
-			wantQBAdds:  1,
+			name:           "over threshold different resource creates candidate",
+			sizeBytes:      defaultThreshold,
+			existingOwned:  true,
+			wantDownloads:  1,
+			wantCandidates: 1,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			created := 0
-			deleted := 0
-			downloadRepo := &mockDownloadRepo{
-				listBySubIDFunc: func(id uint) ([]model.Download, error) {
-					require.Equal(t, subscriptionID, id)
-					return tt.existingDownloads, nil
-				},
-				createFunc: func(download *model.Download) error {
-					created++
-					download.ID = uint(100 + created)
-					return nil
-				},
-				deleteFunc: func(id uint) error {
-					deleted++
-					return nil
-				},
-			}
-			qbClient := &collectEpisodesSmallTorrentQBClient{}
-			configRepo := &smartFetchConfigRepo{values: map[string]string{}}
+			fx := newEpisodeCollectionFixture(t)
+			sub := fx.createSubscription(t, nil)
 			if tt.configValue != "" {
-				configRepo.values["min_torrent_size_bytes"] = tt.configValue
+				require.NoError(t, fx.handler.configRepo.Set("min_torrent_size_bytes", tt.configValue))
+			}
+			if tt.existingOwned {
+				seedDownloadedEpisode(t, fx, sub, model.EpisodeResource{
+					Hash: "existing-hash", URL: "magnet:?xt=urn:btih:existing", Title: "Existing Anime 01",
+				})
 			}
 
-			handler := NewSubscriptionHandler(&mockSubscriptionRepo{}, downloadRepo, configRepo, qbClient, t.TempDir())
-			handler.rssParser = &mockRSSParser{items: []rss.RSSItem{
+			fx.handler.rssParser = &mockRSSParser{items: []rss.RSSItem{
 				{
 					Title:       "Test Anime 01",
 					Episode:     1,
@@ -541,21 +505,15 @@ func TestSubscriptionHandler_CollectEpisodesSmallTorrentGuard(t *testing.T) {
 				},
 			}}
 
-			err := handler.doCollectEpisodes(context.Background(), nil, &model.Subscription{
-				ID:       subscriptionID,
-				Name:     "Test Anime",
-				RssURL:   "https://example.com/rss.xml",
-				Enabled:  true,
-				Fansub:   "ANi",
-				Season:   1,
-				AirDay:   "1",
-				AirTime:  "12:00",
-				Language: string(rss.LangUnknown),
-			})
+			err := fx.handler.doCollectEpisodes(context.Background(), nil, &sub)
 			require.NoError(t, err)
-			assert.Equal(t, tt.wantCreated, created)
-			assert.Equal(t, tt.wantDeleted, deleted)
-			assert.Equal(t, tt.wantQBAdds, qbClient.addCalls)
+			var downloadCount int64
+			require.NoError(t, fx.db.Model(&model.Download{}).Where("subscription_id = ?", sub.ID).Count(&downloadCount).Error)
+			assert.Equal(t, tt.wantDownloads, downloadCount)
+			var candidateCount int64
+			require.NoError(t, fx.db.Model(&model.EpisodeResourceCandidate{}).Count(&candidateCount).Error)
+			assert.Equal(t, tt.wantCandidates, candidateCount)
+			assert.Zero(t, fx.qb.addCalls)
 		})
 	}
 }

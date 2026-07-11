@@ -1,7 +1,9 @@
 package repository
 
 import (
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
 	"gorm.io/gorm"
@@ -36,6 +38,7 @@ type SubscriptionRepository interface {
 	// CreateInTx 在调用方事务中创建订阅
 	CreateInTx(tx *gorm.DB, subscription *model.Subscription) error
 	Update(subscription *model.Subscription) error
+	UpdateRSSWatermark(id uint, expectedURL string, watermark *time.Time) error
 	Delete(id uint) error
 	GetByID(id uint) (*model.Subscription, error)
 	GetByRSSURL(rssURL string) (*model.Subscription, error)
@@ -102,6 +105,30 @@ func (r *subscriptionRepository) CreateInTx(tx *gorm.DB, subscription *model.Sub
 // Update 更新订阅
 func (r *subscriptionRepository) Update(subscription *model.Subscription) error {
 	return r.db.Save(subscription).Error
+}
+
+// UpdateRSSWatermark advances only the RSS watermark for the expected source.
+func (r *subscriptionRepository) UpdateRSSWatermark(id uint, expectedURL string, watermark *time.Time) error {
+	if watermark == nil {
+		return nil
+	}
+	result := r.db.Model(&model.Subscription{}).
+		Where("id = ? AND rss_url = ?", id, expectedURL).
+		Updates(map[string]any{
+			"last_rss_pub_time": gorm.Expr(
+				"CASE WHEN last_rss_pub_time IS NULL OR last_rss_pub_time < ? THEN ? ELSE last_rss_pub_time END",
+				*watermark,
+				*watermark,
+			),
+			"updated_at": time.Now(),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("RSS source changed while updating watermark for subscription %d", id)
+	}
+	return nil
 }
 
 // Delete 删除订阅

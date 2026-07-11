@@ -21,6 +21,7 @@ import (
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/downloader"
+	"github.com/WormW/auto-rss/internal/service/episode"
 	"github.com/WormW/auto-rss/internal/service/mikan"
 	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/WormW/auto-rss/internal/service/scheduler"
@@ -35,6 +36,7 @@ type SubscriptionHandler struct {
 	repo           repository.SubscriptionRepository
 	downloadRepo   repository.DownloadRepository
 	episodeRepo    repository.EpisodeRepository
+	episodeService *episode.Service
 	configRepo     repository.ConfigRepository
 	bangumiService *bangumi.BangumiService
 	imageService   *bangumi.ImageService
@@ -76,6 +78,7 @@ type SubscriptionPreviewItem struct {
 	TorrentHash        string `json:"torrent_hash"`
 	Action             string `json:"action"`
 	Reason             string `json:"reason"`
+	CandidateID        uint   `json:"candidate_id"`
 	ExistingDownloadID uint   `json:"existing_download_id,omitempty"`
 	DownloadPath       string `json:"download_path"`
 	RenamePreview      string `json:"rename_preview"`
@@ -117,14 +120,19 @@ func NewSubscriptionHandler(
 	collectionDownloader := subscription.NewCollectionDownloader(qbClient, downloadRepo, configRepo, downloadPath)
 
 	var episodeRepo repository.EpisodeRepository
+	var episodeService *episode.Service
 	if len(episodeRepos) > 0 {
 		episodeRepo = episodeRepos[0]
+		if episodeRepo != nil {
+			episodeService = episode.NewService(episodeRepo)
+		}
 	}
 
 	return &SubscriptionHandler{
 		repo:                 repo,
 		downloadRepo:         downloadRepo,
 		episodeRepo:          episodeRepo,
+		episodeService:       episodeService,
 		configRepo:           configRepo,
 		bangumiService:       bgService,
 		imageService:         imgService,
@@ -319,6 +327,14 @@ func parseSubscriptionEpisodeTotal(value any) (int, bool) {
 
 // Preview 预览订阅规则会匹配到的 RSS 条目
 func (h *SubscriptionHandler) Preview(c *gin.Context) {
+	if h.episodeService == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Episode service is unavailable",
+		})
+		return
+	}
+
 	var req SubscriptionPreviewRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -380,25 +396,11 @@ func (h *SubscriptionHandler) Preview(c *gin.Context) {
 
 	downloadPath := h.resolveDownloadPath(sub.Name)
 	renameService := downloader.NewRenameService(h.resolveRenameTemplate())
-	existingByEpisode := map[int]model.Download{}
-	existingHashes := map[string]model.Download{}
-	if h.downloadRepo != nil && sub.ID > 0 {
-		if downloads, err := h.downloadRepo.ListBySubscriptionID(sub.ID); err == nil {
-			for _, download := range downloads {
-				if download.Episode > 0 {
-					existingByEpisode[download.Episode] = download
-				}
-				if download.TorrentHash != "" {
-					existingHashes[strings.ToLower(download.TorrentHash)] = download
-				}
-			}
-		}
-	}
 
 	previewItems := make([]SubscriptionPreviewItem, 0, minInt(len(items), limit))
 	processedEpisodes := map[int]bool{}
 	totalDownload := 0
-	totalReplace := 0
+	totalManualReview := 0
 	totalSkipped := 0
 	totalDuplicate := 0
 	latestEpisode := 0
@@ -409,8 +411,8 @@ func (h *SubscriptionHandler) Preview(c *gin.Context) {
 		}
 
 		action := "download"
-		reason := "将创建下载任务"
-		var existingID uint
+		reason := "episode_missing"
+		var candidateID uint
 
 		relativeEpisode := item.Episode
 		if sub.EpisodeOffset > 0 {
@@ -434,39 +436,66 @@ func (h *SubscriptionHandler) Preview(c *gin.Context) {
 			action = "skip"
 			reason = "缺少种子链接"
 		}
-		if action == "download" && item.TorrentHash != "" {
-			hashKey := strings.ToLower(item.TorrentHash)
-			if existing, ok := existingHashes[hashKey]; ok {
-				action = "duplicate"
-				reason = "种子哈希已存在"
-				existingID = existing.ID
-			} else if h.downloadRepo != nil {
-				if existing, err := h.downloadRepo.GetByHash(item.TorrentHash); err == nil && existing != nil {
-					action = "duplicate"
-					reason = "种子哈希已存在"
-					existingID = existing.ID
-				}
-			}
-		}
 		if action == "download" && item.Episode > 0 {
 			if processedEpisodes[item.Episode] {
 				action = "skip"
 				reason = "同一集已有更靠前的 RSS 条目"
-			} else if existing, ok := existingByEpisode[item.Episode]; ok {
-				action = "replace"
-				reason = "会替换同集旧任务"
-				existingID = existing.ID
+			} else {
+				decision, decisionErr := h.episodeService.PreviewRSSItem(sub, episode.RSSResource{
+					OriginalEpisode: item.Episode,
+					Resource: model.EpisodeResource{
+						Hash:  item.TorrentHash,
+						URL:   item.TorrentURL,
+						Title: item.Title,
+					},
+					Fansub:       item.Fansub,
+					Language:     string(item.Language),
+					PubTime:      item.PubTime,
+					SourceRSSURL: sub.RssURL,
+				})
+				if decisionErr != nil {
+					logger.Error("Failed to preview RSS item against episode ledger",
+						"subscription_id", sub.ID,
+						"episode", item.Episode,
+						"error", decisionErr)
+					c.JSON(http.StatusInternalServerError, gin.H{
+						"code":    500,
+						"message": "Failed to evaluate RSS item",
+					})
+					return
+				}
+				switch decision.Action {
+				case episode.DecisionDownload:
+					action = "download"
+					reason = decision.Reason
+				case episode.DecisionCandidate:
+					action = "manual_review"
+					reason = "episode_already_owned_different_resource"
+					candidateID = decision.CandidateID
+				case episode.DecisionIgnored:
+					action = "skip"
+					reason = "ignored"
+				case episode.DecisionSkip:
+					action = "skip"
+					if decision.Reason == "resource_already_known" {
+						action = "duplicate"
+					}
+					reason = decision.Reason
+				default:
+					action = "skip"
+					reason = decision.Reason
+				}
 			}
 		}
-		if action == "download" || action == "replace" {
+		if action == "download" || action == "manual_review" {
 			processedEpisodes[item.Episode] = true
 		}
 
 		switch action {
 		case "download":
 			totalDownload++
-		case "replace":
-			totalReplace++
+		case "manual_review":
+			totalManualReview++
 		case "duplicate":
 			totalDuplicate++
 		default:
@@ -497,20 +526,20 @@ func (h *SubscriptionHandler) Preview(c *gin.Context) {
 		})
 
 		previewItems = append(previewItems, SubscriptionPreviewItem{
-			Title:              item.Title,
-			Episode:            item.Episode,
-			RelativeEpisode:    relativeEpisode,
-			Fansub:             item.Fansub,
-			Language:           string(item.Language),
-			LanguageKeyword:    item.LangKeyword,
-			PubDate:            item.PubDate,
-			TorrentURL:         item.TorrentURL,
-			TorrentHash:        item.TorrentHash,
-			Action:             action,
-			Reason:             reason,
-			ExistingDownloadID: existingID,
-			DownloadPath:       downloadPath,
-			RenamePreview:      renamePreview,
+			Title:           item.Title,
+			Episode:         item.Episode,
+			RelativeEpisode: relativeEpisode,
+			Fansub:          item.Fansub,
+			Language:        string(item.Language),
+			LanguageKeyword: item.LangKeyword,
+			PubDate:         item.PubDate,
+			TorrentURL:      item.TorrentURL,
+			TorrentHash:     item.TorrentHash,
+			Action:          action,
+			Reason:          reason,
+			CandidateID:     candidateID,
+			DownloadPath:    downloadPath,
+			RenamePreview:   renamePreview,
 		})
 	}
 
@@ -519,17 +548,19 @@ func (h *SubscriptionHandler) Preview(c *gin.Context) {
 		"message": "Success",
 		"data": gin.H{
 			"summary": gin.H{
-				"total_items":       len(items),
-				"previewed_items":   len(previewItems),
-				"download_items":    totalDownload,
-				"replace_items":     totalReplace,
-				"skipped_items":     totalSkipped,
-				"duplicate_items":   totalDuplicate,
-				"latest_episode":    latestEpisode,
-				"download_path":     downloadPath,
-				"subscription_name": sub.Name,
-				"season":            sub.Season,
-				"limited":           len(items) > limit,
+				"total_items":         len(items),
+				"previewed_items":     len(previewItems),
+				"download_items":      totalDownload,
+				"replace_items":       0,
+				"manual_review_items": totalManualReview,
+				"candidate_items":     totalManualReview,
+				"skipped_items":       totalSkipped,
+				"duplicate_items":     totalDuplicate,
+				"latest_episode":      latestEpisode,
+				"download_path":       downloadPath,
+				"subscription_name":   sub.Name,
+				"season":              sub.Season,
+				"limited":             len(items) > limit,
 			},
 			"items": previewItems,
 		},
@@ -1233,6 +1264,13 @@ func (h *SubscriptionHandler) CollectEpisodes(c *gin.Context) {
 		})
 		return
 	}
+	if h.episodeService == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Episode service is unavailable",
+		})
+		return
+	}
 
 	manager := task.GetManager()
 	taskName := fmt.Sprintf("采集: %s", subscription.Name)
@@ -1266,11 +1304,18 @@ func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Tas
 	if subscription.IsCalendarOnly() {
 		manager.SetResult(gin.H{
 			"collected":       0,
+			"candidates":      0,
 			"deleted":         0,
 			"total_rss_items": 0,
 			"skipped_reason":  "calendar_only",
 		})
 		return nil
+	}
+	if h.episodeService == nil || h.episodeRepo == nil {
+		return errors.New("episode service is required for manual collection")
+	}
+	if h.downloadRepo == nil {
+		return errors.New("download repository is required for manual collection")
 	}
 
 	select {
@@ -1302,68 +1347,33 @@ func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Tas
 		"subscription_id", id,
 		"items_count", len(items))
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-
-	manager.UpdateProgress(20, "获取已有下载记录...")
-	existingDownloads, err := h.downloadRepo.ListBySubscriptionID(id)
-	if err != nil {
-		logger.Error("Failed to get existing downloads",
-			"subscription_id", id,
-			"error", err.Error())
-		return fmt.Errorf("获取下载记录失败: %s", err.Error())
-	}
-
-	episodeMap := make(map[int]*model.Download)
-	hashSet := make(map[string]bool)
-
-	for i := range existingDownloads {
-		download := &existingDownloads[i]
-		hashSet[download.TorrentHash] = true
-		episodeMap[download.Episode] = download
-	}
-
-	var newDownloads []model.Download
-	var deletedCount int
-
+	collectedCount := 0
+	candidateCount := 0
 	processedEpisodes := make(map[int]bool)
 	maxPubTime := subscription.LastRSSPubTime
+	retryableProcessingFailure := false
+	processingErrors := make([]error, 0)
 
 	manager.UpdateProgress(25, "分析RSS条目...")
 
 	totalItems := len(items)
-	processedItems := 0
-
-	for _, item := range items {
+	for index, item := range items {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		processedItems++
-		progress := 25 + (processedItems * 60 / totalItems)
-		manager.UpdateProgress(progress, fmt.Sprintf("处理第 %d/%d 个条目...", processedItems, totalItems))
+		if totalItems > 0 {
+			processedItems := index + 1
+			progress := 25 + (processedItems * 60 / totalItems)
+			manager.UpdateProgress(progress, fmt.Sprintf("处理第 %d/%d 个条目...", processedItems, totalItems))
+		}
 
 		if !item.PubTime.IsZero() {
-			if maxPubTime == nil || item.PubTime.After(*maxPubTime) {
-				pubCopy := item.PubTime
-				maxPubTime = &pubCopy
-			}
 			if subscription.LastRSSPubTime != nil && !item.PubTime.After(*subscription.LastRSSPubTime) {
 				continue
 			}
-		}
-
-		if matched, reason := matchesSubscriptionFilters(subscription, item.Title); !matched {
-			logger.Debug("Skipping RSS item based on subscription filters",
-				"subscription_id", id,
-				"title", item.Title,
-				"reason", reason)
-			continue
 		}
 
 		offset := subscription.EpisodeOffset
@@ -1389,7 +1399,30 @@ func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Tas
 			continue
 		}
 
-		if hashSet[item.TorrentHash] {
+		if _, err := h.episodeService.ObserveRSSItem(subscription, item.Episode); err != nil {
+			retryableProcessingFailure = true
+			processingErr := fmt.Errorf("failed to observe episode %d: %w", item.Episode, err)
+			processingErrors = append(processingErrors, processingErr)
+			logger.Error("Failed to observe RSS episode",
+				"subscription_id", id,
+				"episode", item.Episode,
+				"error", err)
+			continue
+		}
+
+		terminal := func() {
+			if !item.PubTime.IsZero() && (maxPubTime == nil || item.PubTime.After(*maxPubTime)) {
+				pubCopy := item.PubTime
+				maxPubTime = &pubCopy
+			}
+		}
+
+		if matched, reason := matchesSubscriptionFilters(subscription, item.Title); !matched {
+			logger.Debug("Skipping RSS item based on subscription filters",
+				"subscription_id", id,
+				"title", item.Title,
+				"reason", reason)
+			terminal()
 			continue
 		}
 
@@ -1405,146 +1438,97 @@ func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Tas
 				"size_bytes", item.SizeBytes,
 				"min_size_bytes", minSizeBytes,
 				"trigger_context", "manual_collect")
+			terminal()
 			continue
 		}
 
-		existingDownload, exists := episodeMap[item.Episode]
-
-		if exists && !processedEpisodes[item.Episode] {
-			logger.Info("Found newer version of episode, replacing old task",
-				"subscription", subscription.Name,
-				"subscription_id", id,
-				"episode", item.Episode,
-				"old_download_id", existingDownload.ID,
-				"old_title", existingDownload.Title,
-				"old_hash", existingDownload.TorrentHash,
-				"new_title", item.Title,
-				"new_hash", item.TorrentHash,
-				"trigger_context", "manual_collect")
-
-			if err := h.downloadRepo.Delete(existingDownload.ID); err != nil {
-				logger.Error("Failed to delete old download task",
-					"download_id", existingDownload.ID,
-					"error", err.Error())
-				continue
-			}
-			deletedCount++
-		} else if processedEpisodes[item.Episode] {
+		if processedEpisodes[item.Episode] {
 			logger.Debug("Skipping older version in RSS feed",
 				"episode", item.Episode,
 				"title", item.Title)
+			terminal()
 			continue
 		}
 
-		processedEpisodes[item.Episode] = true
-
-		download := model.Download{
-			SubscriptionID: id,
-			Title:          item.Title,
-			Episode:        item.Episode,
-			Fansub:         item.Fansub,
-			TorrentURL:     item.TorrentURL,
-			TorrentHash:    item.TorrentHash,
-			Status:         "pending",
+		resource := model.EpisodeResource{
+			Hash:  item.TorrentHash,
+			URL:   item.TorrentURL,
+			Title: item.Title,
 		}
-
-		if err := h.downloadRepo.Create(&download); err != nil {
-			logger.Error("Failed to create download task",
+		decision, err := h.episodeService.EvaluateRSSItem(ctx, subscription, episode.RSSResource{
+			OriginalEpisode: item.Episode,
+			Resource:        resource,
+			Fansub:          item.Fansub,
+			Language:        string(item.Language),
+			PubTime:         item.PubTime,
+			SourceRSSURL:    subscription.RssURL,
+		}, false)
+		if err != nil {
+			retryableProcessingFailure = true
+			processingErr := fmt.Errorf("failed to evaluate episode %d: %w", item.Episode, err)
+			processingErrors = append(processingErrors, processingErr)
+			logger.Error("Failed to evaluate RSS item against episode ledger",
 				"subscription_id", id,
 				"episode", item.Episode,
-				"title", item.Title,
-				"error", err.Error())
+				"error", err)
 			continue
 		}
 
-		if h.qbClient != nil {
-			savePath := h.downloadPath
-			downloadPath := utils.GenerateDownloadPath(savePath, subscription.Name)
-
-			var torrentHash string
-			var err error
-
-			if strings.HasSuffix(strings.ToLower(item.TorrentURL), ".torrent") ||
-				strings.Contains(item.TorrentURL, "/Download/") {
-				if h.configRepo != nil {
-					if proxyConfig, err := h.configRepo.Get("system_proxy"); err == nil && proxyConfig != nil && proxyConfig.Value != "" {
-						h.qbClient.SetProxy(proxyConfig.Value)
-					}
-				}
-
-				fileContent, downloadErr := h.qbClient.DownloadTorrentFile(item.TorrentURL)
-				if downloadErr != nil {
-					logger.Error("Failed to download torrent file",
-						"subscription_id", id,
-						"episode", item.Episode,
-						"torrent_url", item.TorrentURL,
-						"error", downloadErr.Error())
-					download.Status = "failed"
-					h.downloadRepo.Update(&download)
-					continue
-				}
-
-				torrentHash, err = h.qbClient.AddTorrentFile(
-					"torrent.torrent",
-					fileContent,
-					downloadPath,
-					downloader.AutoRssCategory,
-				)
-			} else {
-				torrentHash, err = h.qbClient.AddTorrent(
-					item.TorrentURL,
-					downloadPath,
-					downloader.AutoRssCategory,
-				)
+		switch decision.Action {
+		case episode.DecisionDownload:
+			download := &model.Download{
+				SubscriptionID: id,
+				Title:          item.Title,
+				Episode:        item.Episode,
+				Fansub:         item.Fansub,
+				Language:       string(item.Language),
+				TorrentURL:     item.TorrentURL,
+				TorrentHash:    item.TorrentHash,
+				Status:         model.DownloadStatusPending,
+				Purpose:        model.DownloadPurposeNormal,
 			}
-
-			if err != nil {
-				logger.Error("Failed to add torrent to qBittorrent",
+			createErr := h.episodeRepo.RunInTransaction(func(tx *gorm.DB) error {
+				if err := h.downloadRepo.CreateInTx(tx, download); err != nil {
+					return fmt.Errorf("failed to create download: %w", err)
+				}
+				if err := h.episodeService.AttachDownloadInTx(tx, decision.EpisodeID, download.ID); err != nil {
+					return fmt.Errorf("failed to attach download to episode: %w", err)
+				}
+				return nil
+			})
+			if createErr != nil {
+				retryableProcessingFailure = true
+				processingErr := fmt.Errorf("failed to persist episode %d download: %w", item.Episode, createErr)
+				if releaseErr := h.episodeService.ReleaseDownloadClaim(decision.EpisodeID, resource); releaseErr != nil {
+					processingErr = errors.Join(processingErr, fmt.Errorf("failed to release episode download claim: %w", releaseErr))
+				}
+				processingErrors = append(processingErrors, processingErr)
+				logger.Error("Failed to persist manual collection download",
 					"subscription_id", id,
 					"episode", item.Episode,
-					"title", item.Title,
-					"torrent_url", item.TorrentURL,
-					"download_path", downloadPath,
-					"error", err.Error())
-				download.Status = "failed"
-				h.downloadRepo.Update(&download)
+					"error", processingErr)
 				continue
 			}
-
-			if torrentHash != "" && torrentHash != download.TorrentHash {
-				existingByHash, _ := h.downloadRepo.GetByHash(torrentHash)
-				if existingByHash != nil && existingByHash.ID != download.ID {
-					logger.Warn("Torrent hash already exists in another download record",
-						"download_id", download.ID,
-						"existing_download_id", existingByHash.ID,
-						"hash", torrentHash)
-					h.downloadRepo.Delete(download.ID)
-					continue
-				}
-				download.TorrentHash = torrentHash
-			}
-			download.Status = "downloading"
-			if err := h.downloadRepo.Update(&download); err != nil {
-				logger.Error("Failed to update download status",
-					"download_id", download.ID,
-					"error", err.Error())
-			}
-
-			logger.Info("Torrent added to qBittorrent successfully",
+			collectedCount++
+			processedEpisodes[item.Episode] = true
+			terminal()
+			logger.Info("Download outbox task created",
 				"subscription_id", id,
-				"subscription_name", subscription.Name,
+				"download_id", download.ID,
 				"episode", item.Episode,
 				"title", item.Title,
-				"hash", torrentHash,
-				"download_path", downloadPath,
-				"category", downloader.AutoRssCategory)
+				"trigger_context", "manual_collect")
+		case episode.DecisionCandidate:
+			candidateCount++
+			processedEpisodes[item.Episode] = true
+			terminal()
+		case episode.DecisionSkip, episode.DecisionIgnored:
+			processedEpisodes[item.Episode] = true
+			terminal()
+		default:
+			processedEpisodes[item.Episode] = true
+			terminal()
 		}
-
-		newDownloads = append(newDownloads, download)
-		logger.Info("Download task created",
-			"subscription_id", id,
-			"episode", item.Episode,
-			"title", item.Title)
 	}
 
 	select {
@@ -1554,89 +1538,42 @@ func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Tas
 	}
 
 	manager.UpdateProgress(90, "更新集数信息...")
-
-	maxEpisodeInRSS := 0
-	for _, item := range items {
-		if item.Episode > maxEpisodeInRSS {
-			maxEpisodeInRSS = item.Episode
-		}
+	if err := h.episodeService.RefreshSubscriptionProgress(id); err != nil {
+		retryableProcessingFailure = true
+		processingErr := fmt.Errorf("failed to refresh subscription progress: %w", err)
+		processingErrors = append(processingErrors, processingErr)
+		logger.Error("Failed to refresh subscription progress", "subscription_id", id, "error", err)
 	}
 
-	maxEpisodeFromBangumi := 0
-	if subscription.BangumiID > 0 {
-		latestEp, err := h.bangumiService.GetLatestEpisode(subscription.BangumiID)
-		if err != nil {
-			logger.Warn("Failed to get latest episode from Bangumi",
-				"subscription_id", id,
-				"bangumi_id", subscription.BangumiID,
-				"error", err.Error())
-		} else if latestEp > 0 {
-			maxEpisodeFromBangumi = latestEp
-			logger.Info("Got latest episode from Bangumi",
-				"subscription_id", id,
-				"latest_episode", latestEp)
-		}
-	}
-
-	latestEpisode := maxEpisodeInRSS
-	if maxEpisodeFromBangumi > latestEpisode {
-		latestEpisode = maxEpisodeFromBangumi
-	}
-
-	maxCollectedEpisode := 0
-	for _, download := range existingDownloads {
-		if download.Episode > maxCollectedEpisode && download.Status != "failed" {
-			maxCollectedEpisode = download.Episode
-		}
-	}
-	for _, download := range newDownloads {
-		if download.Episode > maxCollectedEpisode {
-			maxCollectedEpisode = download.Episode
-		}
-	}
-
-	if latestEpisode > 0 || maxCollectedEpisode > 0 {
-		subscription.LatestEpisode = latestEpisode
-		subscription.CurrentEpisode = maxCollectedEpisode
-		if err := h.repo.Update(subscription); err != nil {
-			logger.Error("Failed to update subscription episode info",
-				"subscription_id", id,
-				"latest_episode", latestEpisode,
-				"current_episode", maxCollectedEpisode,
-				"error", err.Error())
+	if !retryableProcessingFailure && maxPubTime != nil {
+		if err := h.repo.UpdateRSSWatermark(id, subscription.RssURL, maxPubTime); err != nil {
+			processingErr := fmt.Errorf("failed to persist last RSS pub time: %w", err)
+			processingErrors = append(processingErrors, processingErr)
+			logger.Error("Failed to persist last RSS pub time", "subscription_id", id, "error", err)
 		} else {
-			logger.Info("Updated subscription episode info",
-				"subscription_id", id,
-				"latest_episode", latestEpisode,
-				"current_episode", maxCollectedEpisode,
-				"rss_episodes", maxEpisodeInRSS,
-				"bangumi_episodes", maxEpisodeFromBangumi)
-		}
-	}
-
-	if maxPubTime != nil {
-		pubCopy := *maxPubTime
-		subscription.LastRSSPubTime = &pubCopy
-		if err := h.repo.Update(subscription); err != nil {
-			logger.Warn("Failed to persist last RSS pub time", "subscription_id", id, "error", err.Error())
+			pubCopy := *maxPubTime
+			subscription.LastRSSPubTime = &pubCopy
 		}
 	}
 
 	logger.Info("Episode collection completed",
 		"subscription_id", id,
-		"new_downloads", len(newDownloads),
-		"deleted_old_tasks", deletedCount,
+		"new_downloads", collectedCount,
+		"candidates", candidateCount,
+		"deleted_old_tasks", 0,
 		"total_rss_items", len(items),
-		"latest_episode", latestEpisode,
-		"current_episode", maxCollectedEpisode,
 		"last_rss_pub_time", subscription.LastRSSPubTime)
 
 	manager.SetResult(gin.H{
-		"collected":       len(newDownloads),
-		"deleted":         deletedCount,
+		"collected":       collectedCount,
+		"candidates":      candidateCount,
+		"deleted":         0,
 		"total_rss_items": len(items),
 	})
 
+	if len(processingErrors) > 0 {
+		return fmt.Errorf("manual episode collection completed with errors: %w", errors.Join(processingErrors...))
+	}
 	return nil
 }
 
