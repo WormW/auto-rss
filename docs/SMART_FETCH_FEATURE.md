@@ -29,7 +29,10 @@
 | **已完结** | 降低拉取频率或跳过 |
 
 判断是否完结：
-- `CurrentEpisode >= TotalEpisodes` 且 `TotalEpisodes > 0`
+- `RelativeCurrentEpisode = max(0, CurrentEpisode - EpisodeOffset)`
+- `RelativeCurrentEpisode >= TotalEpisodes` 且 `TotalEpisodes > 0`
+
+例如偏移为 170、总集数为 52 时，原始第 221 集对应本季第 51 集，仍属于连载中；原始第 222 集对应本季第 52 集，此时才判定完结。
 
 ### 3. 本地完整性检查
 
@@ -37,8 +40,8 @@
 
 ```
 总集数：24集
-偏移：1集
-已下载：1,2,3,5,6,7...（缺少第4集）
+偏移：170集
+已下载原始集号：171,172,173,175...（本季缺少第4集，即原始第174集）
 → 即使不在时间窗口，也会拉取以补全
 ```
 

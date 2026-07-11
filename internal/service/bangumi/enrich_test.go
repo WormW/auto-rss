@@ -272,4 +272,11 @@ func TestShouldCorrectFalseCompletion(t *testing.T) {
 	assert.True(t, shouldCorrectFalseCompletion(sub, 5))
 	assert.False(t, shouldCorrectFalseCompletion(sub, 12))
 	assert.False(t, shouldCorrectFalseCompletion(sub, 0))
+
+	offsetSub := model.Subscription{
+		EpisodeOffset: 170,
+		TotalEpisodes: 52,
+		LatestEpisode: 171,
+	}
+	assert.False(t, shouldCorrectFalseCompletion(offsetSub, 1))
 }

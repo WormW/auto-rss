@@ -148,7 +148,7 @@ func (s *scheduler) checkRSSFeeds() {
 		} else {
 			logger.Info("Subscription completion status saved to database",
 				"subscription", subscriptions[idx].Name,
-				"completed_at", subscriptions[idx].CompletedAt.Format("2006-01-02 15:04:05"))
+				"completed_at", completedAtLogValue(subscriptions[idx].CompletedAt))
 		}
 	}
 
@@ -419,6 +419,13 @@ func (s *scheduler) checkRSSFeeds() {
 	}
 
 	logger.Info("RSS feed check completed")
+}
+
+func completedAtLogValue(completedAt *time.Time) any {
+	if completedAt == nil {
+		return nil
+	}
+	return completedAt.Format("2006-01-02 15:04:05")
 }
 
 // matchesFilter 检查标题是否匹配过滤条件

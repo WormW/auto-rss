@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:episodes": "node --experimental-strip-types --test tests/episodes.test.ts"
   },
   "dependencies": {
     "@vicons/antd": "^0.13.0",

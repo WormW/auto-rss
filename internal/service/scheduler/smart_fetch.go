@@ -173,6 +173,12 @@ func (f *SmartFetchFilter) EvaluateSubscription(sub *model.Subscription) (Subscr
 	}
 
 	status.IsCompleted = f.isCompleted(sub)
+	if !status.IsCompleted && sub.CompletedAt != nil {
+		sub.CompletedAt = nil
+		needsUpdate = true
+		logger.Info("Cleared stale subscription completion time",
+			"subscription", sub.Name)
+	}
 	effectiveEnabled := f.isSmartFetchEnabledForSubscription(sub)
 	status.SmartFetchEnabled = effectiveEnabled
 	if !effectiveEnabled {
@@ -313,17 +319,7 @@ func activeWindowExplanation(daysUntilAir int) string {
 
 // isCompleted 检查订阅是否已完结
 func (f *SmartFetchFilter) isCompleted(sub *model.Subscription) bool {
-	// 情况1：明确设置了总集数且当前集数 >= 总集数
-	if sub.TotalEpisodes > 0 && sub.CurrentEpisode >= sub.TotalEpisodes {
-		return true
-	}
-
-	// 情况2：没有设置总集数，无法判断是否完结，返回 false
-	if sub.TotalEpisodes == 0 {
-		return false
-	}
-
-	return false
+	return sub.IsCompleted()
 }
 
 // isInActiveWindow 检查是否在活跃窗口期

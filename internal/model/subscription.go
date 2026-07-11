@@ -57,7 +57,7 @@ type Subscription struct {
 	NotifyBeforeMin int    `json:"notify_before_min" gorm:"default:10"`                // 提前提醒分钟数
 
 	// 完结时间追踪 - 用于判断完结后多久停止检查
-	CompletedAt *time.Time `json:"completed_at"` // 完结时间（首次检测到 CurrentEpisode >= TotalEpisodes 时设置）
+	CompletedAt *time.Time `json:"completed_at"` // 完结时间（首次检测到相对当前集数达到总集数时设置）
 
 	// 智能拉取配置
 	SmartFetchEnabled  *bool  `json:"smart_fetch_enabled" gorm:"default:null"`      // 单订阅智能拉取开关；nil 表示跟随全局
@@ -79,6 +79,31 @@ type Subscription struct {
 // reminders and should not participate in RSS/download collection.
 func (s Subscription) IsCalendarOnly() bool {
 	return s.SourceType == "calendar" && s.RssURL == "" && s.CollectionTorrent == ""
+}
+
+// RelativeEpisode 将 RSS 原始集号转换为当前季度内的相对集数。
+func (s Subscription) RelativeEpisode(originalEpisode int) int {
+	offset := s.EpisodeOffset
+	if offset < 0 {
+		offset = 0
+	}
+	relativeEpisode := originalEpisode - offset
+	if relativeEpisode < 0 {
+		return 0
+	}
+	return relativeEpisode
+}
+
+func (s Subscription) RelativeCurrentEpisode() int {
+	return s.RelativeEpisode(s.CurrentEpisode)
+}
+
+func (s Subscription) RelativeLatestEpisode() int {
+	return s.RelativeEpisode(s.LatestEpisode)
+}
+
+func (s Subscription) IsCompleted() bool {
+	return s.TotalEpisodes > 0 && s.RelativeCurrentEpisode() >= s.TotalEpisodes
 }
 
 // SubscriptionGroup 订阅分组模型

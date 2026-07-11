@@ -272,24 +272,47 @@ func TestGetWeekScheduleSkipsCompletedSubscriptions(t *testing.T) {
 			CurrentEpisode: 99,
 			TotalEpisodes:  0,
 		},
+		{
+			ID:             4,
+			Name:           "Offset Ongoing Anime",
+			AirDay:         airDay,
+			AirTime:        "13:00",
+			EpisodeOffset:  170,
+			CurrentEpisode: 221,
+			TotalEpisodes:  52,
+		},
+		{
+			ID:             5,
+			Name:           "Offset Completed Anime",
+			AirDay:         airDay,
+			AirTime:        "14:00",
+			EpisodeOffset:  170,
+			CurrentEpisode: 222,
+			TotalEpisodes:  52,
+		},
 	}
 
 	mockSubRepo.On("GetActiveSubscriptions").Return(subscriptions, nil)
 	mockDownloadRepo.On("GetBySubscriptionAndEpisode", uint(2), 6).Return(nil, errors.New("not found"))
 	mockDownloadRepo.On("GetBySubscriptionAndEpisode", uint(3), 100).Return(nil, errors.New("not found"))
+	mockDownloadRepo.On("GetBySubscriptionAndEpisode", uint(4), 222).Return(nil, errors.New("not found"))
 
 	calendar := NewCalendar(mockSubRepo, mockDownloadRepo)
 	schedule, err := calendar.GetWeekSchedule(0)
 
 	assert.NoError(t, err)
 	assert.NotNil(t, schedule)
-	assert.Len(t, schedule.Days[0].Items, 2)
+	assert.Len(t, schedule.Days[0].Items, 3)
 	assert.Equal(t, "Ongoing Anime", schedule.Days[0].Items[0].Name)
 	assert.Equal(t, 6, schedule.Days[0].Items[0].Episode)
 	assert.False(t, schedule.Days[0].Items[0].IsCompleted)
 	assert.Equal(t, "Unknown Total Anime", schedule.Days[0].Items[1].Name)
 	assert.Equal(t, 100, schedule.Days[0].Items[1].Episode)
 	assert.False(t, schedule.Days[0].Items[1].IsCompleted)
+	assert.Equal(t, "Offset Ongoing Anime", schedule.Days[0].Items[2].Name)
+	assert.Equal(t, 51, schedule.Days[0].Items[2].CurrentEpisode)
+	assert.Equal(t, 52, schedule.Days[0].Items[2].Episode)
+	assert.False(t, schedule.Days[0].Items[2].IsCompleted)
 
 	mockSubRepo.AssertExpectations(t)
 	mockDownloadRepo.AssertExpectations(t)
