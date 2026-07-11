@@ -74,15 +74,19 @@ func (fx *episodeCollectionFixture) createSubscription(t *testing.T, watermark *
 }
 
 func seedDownloadedEpisode(t *testing.T, fx *episodeCollectionFixture, sub model.Subscription, resource model.EpisodeResource) (*model.SubscriptionEpisode, model.Download) {
+	return seedDownloadedEpisodeNumber(t, fx, sub, 1, resource)
+}
+
+func seedDownloadedEpisodeNumber(t *testing.T, fx *episodeCollectionFixture, sub model.Subscription, episodeNumber int, resource model.EpisodeResource) (*model.SubscriptionEpisode, model.Download) {
 	t.Helper()
-	ledger, claimed, err := fx.episodeRepo.ClaimForDownload(sub.ID, 1, resource)
+	ledger, claimed, err := fx.episodeRepo.ClaimForDownload(sub.ID, episodeNumber, resource)
 	require.NoError(t, err)
 	require.True(t, claimed)
 	downloadedAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	download := model.Download{
 		SubscriptionID: sub.ID,
 		Title:          resource.Title,
-		Episode:        1,
+		Episode:        episodeNumber,
 		TorrentURL:     resource.URL,
 		TorrentHash:    resource.Hash,
 		Status:         model.DownloadStatusCompleted,
@@ -92,7 +96,7 @@ func seedDownloadedEpisode(t *testing.T, fx *episodeCollectionFixture, sub model
 	require.NoError(t, fx.db.Create(&download).Error)
 	require.NoError(t, fx.episodeRepo.AttachDownload(ledger.ID, download.ID))
 	require.NoError(t, fx.episodeRepo.MarkDownloaded(ledger.ID, download.ID, resource, downloadedAt))
-	ledger, err = fx.episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
+	ledger, err = fx.episodeRepo.GetBySubscriptionAndEpisode(sub.ID, episodeNumber)
 	require.NoError(t, err)
 	return ledger, download
 }
@@ -127,6 +131,36 @@ func performEpisodePreview(t *testing.T, h *SubscriptionHandler, sub model.Subsc
 		return w, response.Data.Items[0], response.Data.Summary
 	}
 	return w, SubscriptionPreviewItem{}, nil
+}
+
+func performEpisodePreviewItems(t *testing.T, h *SubscriptionHandler, sub model.Subscription, items []rss.RSSItem) (*httptest.ResponseRecorder, []SubscriptionPreviewItem, map[string]any) {
+	t.Helper()
+	h.rssParser = &mockRSSParser{items: items}
+	payload, err := json.Marshal(map[string]any{
+		"id":             sub.ID,
+		"name":           sub.Name,
+		"rss_url":        sub.RssURL,
+		"total_episodes": sub.TotalEpisodes,
+	})
+	require.NoError(t, err)
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/subscriptions/preview", h.Preview)
+	req := httptest.NewRequest(http.MethodPost, "/subscriptions/preview", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	var response struct {
+		Data struct {
+			Summary map[string]any            `json:"summary"`
+			Items   []SubscriptionPreviewItem `json:"items"`
+		} `json:"data"`
+	}
+	if w.Code == http.StatusOK {
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+	}
+	return w, response.Data.Items, response.Data.Summary
 }
 
 func databaseCounts(t *testing.T, db *gorm.DB) (downloads, ledgers, candidates int64) {
@@ -207,6 +241,104 @@ func TestSubscriptionPreviewUsesReadOnlyEpisodeDecisions(t *testing.T) {
 			assert.Equal(t, beforeCandidates, afterCandidates)
 		})
 	}
+}
+
+func TestEpisodeDecisionClosesItem(t *testing.T) {
+	tests := []struct {
+		action string
+		reason string
+		want   bool
+	}{
+		{action: "download", want: true},
+		{action: "candidate", want: true},
+		{action: "ignored", want: true},
+		{action: "skip", reason: "resource_already_known", want: true},
+		{action: "skip", reason: "unsupported_episode_status", want: true},
+		{action: "skip", reason: "resource_identity_missing", want: false},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, episodeDecisionClosesItem(tt.action, tt.reason), "%s/%s", tt.action, tt.reason)
+	}
+}
+
+func TestPreviewAndCollectUseSameEpisodeClosingRules(t *testing.T) {
+	t.Run("known resource closes before different resource", func(t *testing.T) {
+		fx := newEpisodeCollectionFixture(t)
+		sub := fx.createSubscription(t, nil)
+		known := model.EpisodeResource{Hash: "known-a", URL: "magnet:?xt=urn:btih:known-a", Title: "Ledger Show 01 A"}
+		seedDownloadedEpisode(t, fx, sub, known)
+		items := []rss.RSSItem{
+			{Title: known.Title, Episode: 1, TorrentURL: known.URL, TorrentHash: known.Hash},
+			{Title: "Ledger Show 01 B", Episode: 1, TorrentURL: "magnet:?xt=urn:btih:known-b", TorrentHash: "known-b"},
+		}
+
+		w, preview, summary := performEpisodePreviewItems(t, fx.handler, sub, items)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		require.Len(t, preview, 2)
+		assert.Equal(t, "duplicate", preview[0].Action)
+		assert.Equal(t, "skip", preview[1].Action)
+		assert.Equal(t, "同一集已有更靠前的 RSS 条目", preview[1].Reason)
+		assert.Equal(t, float64(0), summary["manual_review_items"])
+
+		fx.handler.rssParser = &mockRSSParser{items: items}
+		completed, err := runEpisodeCollectionTask(t, fx.handler, &sub)
+		require.NoError(t, err)
+		requireCollectionResult(t, completed, 0, 0, 0)
+		var candidates int64
+		require.NoError(t, fx.db.Model(&model.EpisodeResourceCandidate{}).Count(&candidates).Error)
+		assert.Zero(t, candidates)
+	})
+
+	t.Run("ignored closes all later resources", func(t *testing.T) {
+		fx := newEpisodeCollectionFixture(t)
+		sub := fx.createSubscription(t, nil)
+		_, err := fx.episodeRepo.ObserveEpisode(sub.ID, 1)
+		require.NoError(t, err)
+		require.NoError(t, fx.episodeRepo.SetStatus(sub.ID, []int{1}, model.EpisodeStatusIgnored, model.EpisodeStatusSourceUser))
+		items := []rss.RSSItem{
+			{Title: "Ledger Show 01 A", Episode: 1, TorrentURL: "magnet:?xt=urn:btih:ignored-a", TorrentHash: "ignored-a"},
+			{Title: "Ledger Show 01 B", Episode: 1, TorrentURL: "magnet:?xt=urn:btih:ignored-b", TorrentHash: "ignored-b"},
+		}
+
+		w, preview, summary := performEpisodePreviewItems(t, fx.handler, sub, items)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		require.Len(t, preview, 2)
+		assert.Equal(t, "skip", preview[0].Action)
+		assert.Equal(t, "ignored", preview[0].Reason)
+		assert.Equal(t, "同一集已有更靠前的 RSS 条目", preview[1].Reason)
+		assert.Equal(t, float64(0), summary["manual_review_items"])
+
+		fx.handler.rssParser = &mockRSSParser{items: items}
+		completed, err := runEpisodeCollectionTask(t, fx.handler, &sub)
+		require.NoError(t, err)
+		requireCollectionResult(t, completed, 0, 0, 0)
+	})
+
+	t.Run("missing identity stays open for valid resource", func(t *testing.T) {
+		fx := newEpisodeCollectionFixture(t)
+		sub := fx.createSubscription(t, nil)
+		items := []rss.RSSItem{
+			{Title: "Ledger Show 01 no identity", Episode: 1},
+			{Title: "Ledger Show 01 valid", Episode: 1, TorrentURL: "magnet:?xt=urn:btih:valid", TorrentHash: "valid-hash"},
+		}
+
+		w, preview, summary := performEpisodePreviewItems(t, fx.handler, sub, items)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		require.Len(t, preview, 2)
+		assert.Equal(t, "skip", preview[0].Action)
+		assert.Equal(t, "resource_identity_missing", preview[0].Reason)
+		assert.Equal(t, "download", preview[1].Action)
+		assert.Equal(t, float64(1), summary["download_items"])
+
+		fx.handler.rssParser = &mockRSSParser{items: items}
+		completed, err := runEpisodeCollectionTask(t, fx.handler, &sub)
+		require.NoError(t, err)
+		requireCollectionResult(t, completed, 1, 0, 0)
+		var downloads []model.Download
+		require.NoError(t, fx.db.Find(&downloads).Error)
+		require.Len(t, downloads, 1)
+		assert.Equal(t, "valid-hash", downloads[0].TorrentHash)
+	})
 }
 
 func runEpisodeCollectionTask(t *testing.T, h *SubscriptionHandler, sub *model.Subscription) (*task.Task, error) {
@@ -334,19 +466,120 @@ func TestCollectEpisodesHandlesEmptyFeedAndObservesBeforeFiltering(t *testing.T)
 	})
 }
 
-type attachFailingEpisodeRepository struct {
-	repository.EpisodeRepository
+func prepareSourceAtomicCollection(t *testing.T, fx *episodeCollectionFixture) (model.Subscription, []rss.RSSItem, int64, int64, int64) {
+	t.Helper()
+	oldWatermark := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Second)
+	sub := fx.createSubscription(t, &oldWatermark)
+	seedDownloadedEpisodeNumber(t, fx, sub, 2, model.EpisodeResource{
+		Hash: "owned-two", URL: "magnet:?xt=urn:btih:owned-two", Title: "Ledger Show 02 old",
+	})
+	require.NoError(t, fx.db.Model(&model.Subscription{}).Where("id = ?", sub.ID).Updates(map[string]any{
+		"current_episode": 7,
+		"latest_episode":  8,
+	}).Error)
+	persisted, err := fx.subRepo.GetByID(sub.ID)
+	require.NoError(t, err)
+	sub = *persisted
+	items := []rss.RSSItem{
+		{Title: "Ledger Show 01", Episode: 1, TorrentURL: "magnet:?xt=urn:btih:new-one", TorrentHash: "new-one", PubTime: oldWatermark.Add(time.Hour)},
+		{Title: "Ledger Show 02 new", Episode: 2, TorrentURL: "magnet:?xt=urn:btih:new-two", TorrentHash: "new-two", PubTime: oldWatermark.Add(90 * time.Minute)},
+		{Title: "Ledger Show 03", Episode: 3, TorrentURL: "magnet:?xt=urn:btih:new-three", TorrentHash: "new-three", PubTime: oldWatermark.Add(2 * time.Hour)},
+	}
+	downloads, ledgers, candidates := databaseCounts(t, fx.db)
+	return sub, items, downloads, ledgers, candidates
 }
 
-func (r *attachFailingEpisodeRepository) AttachDownloadInTx(*gorm.DB, uint, uint) error {
-	return errors.New("attach failed")
+func assertSourceAtomicCollectionUnchanged(t *testing.T, fx *episodeCollectionFixture, sub model.Subscription, downloads, ledgers, candidates int64) {
+	t.Helper()
+	afterDownloads, afterLedgers, afterCandidates := databaseCounts(t, fx.db)
+	assert.Equal(t, downloads, afterDownloads)
+	assert.Equal(t, ledgers, afterLedgers)
+	assert.Equal(t, candidates, afterCandidates)
+	persisted, err := fx.subRepo.GetByID(sub.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 7, persisted.CurrentEpisode)
+	assert.Equal(t, 8, persisted.LatestEpisode)
+	require.NotNil(t, persisted.LastRSSPubTime)
+	require.NotNil(t, sub.LastRSSPubTime)
+	assert.Equal(t, *sub.LastRSSPubTime, *persisted.LastRSSPubTime)
 }
 
-func TestCollectEpisodesReleasesClaimAndKeepsWatermarkOnCreateOrAttachFailure(t *testing.T) {
+func TestCollectEpisodesRejectsChangedOrABASourceBeforeWriting(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*testing.T, *episodeCollectionFixture, model.Subscription)
+		wantURL string
+	}{
+		{
+			name: "source changes from A to B",
+			mutate: func(t *testing.T, fx *episodeCollectionFixture, sub model.Subscription) {
+				require.NoError(t, fx.db.Model(&model.Subscription{}).Where("id = ?", sub.ID).UpdateColumns(map[string]any{
+					"rss_url":    "https://example.com/b.xml",
+					"updated_at": sub.UpdatedAt.Add(time.Second),
+				}).Error)
+			},
+			wantURL: "https://example.com/b.xml",
+		},
+		{
+			name: "source changes from A to B and back to A",
+			mutate: func(t *testing.T, fx *episodeCollectionFixture, sub model.Subscription) {
+				require.NoError(t, fx.db.Model(&model.Subscription{}).Where("id = ?", sub.ID).UpdateColumns(map[string]any{
+					"rss_url":    "https://example.com/b.xml",
+					"updated_at": sub.UpdatedAt.Add(time.Second),
+				}).Error)
+				require.NoError(t, fx.db.Model(&model.Subscription{}).Where("id = ?", sub.ID).UpdateColumns(map[string]any{
+					"rss_url":    sub.RssURL,
+					"updated_at": sub.UpdatedAt.Add(2 * time.Second),
+				}).Error)
+			},
+			wantURL: "https://example.com/feed.xml",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := newEpisodeCollectionFixture(t)
+			sub, items, downloads, ledgers, candidates := prepareSourceAtomicCollection(t, fx)
+			fx.handler.rssParser = &mockRSSParser{
+				items: items,
+				afterFetch: func() {
+					tt.mutate(t, fx, sub)
+				},
+			}
+
+			completed, err := runEpisodeCollectionTask(t, fx.handler, &sub)
+			require.ErrorContains(t, err, "source changed")
+			assert.Nil(t, completed.Result)
+			assertSourceAtomicCollectionUnchanged(t, fx, sub, downloads, ledgers, candidates)
+			persisted, getErr := fx.subRepo.GetByID(sub.ID)
+			require.NoError(t, getErr)
+			assert.Equal(t, tt.wantURL, persisted.RssURL)
+		})
+	}
+}
+
+func TestCollectEpisodesCompletionCASFailureRollsBackWholeBatch(t *testing.T) {
+	fx := newEpisodeCollectionFixture(t)
+	sub, items, downloads, ledgers, candidates := prepareSourceAtomicCollection(t, fx)
+	require.NoError(t, fx.db.Exec(`
+		CREATE TRIGGER fail_collection_completion
+		BEFORE UPDATE OF last_rss_pub_time ON subscriptions
+		BEGIN
+			SELECT RAISE(FAIL, 'collection completion blocked');
+		END;
+	`).Error)
+	fx.handler.rssParser = &mockRSSParser{items: items}
+
+	completed, err := runEpisodeCollectionTask(t, fx.handler, &sub)
+	require.ErrorContains(t, err, "collection completion blocked")
+	assert.Nil(t, completed.Result)
+	assertSourceAtomicCollectionUnchanged(t, fx, sub, downloads, ledgers, candidates)
+}
+
+func TestCollectEpisodesRollsBackClaimAndKeepsWatermarkOnCreateOrAttachFailure(t *testing.T) {
 	tests := []struct {
 		name  string
 		setup func(*testing.T, *episodeCollectionFixture, model.Subscription)
-		wrap  func(repository.EpisodeRepository) repository.EpisodeRepository
 		hash  string
 	}{
 		{
@@ -358,8 +591,15 @@ func TestCollectEpisodesReleasesClaimAndKeepsWatermarkOnCreateOrAttachFailure(t 
 		},
 		{
 			name: "attach failure",
-			wrap: func(repo repository.EpisodeRepository) repository.EpisodeRepository {
-				return &attachFailingEpisodeRepository{EpisodeRepository: repo}
+			setup: func(t *testing.T, fx *episodeCollectionFixture, _ model.Subscription) {
+				require.NoError(t, fx.db.Exec(`
+					CREATE TRIGGER fail_download_attach
+					BEFORE UPDATE OF active_download_id ON subscription_episodes
+					WHEN NEW.active_download_id IS NOT NULL
+					BEGIN
+						SELECT RAISE(FAIL, 'attach failed');
+					END;
+				`).Error)
 			},
 			hash: "attach-failure-hash",
 		},
@@ -373,21 +613,14 @@ func TestCollectEpisodesReleasesClaimAndKeepsWatermarkOnCreateOrAttachFailure(t 
 			if tt.setup != nil {
 				tt.setup(t, fx, sub)
 			}
-			if tt.wrap != nil {
-				wrapped := tt.wrap(fx.episodeRepo)
-				fx.handler = NewSubscriptionHandler(fx.subRepo, fx.downloadRepo, repository.NewConfigRepository(fx.db), fx.qb, t.TempDir(), wrapped)
-			}
 			fx.handler.rssParser = &mockRSSParser{items: []rss.RSSItem{{
 				Title: "Ledger Show 03", Episode: 3, TorrentURL: "magnet:?xt=urn:btih:" + tt.hash, TorrentHash: tt.hash, PubTime: oldWatermark.Add(time.Hour),
 			}}}
 
 			_, err := runEpisodeCollectionTask(t, fx.handler, &sub)
 			require.Error(t, err)
-			ledger, ledgerErr := fx.episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 3)
-			require.NoError(t, ledgerErr)
-			assert.Equal(t, model.EpisodeStatusMissing, ledger.Status)
-			assert.Nil(t, ledger.ActiveDownloadID)
-			assert.Empty(t, ledger.ActiveTorrentHash)
+			_, ledgerErr := fx.episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 3)
+			require.ErrorIs(t, ledgerErr, gorm.ErrRecordNotFound)
 			var count int64
 			require.NoError(t, fx.db.Model(&model.Download{}).Where("subscription_id = ?", sub.ID).Count(&count).Error)
 			assert.Zero(t, count)

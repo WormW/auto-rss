@@ -37,6 +37,7 @@ type EpisodeRepository interface {
 	EnsureRange(subscriptionID uint, total int) error
 	EnsureRangeInTx(tx *gorm.DB, subscriptionID uint, total int) error
 	RefreshSubscriptionProgress(subscriptionID uint) error
+	RefreshSubscriptionProgressInTx(tx *gorm.DB, subscriptionID uint) error
 }
 
 type episodeRepository struct {
@@ -333,46 +334,50 @@ func (r *episodeRepository) EnsureRangeInTx(tx *gorm.DB, subscriptionID uint, to
 
 func (r *episodeRepository) RefreshSubscriptionProgress(subscriptionID uint) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
-		var subscription model.Subscription
-		if err := tx.First(&subscription, subscriptionID).Error; err != nil {
-			return err
-		}
-		var episodes []model.SubscriptionEpisode
-		if err := tx.Where("subscription_id = ?", subscriptionID).Order("episode ASC").Find(&episodes).Error; err != nil {
-			return err
-		}
-
-		continuousOwned := 0
-		latest := 0
-		for _, episode := range episodes {
-			if episode.Episode > latest {
-				latest = episode.Episode
-			}
-			if episode.Episode == continuousOwned+1 && episodeStatusCountsAsOwned(episode.Status) {
-				continuousOwned++
-			}
-		}
-		currentEpisode := progressWithOffset(continuousOwned, subscription.EpisodeOffset)
-		latestEpisode := progressWithOffset(latest, subscription.EpisodeOffset)
-		subscription.CurrentEpisode = currentEpisode
-		completedAt := subscription.CompletedAt
-		if subscription.IsCompleted() {
-			if completedAt == nil {
-				now := time.Now()
-				completedAt = &now
-			}
-		} else {
-			completedAt = nil
-		}
-
-		return tx.Model(&model.Subscription{}).
-			Where("id = ?", subscriptionID).
-			Updates(map[string]any{
-				"current_episode": currentEpisode,
-				"latest_episode":  latestEpisode,
-				"completed_at":    completedAt,
-			}).Error
+		return r.RefreshSubscriptionProgressInTx(tx, subscriptionID)
 	})
+}
+
+func (r *episodeRepository) RefreshSubscriptionProgressInTx(tx *gorm.DB, subscriptionID uint) error {
+	var subscription model.Subscription
+	if err := tx.First(&subscription, subscriptionID).Error; err != nil {
+		return err
+	}
+	var episodes []model.SubscriptionEpisode
+	if err := tx.Where("subscription_id = ?", subscriptionID).Order("episode ASC").Find(&episodes).Error; err != nil {
+		return err
+	}
+
+	continuousOwned := 0
+	latest := 0
+	for _, episode := range episodes {
+		if episode.Episode > latest {
+			latest = episode.Episode
+		}
+		if episode.Episode == continuousOwned+1 && episodeStatusCountsAsOwned(episode.Status) {
+			continuousOwned++
+		}
+	}
+	currentEpisode := progressWithOffset(continuousOwned, subscription.EpisodeOffset)
+	latestEpisode := progressWithOffset(latest, subscription.EpisodeOffset)
+	subscription.CurrentEpisode = currentEpisode
+	completedAt := subscription.CompletedAt
+	if subscription.IsCompleted() {
+		if completedAt == nil {
+			now := time.Now()
+			completedAt = &now
+		}
+	} else {
+		completedAt = nil
+	}
+
+	return tx.Model(&model.Subscription{}).
+		Where("id = ?", subscriptionID).
+		Updates(map[string]any{
+			"current_episode": currentEpisode,
+			"latest_episode":  latestEpisode,
+			"completed_at":    completedAt,
+		}).Error
 }
 
 func clearActiveDownloadUpdates(status, source string) map[string]any {

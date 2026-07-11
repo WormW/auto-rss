@@ -42,6 +42,7 @@ type mockRSSParser struct {
 	items      []rss.RSSItem
 	err        error
 	fetchCalls int
+	afterFetch func()
 }
 
 type smartFetchConfigRepo struct {
@@ -50,11 +51,17 @@ type smartFetchConfigRepo struct {
 
 func (m *mockRSSParser) FetchAndParse(rssURL string) ([]rss.RSSItem, error) {
 	m.fetchCalls++
+	if m.afterFetch != nil {
+		m.afterFetch()
+	}
 	return m.items, m.err
 }
 
 func (m *mockRSSParser) FetchAndParseWithTimeout(rssURL string, timeout time.Duration) ([]rss.RSSItem, error) {
 	m.fetchCalls++
+	if m.afterFetch != nil {
+		m.afterFetch()
+	}
 	return m.items, m.err
 }
 
@@ -129,7 +136,11 @@ func (m *mockSubscriptionRepo) Update(subscription *model.Subscription) error {
 	return nil
 }
 
-func (m *mockSubscriptionRepo) UpdateRSSWatermark(_ uint, _ string, _ *time.Time) error {
+func (m *mockSubscriptionRepo) UpdateRSSWatermark(_ uint, _ string, _ time.Time, _ *time.Time) error {
+	return nil
+}
+
+func (m *mockSubscriptionRepo) UpdateRSSWatermarkInTx(_ *gorm.DB, _ uint, _ string, _ time.Time, _ *time.Time) error {
 	return nil
 }
 

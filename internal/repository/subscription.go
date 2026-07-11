@@ -38,7 +38,8 @@ type SubscriptionRepository interface {
 	// CreateInTx 在调用方事务中创建订阅
 	CreateInTx(tx *gorm.DB, subscription *model.Subscription) error
 	Update(subscription *model.Subscription) error
-	UpdateRSSWatermark(id uint, expectedURL string, watermark *time.Time) error
+	UpdateRSSWatermark(id uint, expectedURL string, expectedUpdatedAt time.Time, watermark *time.Time) error
+	UpdateRSSWatermarkInTx(tx *gorm.DB, id uint, expectedURL string, expectedUpdatedAt time.Time, watermark *time.Time) error
 	Delete(id uint) error
 	GetByID(id uint) (*model.Subscription, error)
 	GetByRSSURL(rssURL string) (*model.Subscription, error)
@@ -108,20 +109,24 @@ func (r *subscriptionRepository) Update(subscription *model.Subscription) error 
 }
 
 // UpdateRSSWatermark advances only the RSS watermark for the expected source.
-func (r *subscriptionRepository) UpdateRSSWatermark(id uint, expectedURL string, watermark *time.Time) error {
-	if watermark == nil {
-		return nil
+func (r *subscriptionRepository) UpdateRSSWatermark(id uint, expectedURL string, expectedUpdatedAt time.Time, watermark *time.Time) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		return r.UpdateRSSWatermarkInTx(tx, id, expectedURL, expectedUpdatedAt, watermark)
+	})
+}
+
+func (r *subscriptionRepository) UpdateRSSWatermarkInTx(tx *gorm.DB, id uint, expectedURL string, expectedUpdatedAt time.Time, watermark *time.Time) error {
+	updates := map[string]any{"updated_at": time.Now()}
+	if watermark != nil {
+		updates["last_rss_pub_time"] = gorm.Expr(
+			"CASE WHEN last_rss_pub_time IS NULL OR last_rss_pub_time < ? THEN ? ELSE last_rss_pub_time END",
+			*watermark,
+			*watermark,
+		)
 	}
-	result := r.db.Model(&model.Subscription{}).
-		Where("id = ? AND rss_url = ?", id, expectedURL).
-		Updates(map[string]any{
-			"last_rss_pub_time": gorm.Expr(
-				"CASE WHEN last_rss_pub_time IS NULL OR last_rss_pub_time < ? THEN ? ELSE last_rss_pub_time END",
-				*watermark,
-				*watermark,
-			),
-			"updated_at": time.Now(),
-		})
+	result := tx.Model(&model.Subscription{}).
+		Where("id = ? AND rss_url = ? AND updated_at = ?", id, expectedURL, expectedUpdatedAt).
+		Updates(updates)
 	if result.Error != nil {
 		return result.Error
 	}

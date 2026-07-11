@@ -28,11 +28,15 @@ func TestUpdateRSSWatermarkOnlyAdvancesMatchingSourceColumn(t *testing.T) {
 	require.NoError(t, repo.Create(&sub))
 
 	newWatermark := oldWatermark.Add(time.Hour)
-	require.NoError(t, repo.UpdateRSSWatermark(sub.ID, sub.RssURL, &newWatermark))
-	staleWatermark := oldWatermark.Add(30 * time.Minute)
-	require.NoError(t, repo.UpdateRSSWatermark(sub.ID, sub.RssURL, &staleWatermark))
-
+	expectedUpdatedAt := sub.UpdatedAt
+	require.NoError(t, repo.UpdateRSSWatermark(sub.ID, sub.RssURL, expectedUpdatedAt, &newWatermark))
 	got, err := repo.GetByID(sub.ID)
+	require.NoError(t, err)
+	expectedUpdatedAt = got.UpdatedAt
+	staleWatermark := oldWatermark.Add(30 * time.Minute)
+	require.NoError(t, repo.UpdateRSSWatermark(sub.ID, sub.RssURL, expectedUpdatedAt, &staleWatermark))
+
+	got, err = repo.GetByID(sub.ID)
 	require.NoError(t, err)
 	require.NotNil(t, got.LastRSSPubTime)
 	assert.Equal(t, newWatermark, *got.LastRSSPubTime)
@@ -40,6 +44,30 @@ func TestUpdateRSSWatermarkOnlyAdvancesMatchingSourceColumn(t *testing.T) {
 	assert.Equal(t, 6, got.LatestEpisode)
 	assert.True(t, got.RSSBaselinePending)
 
-	err = repo.UpdateRSSWatermark(sub.ID, "https://other.example/feed.xml", &newWatermark)
+	err = repo.UpdateRSSWatermark(sub.ID, "https://other.example/feed.xml", got.UpdatedAt, &newWatermark)
+	require.ErrorContains(t, err, "RSS source changed")
+}
+
+func TestUpdateRSSWatermarkInTxCASProtectsEmptyFeedAndABA(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Subscription{}))
+	repo := NewSubscriptionRepository(db)
+	sub := model.Subscription{Name: "CAS Show", RssURL: "https://example.com/a.xml"}
+	require.NoError(t, repo.Create(&sub))
+	snapshotUpdatedAt := sub.UpdatedAt
+
+	require.NoError(t, db.Model(&model.Subscription{}).Where("id = ?", sub.ID).Updates(map[string]any{
+		"rss_url":    "https://example.com/b.xml",
+		"updated_at": snapshotUpdatedAt.Add(time.Second),
+	}).Error)
+	require.NoError(t, db.Model(&model.Subscription{}).Where("id = ?", sub.ID).Updates(map[string]any{
+		"rss_url":    sub.RssURL,
+		"updated_at": snapshotUpdatedAt.Add(2 * time.Second),
+	}).Error)
+
+	err = db.Transaction(func(tx *gorm.DB) error {
+		return repo.UpdateRSSWatermarkInTx(tx, sub.ID, sub.RssURL, snapshotUpdatedAt, nil)
+	})
 	require.ErrorContains(t, err, "RSS source changed")
 }
