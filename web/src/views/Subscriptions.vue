@@ -646,27 +646,24 @@
     </n-modal>
 
     <!-- 健康诊断面板 -->
-    <n-modal v-model:show="showDiagnosticsModal" preset="card" :title="`健康诊断 - ${diagnosticsSub?.name || ''}`" style="width: 900px; max-width: 96vw;">
+    <n-modal v-model:show="showDiagnosticsModal" preset="card" :title="`健康诊断 - ${diagnosticsSub?.name || ''}`" style="width: 960px; max-width: 96vw;">
       <n-spin :show="diagnosticsLoading">
         <div v-if="diagnosticsData" class="diagnostics-panel">
           <div class="diagnostics-header">
-            <div>
-              <div class="diagnostics-title-row">
-                <n-tag :type="getDiagnosticTagType(diagnosticsData.summary.overall)">
-                  {{ getDiagnosticStatusLabel(diagnosticsData.summary.overall) }}
-                </n-tag>
-                <span class="diagnostics-checked">检查于 {{ formatTime(diagnosticsData.checked_at) }}</span>
-              </div>
-              <div class="diagnostics-counters">
-                <span>正常 {{ diagnosticsData.summary.healthy }}</span>
-                <span>警告 {{ diagnosticsData.summary.warning }}</span>
-                <span>异常 {{ diagnosticsData.summary.error }}</span>
-                <span>未知 {{ diagnosticsData.summary.unknown }}</span>
-              </div>
+            <div class="diagnostics-title-row">
+              <n-tag :type="getDiagnosticTagType(diagnosticsData.summary.overall)">
+                {{ getDiagnosticOverallLabel(diagnosticsData) }}
+              </n-tag>
+              <span class="diagnostics-checked">
+                已检查 {{ diagnosticsData.summary.checked }}/{{ diagnosticsData.summary.total }}
+              </span>
             </div>
-            <n-button size="small" @click="refreshDiagnostics" :loading="diagnosticsLoading">
-              刷新
-            </n-button>
+            <div class="diagnostics-counters">
+              <span>正常 {{ diagnosticsData.summary.healthy }}</span>
+              <span>警告 {{ diagnosticsData.summary.warning }}</span>
+              <span>异常 {{ diagnosticsData.summary.error }}</span>
+              <span>未检查 {{ diagnosticsData.summary.unknown }}</span>
+            </div>
           </div>
 
           <div class="diagnostics-grid">
@@ -679,41 +676,59 @@
               <div class="diagnostic-check-head">
                 <span>{{ check.label }}</span>
                 <n-tag size="tiny" :type="getDiagnosticTagType(check.status)">
-                  {{ getDiagnosticStatusLabel(check.status) }}
+                  {{ getDiagnosticCheckStatusLabel(check) }}
                 </n-tag>
               </div>
               <div class="diagnostic-summary">{{ check.summary }}</div>
-              <div class="diagnostic-detail">{{ check.detail }}</div>
+              <div v-if="check.detail" class="diagnostic-detail">{{ check.detail }}</div>
+              <div class="diagnostic-check-footer">
+                <n-button
+                  class="diagnostic-check-button"
+                  size="small"
+                  :loading="diagnosticsCheckLoading[check.key]"
+                  :disabled="diagnosticsCheckLoading[check.key]"
+                  @click="runDiagnosticCheck(check.key)"
+                >
+                  <template #icon><n-icon><ToolOutlined /></n-icon></template>
+                  {{ check.checked ? '重新检查' : '检查' }}
+                </n-button>
+              </div>
             </div>
           </div>
 
           <div class="diagnostics-metrics">
             <div class="diagnostic-metric">
               <span>下载任务</span>
-              <strong>{{ diagnosticsData.downloads.total }}</strong>
-              <small>失败 {{ diagnosticsData.downloads.failed }} / 停滞 {{ diagnosticsData.downloads.stalled }}</small>
+              <strong>{{ hasDiagnosticCheck('downloads') ? diagnosticsData.downloads.total : '--' }}</strong>
+              <small v-if="hasDiagnosticCheck('downloads')">失败 {{ diagnosticsData.downloads.failed }} / 停滞 {{ diagnosticsData.downloads.stalled }}</small>
+              <small v-else>未检查</small>
             </div>
             <div class="diagnostic-metric">
               <span>已记录路径</span>
-              <strong>{{ diagnosticsData.files.completed_with_file }}</strong>
-              <small>未记录路径 {{ diagnosticsData.files.completed_missing_file }}</small>
+              <strong>{{ hasDiagnosticCheck('files') ? diagnosticsData.files.completed_with_file : '--' }}</strong>
+              <small v-if="hasDiagnosticCheck('files')">未记录路径 {{ diagnosticsData.files.completed_missing_file }}</small>
+              <small v-else>未检查</small>
             </div>
             <div class="diagnostic-metric">
               <span>磁盘剩余</span>
-              <strong>{{ formatBytes(diagnosticsData.disk.free_bytes) }}</strong>
-              <small>{{ diagnosticsData.disk.path }}</small>
+              <strong>{{ hasDiagnosticCheck('disk') ? formatBytes(diagnosticsData.disk.free_bytes) : '--' }}</strong>
+              <small v-if="hasDiagnosticCheck('disk')">{{ diagnosticsData.disk.path }}</small>
+              <small v-else>未检查</small>
             </div>
             <div class="diagnostic-metric">
-              <span>缺失集数</span>
-              <strong>{{ diagnosticsData.files.missing_episodes.length }}</strong>
-              <small>{{ diagnosticsData.files.missing_episodes.length ? diagnosticsData.files.missing_episodes.join(', ') : '无' }}</small>
+              <span>待收集集数</span>
+              <strong>{{ hasDiagnosticCheck('episode_progress') ? (diagnosticsData.files.missing_episodes?.length || 0) : '--' }}</strong>
+              <small v-if="hasDiagnosticCheck('episode_progress')">
+                {{ diagnosticsData.files.missing_episodes?.length ? diagnosticsData.files.missing_episodes.join(', ') : '无' }}
+              </small>
+              <small v-else>未检查</small>
             </div>
           </div>
 
-          <div v-if="diagnosticsData.downloads.failed_items.length" class="diagnostic-failures">
+          <div v-if="hasDiagnosticCheck('downloads') && diagnosticsData.downloads.failed_items?.length" class="diagnostic-failures">
             <div class="diagnostic-section-title">异常下载</div>
             <div
-              v-for="item in diagnosticsData.downloads.failed_items"
+              v-for="item in diagnosticsData.downloads.failed_items || []"
               :key="item.id"
               class="diagnostic-failure-item"
             >
@@ -1077,11 +1092,18 @@ import {
   type SmartFetchStatus,
   type Subscription,
   type SubscriptionDiagnosticAction,
+  type SubscriptionDiagnosticCheck,
+  type SubscriptionDiagnosticCheckResponse,
   type SubscriptionDiagnostics,
   type SubscriptionPreview,
   type SubscriptionRetryFailedResponse
 } from '@/api'
 import { api } from '@/api'
+import {
+  getDiagnosticActionFollowUp,
+  isCurrentDiagnosticRequest,
+  mergeDiagnosticCheck
+} from '@/utils/subscription-diagnostics'
 import { useRoute } from 'vue-router'
 import {
   EditOutlined,
@@ -1158,6 +1180,8 @@ const showDiagnosticsModal = ref(false)
 const diagnosticsSub = ref<Subscription | null>(null)
 const diagnosticsData = ref<SubscriptionDiagnostics | null>(null)
 const diagnosticsLoading = ref(false)
+const diagnosticsCheckLoading = ref<Record<string, boolean>>({})
+const diagnosticsSession = ref(0)
 const diagnosticsActionLoading = ref('')
 const diagnosticsActionResult = ref('')
 const bangumiEnrichingId = ref<number | null>(null)
@@ -2103,24 +2127,66 @@ const handleScanFolder = (sub: Subscription) => {
 }
 
 const handleDiagnostics = async (sub: Subscription) => {
+  diagnosticsSession.value++
   diagnosticsSub.value = sub
   diagnosticsData.value = null
+  diagnosticsCheckLoading.value = {}
+  diagnosticsActionLoading.value = ''
   diagnosticsActionResult.value = ''
   showDiagnosticsModal.value = true
-  await refreshDiagnostics()
+  await loadInitialDiagnostics()
 }
 
-const refreshDiagnostics = async () => {
+const loadInitialDiagnostics = async () => {
   if (!diagnosticsSub.value) return
+  const request = {
+    subscriptionId: diagnosticsSub.value.id,
+    session: diagnosticsSession.value
+  }
   diagnosticsLoading.value = true
   try {
-    const response: any = await subscriptionApi.diagnostics(diagnosticsSub.value.id)
+    const response: any = await subscriptionApi.diagnostics(request.subscriptionId)
+    if (!isCurrentDiagnosticsRequest(request)) return
     diagnosticsData.value = response.data as SubscriptionDiagnostics
   } catch (error: any) {
+    if (!isCurrentDiagnosticsRequest(request)) return
     diagnosticsData.value = null
     message.error(error.response?.data?.message || error.message || '诊断失败')
   } finally {
-    diagnosticsLoading.value = false
+    if (isCurrentDiagnosticsRequest(request)) {
+      diagnosticsLoading.value = false
+    }
+  }
+}
+
+const runDiagnosticCheck = async (key: string) => {
+  if (!diagnosticsSub.value || !diagnosticsData.value || diagnosticsCheckLoading.value[key]) return
+  const request = {
+    subscriptionId: diagnosticsSub.value.id,
+    session: diagnosticsSession.value
+  }
+
+  diagnosticsCheckLoading.value = {
+    ...diagnosticsCheckLoading.value,
+    [key]: true
+  }
+  try {
+    const response: any = await subscriptionApi.checkDiagnostic(request.subscriptionId, key)
+    if (!isCurrentDiagnosticsRequest(request)) return
+    diagnosticsData.value = mergeDiagnosticCheck(
+      diagnosticsData.value,
+      response.data as SubscriptionDiagnosticCheckResponse
+    )
+  } catch (error: any) {
+    if (!isCurrentDiagnosticsRequest(request)) return
+    message.error(error.response?.data?.message || error.message || '检查失败')
+  } finally {
+    if (isCurrentDiagnosticsRequest(request)) {
+      diagnosticsCheckLoading.value = {
+        ...diagnosticsCheckLoading.value,
+        [key]: false
+      }
+    }
   }
 }
 
@@ -2133,47 +2199,74 @@ const runDiagnosticAction = async (action: SubscriptionDiagnosticAction) => {
     return
   }
 
+  const request = {
+    subscriptionId: diagnosticsSub.value.id,
+    session: diagnosticsSession.value
+  }
+
   diagnosticsActionLoading.value = action.key
   diagnosticsActionResult.value = ''
   try {
     let response: any
+    let resultMessage = ''
     switch (action.key) {
       case 'refresh_rss':
-        response = await api.post(`/subscriptions/${diagnosticsSub.value.id}/collect-episodes`)
-        diagnosticsActionResult.value = response.message || 'RSS 采集任务已启动'
+        response = await api.post(`/subscriptions/${request.subscriptionId}/collect-episodes`)
+        if (!isCurrentDiagnosticsRequest(request)) return
+        resultMessage = response.message || 'RSS 采集任务已启动'
         break
       case 'retry_failed':
-        response = await subscriptionApi.retryFailed(diagnosticsSub.value.id)
-        diagnosticsActionResult.value = formatRetryFailedResult(response.data as SubscriptionRetryFailedResponse)
+        response = await subscriptionApi.retryFailed(request.subscriptionId)
+        if (!isCurrentDiagnosticsRequest(request)) return
+        resultMessage = formatRetryFailedResult(response.data as SubscriptionRetryFailedResponse)
         break
       case 'reorganize_files':
-        response = await api.post(`/subscriptions/${diagnosticsSub.value.id}/reorganize-files`)
-        diagnosticsActionResult.value = response.message || '文件整理任务已启动'
+        response = await api.post(`/subscriptions/${request.subscriptionId}/reorganize-files`)
+        if (!isCurrentDiagnosticsRequest(request)) return
+        resultMessage = response.message || '文件整理任务已启动'
         break
       case 'rename_files':
-        response = await api.post(`/subscriptions/${diagnosticsSub.value.id}/rename-files`)
-        diagnosticsActionResult.value = response.message || '重命名任务已启动'
+        response = await api.post(`/subscriptions/${request.subscriptionId}/rename-files`)
+        if (!isCurrentDiagnosticsRequest(request)) return
+        resultMessage = response.message || '重命名任务已启动'
         break
       case 'toggle_subscription':
-        response = await api.post(`/subscriptions/${diagnosticsSub.value.id}/toggle`)
-        diagnosticsActionResult.value = response.data?.enabled ? '订阅已启用' : '订阅已暂停'
+        response = await api.post(`/subscriptions/${request.subscriptionId}/toggle`)
+        if (!isCurrentDiagnosticsRequest(request)) return
+        resultMessage = response.data?.enabled ? '订阅已启用' : '订阅已暂停'
         await loadSubscriptions()
+        if (!isCurrentDiagnosticsRequest(request)) return
         if (response.data) {
           diagnosticsSub.value = response.data as Subscription
+          if (diagnosticsData.value) {
+            const enabled = Boolean(response.data.enabled)
+            diagnosticsData.value = {
+              ...diagnosticsData.value,
+              enabled,
+              actions: diagnosticsData.value.actions.map(item => item.key === 'toggle_subscription'
+                ? { ...item, label: enabled ? '暂停订阅' : '启用订阅' }
+                : item)
+            }
+          }
         }
         break
       default:
         response = await api.request({ method: action.method || 'POST', url: action.endpoint.replace('/api/v1', '') })
-        diagnosticsActionResult.value = response.message || '操作已执行'
+        if (!isCurrentDiagnosticsRequest(request)) return
+        resultMessage = response.message || '操作已执行'
     }
+    const followUp = getDiagnosticActionFollowUp(action.key)
+    diagnosticsActionResult.value = followUp ? `${resultMessage}。${followUp}` : resultMessage
     message.success(diagnosticsActionResult.value)
-    await refreshDiagnostics()
   } catch (error: any) {
+    if (!isCurrentDiagnosticsRequest(request)) return
     const msg = error.response?.data?.message || error.message || '操作失败'
     diagnosticsActionResult.value = msg
     message.error(msg)
   } finally {
-    diagnosticsActionLoading.value = ''
+    if (isCurrentDiagnosticsRequest(request)) {
+      diagnosticsActionLoading.value = ''
+    }
   }
 }
 
@@ -2201,9 +2294,32 @@ const getDiagnosticStatusLabel = (status: DiagnosticStatus) => {
     healthy: '正常',
     warning: '警告',
     error: '异常',
-    unknown: '未知'
+    unknown: '未检查'
   }
   return labels[status] || status
+}
+
+const getDiagnosticCheckStatusLabel = (check: SubscriptionDiagnosticCheck) => {
+  if (check.checked && check.status === 'unknown') return '无法判断'
+  return getDiagnosticStatusLabel(check.status)
+}
+
+const getDiagnosticOverallLabel = (diagnostics: SubscriptionDiagnostics) => {
+  if (diagnostics.summary.checked === 0) return '尚未检查'
+  if (diagnostics.summary.checked < diagnostics.summary.total) return '部分检查'
+  return getDiagnosticStatusLabel(diagnostics.summary.overall)
+}
+
+const hasDiagnosticCheck = (key: string) => {
+  return diagnosticsData.value?.checks.some(check => check.key === key && check.checked) ?? false
+}
+
+const isCurrentDiagnosticsRequest = (request: { subscriptionId: number; session: number }) => {
+  const current = {
+    subscriptionId: diagnosticsSub.value?.id ?? 0,
+    session: diagnosticsSession.value
+  }
+  return isCurrentDiagnosticRequest(current, request)
 }
 
 const getDiagnosticActionType = (key: string): 'primary' | 'default' | 'tertiary' | 'info' | 'success' | 'warning' | 'error' => {
@@ -2884,7 +3000,9 @@ onMounted(() => {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  align-items: flex-start;
+  align-items: center;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #edf0f5;
 }
 
 .diagnostics-title-row {
@@ -2897,15 +3015,16 @@ onMounted(() => {
 .diagnostics-checked {
   font-size: 12px;
   color: #666;
+  font-variant-numeric: tabular-nums;
 }
 
 .diagnostics-counters {
   display: flex;
   gap: 12px;
   flex-wrap: wrap;
-  margin-top: 8px;
   font-size: 12px;
   color: #666;
+  font-variant-numeric: tabular-nums;
 }
 
 .diagnostics-grid {
@@ -2915,12 +3034,19 @@ onMounted(() => {
 }
 
 .diagnostic-check {
-  min-height: 128px;
+  display: flex;
+  min-height: 176px;
+  flex-direction: column;
   padding: 12px;
-  border: 1px solid #e6e8ee;
+  border: 0;
   border-left-width: 3px;
+  border-left-style: solid;
   border-radius: 8px;
   background: #fff;
+  box-shadow:
+    0 0 0 1px rgba(24, 32, 48, 0.07),
+    0 1px 2px -1px rgba(24, 32, 48, 0.08),
+    0 3px 8px rgba(24, 32, 48, 0.04);
 }
 
 .diagnostic-check-head {
@@ -2946,6 +3072,26 @@ onMounted(() => {
   line-height: 1.5;
   color: #666;
   word-break: break-word;
+  text-wrap: pretty;
+}
+
+.diagnostic-check-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: auto;
+  padding-top: 12px;
+}
+
+.diagnostic-check-button {
+  min-width: 112px;
+  min-height: 40px;
+  transition-property: transform;
+  transition-duration: 150ms;
+  transition-timing-function: ease-out;
+}
+
+.diagnostic-check-button:active:not(.n-button--disabled) {
+  transform: scale(0.96);
 }
 
 .diagnostic-healthy {
@@ -2973,9 +3119,10 @@ onMounted(() => {
 .diagnostic-metric {
   min-width: 0;
   padding: 12px;
-  border: 1px solid #e6e8ee;
+  border: 0;
   border-radius: 8px;
   background: #fafafa;
+  box-shadow: 0 0 0 1px rgba(24, 32, 48, 0.06);
 }
 
 .diagnostic-metric span,

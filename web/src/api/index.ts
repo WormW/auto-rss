@@ -253,6 +253,7 @@ export type DiagnosticStatus = 'healthy' | 'warning' | 'error' | 'unknown'
 export interface SubscriptionDiagnosticCheck {
   key: string
   label: string
+  checked: boolean
   status: DiagnosticStatus
   summary: string
   detail: string
@@ -286,6 +287,8 @@ export interface SubscriptionDiagnostics {
   checked_at: string
   summary: {
     overall: DiagnosticStatus
+    checked: number
+    total: number
     healthy: number
     warning: number
     error: number
@@ -326,6 +329,14 @@ export interface SubscriptionDiagnostics {
     error?: string
   }
   actions: SubscriptionDiagnosticAction[]
+}
+
+export interface SubscriptionDiagnosticCheckResponse {
+  check: SubscriptionDiagnosticCheck
+  downloads?: Partial<SubscriptionDiagnostics['downloads']>
+  files?: Partial<SubscriptionDiagnostics['files']>
+  disk?: Partial<SubscriptionDiagnostics['disk']>
+  actions?: SubscriptionDiagnosticAction[]
 }
 
 export interface SubscriptionRetryFailedResult {
@@ -476,6 +487,8 @@ export const subscriptionApi = {
     api.get('/subscriptions/smart-fetch/status'),
   diagnostics: (id: number) =>
     api.get(`/subscriptions/${id}/diagnostics`),
+  checkDiagnostic: (id: number, key: string) =>
+    api.post(`/subscriptions/${id}/diagnostics/checks/${key}`),
   retryFailed: (id: number) =>
     api.post(`/subscriptions/${id}/diagnostics/retry-failed`),
   create: (data: Partial<Subscription>) =>

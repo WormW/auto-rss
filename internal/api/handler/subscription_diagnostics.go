@@ -42,6 +42,7 @@ type SubscriptionDiagnosticsHandler struct {
 type SubscriptionDiagnosticCheck struct {
 	Key     string                       `json:"key"`
 	Label   string                       `json:"label"`
+	Checked bool                         `json:"checked"`
 	Status  SubscriptionDiagnosticStatus `json:"status"`
 	Summary string                       `json:"summary"`
 	Detail  string                       `json:"detail"`
@@ -49,6 +50,8 @@ type SubscriptionDiagnosticCheck struct {
 
 type SubscriptionDiagnosticSummary struct {
 	Overall string `json:"overall"`
+	Checked int    `json:"checked"`
+	Total   int    `json:"total"`
 	Healthy int    `json:"healthy"`
 	Warning int    `json:"warning"`
 	Error   int    `json:"error"`
@@ -66,6 +69,19 @@ type SubscriptionDownloadDiagnostics struct {
 	Retryable           int                                  `json:"retryable"`
 	MissingTorrentTasks int                                  `json:"missing_torrent_tasks"`
 	FailedItems         []SubscriptionDownloadDiagnosticItem `json:"failed_items"`
+}
+
+type SubscriptionDownloadDiagnosticsPatch struct {
+	Total               *int                                  `json:"total,omitempty"`
+	Pending             *int                                  `json:"pending,omitempty"`
+	Downloading         *int                                  `json:"downloading,omitempty"`
+	Stalled             *int                                  `json:"stalled,omitempty"`
+	Failed              *int                                  `json:"failed,omitempty"`
+	Completed           *int                                  `json:"completed,omitempty"`
+	Organizing          *int                                  `json:"organizing,omitempty"`
+	Retryable           *int                                  `json:"retryable,omitempty"`
+	MissingTorrentTasks *int                                  `json:"missing_torrent_tasks,omitempty"`
+	FailedItems         *[]SubscriptionDownloadDiagnosticItem `json:"failed_items,omitempty"`
 }
 
 type SubscriptionDownloadDiagnosticItem struct {
@@ -88,6 +104,16 @@ type SubscriptionFileDiagnostics struct {
 	CompletedMissingFile int    `json:"completed_missing_file"`
 	MissingRenamed       int    `json:"missing_renamed"`
 	MissingEpisodes      []int  `json:"missing_episodes"`
+}
+
+type SubscriptionFileDiagnosticsPatch struct {
+	ExpectedPath         *string `json:"expected_path,omitempty"`
+	FolderExists         *bool   `json:"folder_exists,omitempty"`
+	RenameEnabled        *bool   `json:"rename_enabled,omitempty"`
+	CompletedWithFile    *int    `json:"completed_with_file,omitempty"`
+	CompletedMissingFile *int    `json:"completed_missing_file,omitempty"`
+	MissingRenamed       *int    `json:"missing_renamed,omitempty"`
+	MissingEpisodes      *[]int  `json:"missing_episodes,omitempty"`
 }
 
 type SubscriptionDiskDiagnostics struct {
@@ -123,6 +149,14 @@ type SubscriptionDiagnosticsResponse struct {
 	Files          SubscriptionFileDiagnostics     `json:"files"`
 	Disk           SubscriptionDiskDiagnostics     `json:"disk"`
 	Actions        []SubscriptionDiagnosticAction  `json:"actions"`
+}
+
+type SubscriptionDiagnosticCheckResponse struct {
+	Check     SubscriptionDiagnosticCheck           `json:"check"`
+	Downloads *SubscriptionDownloadDiagnosticsPatch `json:"downloads,omitempty"`
+	Files     *SubscriptionFileDiagnosticsPatch     `json:"files,omitempty"`
+	Disk      *SubscriptionDiskDiagnostics          `json:"disk,omitempty"`
+	Actions   []SubscriptionDiagnosticAction        `json:"actions,omitempty"`
 }
 
 type SubscriptionRetryFailedResponse struct {
@@ -164,39 +198,7 @@ func (h *SubscriptionDiagnosticsHandler) Get(c *gin.Context) {
 		return
 	}
 
-	downloads, err := h.downloadRepo.ListBySubscriptionID(subscription.ID)
-	if err != nil {
-		logger.Error("Failed to list downloads for subscription diagnostics",
-			"subscription_id", subscription.ID,
-			"error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "获取订阅下载记录失败",
-		})
-		return
-	}
-
-	basePath := h.resolveBaseDownloadPath()
-	expectedPath := utils.GenerateDownloadPath(basePath, subscription.Name)
-
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 12*time.Second)
-	defer cancel()
-
-	downloadsSummary, downloadCheck := h.buildDownloadDiagnostics(downloads)
-	filesSummary, fileChecks := h.buildFileDiagnostics(subscription, downloads, expectedPath)
-	diskSummary, diskCheck := h.buildDiskDiagnostics(basePath)
-
-	checks := []SubscriptionDiagnosticCheck{
-		h.buildEnabledCheck(subscription),
-		h.buildRSSReachabilityCheck(ctx, subscription),
-		h.buildRSSFreshnessCheck(subscription),
-		h.buildMissingEpisodesCheck(filesSummary.MissingEpisodes),
-		downloadCheck,
-		h.buildQBittorrentCheck(downloads, &downloadsSummary),
-	}
-	checks = append(checks, fileChecks...)
-	checks = append(checks, diskCheck)
-
+	checks := initialSubscriptionDiagnosticChecks()
 	summary := summarizeSubscriptionChecks(checks)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -209,11 +211,90 @@ func (h *SubscriptionDiagnosticsHandler) Get(c *gin.Context) {
 			CheckedAt:      time.Now(),
 			Summary:        summary,
 			Checks:         checks,
-			Downloads:      downloadsSummary,
-			Files:          filesSummary,
-			Disk:           diskSummary,
-			Actions:        h.buildActions(subscription, downloadsSummary),
+			Downloads: SubscriptionDownloadDiagnostics{
+				FailedItems: []SubscriptionDownloadDiagnosticItem{},
+			},
+			Files: SubscriptionFileDiagnostics{
+				MissingEpisodes: []int{},
+			},
+			Actions: h.buildActions(subscription, SubscriptionDownloadDiagnostics{}, false),
 		},
+	})
+}
+
+func (h *SubscriptionDiagnosticsHandler) Check(c *gin.Context) {
+	subscription, ok := h.loadSubscription(c)
+	if !ok {
+		return
+	}
+
+	key := c.Param("key")
+	result := SubscriptionDiagnosticCheckResponse{}
+
+	switch key {
+	case "subscription_enabled":
+		result.Check = h.buildEnabledCheck(subscription)
+	case "rss_reachability":
+		result.Check = h.runRSSReachabilityCheck(c.Request.Context(), subscription)
+	case "rss_freshness":
+		result.Check = h.buildRSSFreshnessCheck(subscription)
+	case "episode_progress":
+		pending := computeMissingEpisodes(subscription)
+		result.Check = h.buildEpisodeProgressCheck(pending)
+		result.Files = episodeProgressFilePatch(pending)
+	case "downloads":
+		downloads, ok := h.loadDownloads(c, subscription.ID)
+		if !ok {
+			return
+		}
+		summary, check := h.buildDownloadDiagnostics(downloads)
+		result.Check = check
+		result.Downloads = downloadDiagnosticsPatch(summary)
+		result.Actions = h.buildActions(subscription, summary, true)
+	case "qbittorrent":
+		downloads, ok := h.loadDownloads(c, subscription.ID)
+		if !ok {
+			return
+		}
+		summary, _ := h.buildDownloadDiagnostics(downloads)
+		result.Check = h.buildQBittorrentCheck(downloads, &summary)
+		result.Downloads = qbittorrentDiagnosticsPatch(summary.MissingTorrentTasks)
+	case "files":
+		downloads, ok := h.loadDownloads(c, subscription.ID)
+		if !ok {
+			return
+		}
+		expectedPath := utils.GenerateDownloadPath(h.resolveBaseDownloadPath(), subscription.Name)
+		files, check := h.buildFileDiagnostics(subscription, downloads, expectedPath)
+		result.Check = check
+		result.Files = fileDiagnosticsPatch(files)
+		result.Actions = h.buildActions(subscription, downloadSummaryForActions(downloads), true)
+	case "organizer":
+		downloads, ok := h.loadDownloads(c, subscription.ID)
+		if !ok {
+			return
+		}
+		files, check := h.buildOrganizerDiagnostics(subscription, downloads)
+		result.Check = check
+		result.Files = organizerDiagnosticsPatch(files)
+		result.Actions = h.buildActions(subscription, downloadSummaryForActions(downloads), true)
+	case "disk":
+		diskInfo, check := h.buildDiskDiagnostics(h.resolveBaseDownloadPath())
+		result.Check = check
+		result.Disk = &diskInfo
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "未知的诊断检查项",
+		})
+		return
+	}
+	result.Check.Checked = true
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "Success",
+		"data":    result,
 	})
 }
 
@@ -306,6 +387,29 @@ func (h *SubscriptionDiagnosticsHandler) loadSubscription(c *gin.Context) (*mode
 	return subscription, true
 }
 
+func (h *SubscriptionDiagnosticsHandler) loadDownloads(c *gin.Context, subscriptionID uint) ([]model.Download, bool) {
+	if h.downloadRepo == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "下载仓储未初始化",
+		})
+		return nil, false
+	}
+
+	downloads, err := h.downloadRepo.ListBySubscriptionID(subscriptionID)
+	if err != nil {
+		logger.Error("Failed to list downloads for subscription diagnostics",
+			"subscription_id", subscriptionID,
+			"error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "获取订阅下载记录失败",
+		})
+		return nil, false
+	}
+	return downloads, true
+}
+
 func (h *SubscriptionDiagnosticsHandler) buildEnabledCheck(subscription *model.Subscription) SubscriptionDiagnosticCheck {
 	if !subscription.Enabled || subscription.Status == "paused" {
 		return SubscriptionDiagnosticCheck{
@@ -324,6 +428,28 @@ func (h *SubscriptionDiagnosticsHandler) buildEnabledCheck(subscription *model.S
 		Summary: "订阅已启用",
 		Detail:  "后台调度会按配置继续检查这个订阅。",
 	}
+}
+
+func (h *SubscriptionDiagnosticsHandler) runRSSReachabilityCheck(ctx context.Context, subscription *model.Subscription) SubscriptionDiagnosticCheck {
+	proxyURL := ""
+	if h.configRepo != nil {
+		if config, err := h.configRepo.Get("system_proxy"); err == nil && config != nil {
+			proxyURL = config.Value
+		}
+	}
+	if err := h.rssHealthChecker.SetProxy(proxyURL); err != nil {
+		return SubscriptionDiagnosticCheck{
+			Key:     "rss_reachability",
+			Label:   "RSS 可达性",
+			Status:  SubscriptionDiagnosticError,
+			Summary: "RSS 代理配置无效",
+			Detail:  err.Error(),
+		}
+	}
+
+	checkCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	return h.buildRSSReachabilityCheck(checkCtx, subscription)
 }
 
 func (h *SubscriptionDiagnosticsHandler) buildRSSReachabilityCheck(ctx context.Context, subscription *model.Subscription) SubscriptionDiagnosticCheck {
@@ -411,23 +537,23 @@ func (h *SubscriptionDiagnosticsHandler) buildRSSFreshnessCheck(subscription *mo
 	return check
 }
 
-func (h *SubscriptionDiagnosticsHandler) buildMissingEpisodesCheck(missingEpisodes []int) SubscriptionDiagnosticCheck {
+func (h *SubscriptionDiagnosticsHandler) buildEpisodeProgressCheck(missingEpisodes []int) SubscriptionDiagnosticCheck {
 	if len(missingEpisodes) == 0 {
 		return SubscriptionDiagnosticCheck{
-			Key:     "missing_episodes",
-			Label:   "缺失集数",
+			Key:     "episode_progress",
+			Label:   "待收集集数",
 			Status:  SubscriptionDiagnosticHealthy,
-			Summary: "未发现缺失集",
-			Detail:  "当前已收集集数不落后于最新集数。",
+			Summary: "没有待收集集数",
+			Detail:  "订阅当前集数不落后于已发现的最新集数；这不是磁盘文件完整性检查。",
 		}
 	}
 
 	return SubscriptionDiagnosticCheck{
-		Key:     "missing_episodes",
-		Label:   "缺失集数",
+		Key:     "episode_progress",
+		Label:   "待收集集数",
 		Status:  SubscriptionDiagnosticWarning,
-		Summary: fmt.Sprintf("缺失 %d 集", len(missingEpisodes)),
-		Detail:  fmt.Sprintf("缺失集数：%s", formatEpisodeList(missingEpisodes, 20)),
+		Summary: fmt.Sprintf("待收集 %d 集", len(missingEpisodes)),
+		Detail:  fmt.Sprintf("订阅进度差：%s；这不是磁盘文件完整性检查。", formatEpisodeList(missingEpisodes, 20)),
 	}
 }
 
@@ -509,7 +635,7 @@ func (h *SubscriptionDiagnosticsHandler) buildQBittorrentCheck(downloads []model
 		return check
 	}
 
-	version, err := h.qbClient.GetVersion()
+	torrents, err := h.qbClient.GetTorrentsByCategory("")
 	if err != nil {
 		check.Status = SubscriptionDiagnosticError
 		check.Summary = "下载器不可用"
@@ -517,11 +643,19 @@ func (h *SubscriptionDiagnosticsHandler) buildQBittorrentCheck(downloads []model
 		return check
 	}
 
+	torrentHashes := make(map[string]struct{}, len(torrents))
+	for _, torrent := range torrents {
+		if torrent == nil {
+			continue
+		}
+		torrentHashes[strings.ToLower(strings.TrimSpace(torrent.Hash))] = struct{}{}
+	}
+
 	for _, download := range downloads {
 		if download.TorrentHash == "" || !isActiveDownloadStatus(download.Status) {
 			continue
 		}
-		if _, err := h.qbClient.GetTorrentInfo(download.TorrentHash); err != nil {
+		if _, exists := torrentHashes[strings.ToLower(strings.TrimSpace(download.TorrentHash))]; !exists {
 			summary.MissingTorrentTasks++
 		}
 	}
@@ -535,31 +669,17 @@ func (h *SubscriptionDiagnosticsHandler) buildQBittorrentCheck(downloads []model
 
 	check.Status = SubscriptionDiagnosticHealthy
 	check.Summary = "下载器连接正常"
-	check.Detail = fmt.Sprintf("qBittorrent 版本：%s", strings.TrimSpace(version))
+	check.Detail = fmt.Sprintf("qBittorrent 当前共有 %d 个任务。", len(torrents))
 	return check
 }
 
-func (h *SubscriptionDiagnosticsHandler) buildFileDiagnostics(subscription *model.Subscription, downloads []model.Download, expectedPath string) (SubscriptionFileDiagnostics, []SubscriptionDiagnosticCheck) {
+func (h *SubscriptionDiagnosticsHandler) buildFileDiagnostics(subscription *model.Subscription, downloads []model.Download, expectedPath string) (SubscriptionFileDiagnostics, SubscriptionDiagnosticCheck) {
 	files := SubscriptionFileDiagnostics{
-		ExpectedPath:    expectedPath,
-		FolderExists:    pathIsDir(expectedPath),
-		RenameEnabled:   subscription.RenameEnabled,
-		MissingEpisodes: computeMissingEpisodes(subscription),
+		ExpectedPath:  expectedPath,
+		FolderExists:  pathIsDir(expectedPath),
+		RenameEnabled: subscription.RenameEnabled,
 	}
-
-	for _, download := range downloads {
-		if download.Status != model.DownloadStatusCompleted {
-			continue
-		}
-		if download.RenamedPath == "" && subscription.RenameEnabled {
-			files.MissingRenamed++
-		}
-		if downloadHasRecordedFilePath(download) {
-			files.CompletedWithFile++
-		} else {
-			files.CompletedMissingFile++
-		}
-	}
+	accumulateCompletedFileDiagnostics(&files, subscription, downloads)
 
 	fileCheck := SubscriptionDiagnosticCheck{
 		Key:   "files",
@@ -583,7 +703,12 @@ func (h *SubscriptionDiagnosticsHandler) buildFileDiagnostics(subscription *mode
 		fileCheck.Summary = "暂无可核对文件"
 		fileCheck.Detail = fmt.Sprintf("预期目录：%s", expectedPath)
 	}
+	return files, fileCheck
+}
 
+func (h *SubscriptionDiagnosticsHandler) buildOrganizerDiagnostics(subscription *model.Subscription, downloads []model.Download) (SubscriptionFileDiagnostics, SubscriptionDiagnosticCheck) {
+	files := SubscriptionFileDiagnostics{RenameEnabled: subscription.RenameEnabled}
+	accumulateCompletedFileDiagnostics(&files, subscription, downloads)
 	organizerCheck := SubscriptionDiagnosticCheck{
 		Key:   "organizer",
 		Label: "整理/重命名",
@@ -606,8 +731,64 @@ func (h *SubscriptionDiagnosticsHandler) buildFileDiagnostics(subscription *mode
 		organizerCheck.Summary = "暂无整理记录"
 		organizerCheck.Detail = "还没有已完成下载可用于判断整理状态。"
 	}
+	return files, organizerCheck
+}
 
-	return files, []SubscriptionDiagnosticCheck{fileCheck, organizerCheck}
+func accumulateCompletedFileDiagnostics(files *SubscriptionFileDiagnostics, subscription *model.Subscription, downloads []model.Download) {
+	for _, download := range downloads {
+		if download.Status != model.DownloadStatusCompleted {
+			continue
+		}
+		if strings.TrimSpace(download.RenamedPath) == "" && subscription.RenameEnabled {
+			files.MissingRenamed++
+		}
+		if downloadHasRecordedFilePath(download) {
+			files.CompletedWithFile++
+		} else {
+			files.CompletedMissingFile++
+		}
+	}
+}
+
+func episodeProgressFilePatch(pending []int) *SubscriptionFileDiagnosticsPatch {
+	return &SubscriptionFileDiagnosticsPatch{MissingEpisodes: &pending}
+}
+
+func fileDiagnosticsPatch(files SubscriptionFileDiagnostics) *SubscriptionFileDiagnosticsPatch {
+	return &SubscriptionFileDiagnosticsPatch{
+		ExpectedPath:         &files.ExpectedPath,
+		FolderExists:         &files.FolderExists,
+		RenameEnabled:        &files.RenameEnabled,
+		CompletedWithFile:    &files.CompletedWithFile,
+		CompletedMissingFile: &files.CompletedMissingFile,
+	}
+}
+
+func organizerDiagnosticsPatch(files SubscriptionFileDiagnostics) *SubscriptionFileDiagnosticsPatch {
+	return &SubscriptionFileDiagnosticsPatch{
+		RenameEnabled:        &files.RenameEnabled,
+		CompletedWithFile:    &files.CompletedWithFile,
+		CompletedMissingFile: &files.CompletedMissingFile,
+		MissingRenamed:       &files.MissingRenamed,
+	}
+}
+
+func downloadDiagnosticsPatch(summary SubscriptionDownloadDiagnostics) *SubscriptionDownloadDiagnosticsPatch {
+	return &SubscriptionDownloadDiagnosticsPatch{
+		Total:       &summary.Total,
+		Pending:     &summary.Pending,
+		Downloading: &summary.Downloading,
+		Stalled:     &summary.Stalled,
+		Failed:      &summary.Failed,
+		Completed:   &summary.Completed,
+		Organizing:  &summary.Organizing,
+		Retryable:   &summary.Retryable,
+		FailedItems: &summary.FailedItems,
+	}
+}
+
+func qbittorrentDiagnosticsPatch(missingTorrentTasks int) *SubscriptionDownloadDiagnosticsPatch {
+	return &SubscriptionDownloadDiagnosticsPatch{MissingTorrentTasks: &missingTorrentTasks}
 }
 
 func (h *SubscriptionDiagnosticsHandler) buildDiskDiagnostics(path string) (SubscriptionDiskDiagnostics, SubscriptionDiagnosticCheck) {
@@ -678,8 +859,23 @@ func (h *SubscriptionDiagnosticsHandler) buildDiskDiagnostics(path string) (Subs
 	return info, check
 }
 
-func (h *SubscriptionDiagnosticsHandler) buildActions(subscription *model.Subscription, downloads SubscriptionDownloadDiagnostics) []SubscriptionDiagnosticAction {
+func (h *SubscriptionDiagnosticsHandler) buildActions(subscription *model.Subscription, downloads SubscriptionDownloadDiagnostics, downloadsChecked bool) []SubscriptionDiagnosticAction {
 	base := fmt.Sprintf("/api/v1/subscriptions/%d", subscription.ID)
+	retryEnabled := downloadsChecked && downloads.Retryable > 0
+	retryReason := "请先检查下载任务"
+	if downloadsChecked {
+		retryReason = disabledReason(retryEnabled, "没有可重试的失败或停滞任务")
+	}
+	reorganizeEnabled := downloadsChecked && downloads.Completed > 0
+	reorganizeReason := "请先检查下载任务"
+	if downloadsChecked {
+		reorganizeReason = disabledReason(reorganizeEnabled, "没有已完成下载可整理")
+	}
+	renameEnabled := downloadsChecked && subscription.RenameEnabled && downloads.Completed > 0
+	renameReason := "请先检查下载任务"
+	if downloadsChecked {
+		renameReason = disabledReason(renameEnabled, "重命名未启用或没有已完成下载")
+	}
 	return []SubscriptionDiagnosticAction{
 		{
 			Key:      "refresh_rss",
@@ -694,8 +890,8 @@ func (h *SubscriptionDiagnosticsHandler) buildActions(subscription *model.Subscr
 			Label:    "重试失败任务",
 			Method:   http.MethodPost,
 			Endpoint: base + "/diagnostics/retry-failed",
-			Enabled:  downloads.Retryable > 0,
-			Reason:   disabledReason(downloads.Retryable > 0, "没有可重试的失败或停滞任务"),
+			Enabled:  retryEnabled,
+			Reason:   retryReason,
 		},
 		{
 			Key:      "scan_files",
@@ -709,16 +905,16 @@ func (h *SubscriptionDiagnosticsHandler) buildActions(subscription *model.Subscr
 			Label:    "重新整理",
 			Method:   http.MethodPost,
 			Endpoint: base + "/reorganize-files",
-			Enabled:  downloads.Completed > 0,
-			Reason:   disabledReason(downloads.Completed > 0, "没有已完成下载可整理"),
+			Enabled:  reorganizeEnabled,
+			Reason:   reorganizeReason,
 		},
 		{
 			Key:      "rename_files",
 			Label:    "重新命名",
 			Method:   http.MethodPost,
 			Endpoint: base + "/rename-files",
-			Enabled:  subscription.RenameEnabled && downloads.Completed > 0,
-			Reason:   disabledReason(subscription.RenameEnabled && downloads.Completed > 0, "重命名未启用或没有已完成下载"),
+			Enabled:  renameEnabled,
+			Reason:   renameReason,
 		},
 		{
 			Key:      "toggle_subscription",
@@ -732,17 +928,16 @@ func (h *SubscriptionDiagnosticsHandler) buildActions(subscription *model.Subscr
 
 func (h *SubscriptionDiagnosticsHandler) retryDownload(subscription *model.Subscription, download *model.Download) error {
 	if download.TorrentHash != "" && h.qbClient != nil {
-		logger.Info("Deleting old qBittorrent torrent with payload before subscription retry",
+		logger.Info("Removing old qBittorrent task before subscription retry",
 			"download_id", download.ID,
 			"hash", download.TorrentHash,
-			"file_path", download.FilePath,
-			"renamed_path", download.RenamedPath,
 			"configured_download_path", h.resolveBaseDownloadPath())
-		if err := h.qbClient.DeleteTorrentWithPayload(download.TorrentHash); err != nil {
-			logger.Warn("Failed to delete old torrent before subscription retry",
+		if err := h.qbClient.RemoveTorrentTask(download.TorrentHash); err != nil {
+			logger.Warn("Failed to remove old torrent task before subscription retry",
 				"download_id", download.ID,
 				"hash", download.TorrentHash,
 				"error", err)
+			return fmt.Errorf("移除旧下载任务失败: %w", err)
 		}
 	}
 
@@ -805,9 +1000,47 @@ func (h *SubscriptionDiagnosticsHandler) getConfigInt64(key string, defaultValue
 	return value
 }
 
+func initialSubscriptionDiagnosticChecks() []SubscriptionDiagnosticCheck {
+	definitions := []struct {
+		key   string
+		label string
+	}{
+		{key: "subscription_enabled", label: "订阅状态"},
+		{key: "rss_reachability", label: "RSS 可达性"},
+		{key: "rss_freshness", label: "最近检查"},
+		{key: "episode_progress", label: "待收集集数"},
+		{key: "downloads", label: "下载任务"},
+		{key: "qbittorrent", label: "qBittorrent"},
+		{key: "files", label: "本地文件"},
+		{key: "organizer", label: "整理/重命名"},
+		{key: "disk", label: "磁盘空间"},
+	}
+
+	checks := make([]SubscriptionDiagnosticCheck, 0, len(definitions))
+	for _, definition := range definitions {
+		checks = append(checks, SubscriptionDiagnosticCheck{
+			Key:     definition.key,
+			Label:   definition.label,
+			Status:  SubscriptionDiagnosticUnknown,
+			Summary: "未检查",
+			Detail:  "",
+		})
+	}
+	return checks
+}
+
 func summarizeSubscriptionChecks(checks []SubscriptionDiagnosticCheck) SubscriptionDiagnosticSummary {
-	summary := SubscriptionDiagnosticSummary{Overall: string(SubscriptionDiagnosticHealthy)}
+	summary := SubscriptionDiagnosticSummary{
+		Overall: string(SubscriptionDiagnosticUnknown),
+		Total:   len(checks),
+	}
 	for _, check := range checks {
+		if check.Checked {
+			summary.Checked++
+		} else {
+			summary.Unknown++
+			continue
+		}
 		switch check.Status {
 		case SubscriptionDiagnosticHealthy:
 			summary.Healthy++
@@ -815,33 +1048,46 @@ func summarizeSubscriptionChecks(checks []SubscriptionDiagnosticCheck) Subscript
 			summary.Warning++
 		case SubscriptionDiagnosticError:
 			summary.Error++
-		case SubscriptionDiagnosticUnknown:
-			summary.Unknown++
 		}
 	}
 	if summary.Error > 0 {
 		summary.Overall = string(SubscriptionDiagnosticError)
 	} else if summary.Warning > 0 {
 		summary.Overall = string(SubscriptionDiagnosticWarning)
-	} else if summary.Healthy == 0 && summary.Unknown > 0 {
-		summary.Overall = string(SubscriptionDiagnosticUnknown)
+	} else if summary.Healthy > 0 {
+		summary.Overall = string(SubscriptionDiagnosticHealthy)
 	}
 	return summary
 }
 
 func computeMissingEpisodes(subscription *model.Subscription) []int {
-	if subscription.LatestEpisode <= 0 {
+	latest := subscription.RelativeLatestEpisode()
+	if latest <= 0 {
 		return []int{}
 	}
-	current := subscription.CurrentEpisode
-	if current >= subscription.LatestEpisode {
+	current := subscription.RelativeCurrentEpisode()
+	if current >= latest {
 		return []int{}
 	}
-	missing := make([]int, 0, subscription.LatestEpisode-current)
-	for episode := current + 1; episode <= subscription.LatestEpisode; episode++ {
+	missing := make([]int, 0, latest-current)
+	for episode := current + 1; episode <= latest; episode++ {
 		missing = append(missing, episode)
 	}
 	return missing
+}
+
+func downloadSummaryForActions(downloads []model.Download) SubscriptionDownloadDiagnostics {
+	summary := SubscriptionDownloadDiagnostics{}
+	for _, download := range downloads {
+		if download.Status == model.DownloadStatusCompleted {
+			summary.Completed++
+		}
+		diagnostics := buildDownloadDiagnostics(&download)
+		if diagnostics.CanRetry && (download.Status == model.DownloadStatusFailed || download.Status == model.DownloadStatusStalled) {
+			summary.Retryable++
+		}
+	}
+	return summary
 }
 
 func downloadHasRecordedFilePath(download model.Download) bool {

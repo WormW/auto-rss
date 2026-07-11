@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -80,6 +81,34 @@ func TestRSSHealthHandler_CheckOne(t *testing.T) {
 		assert.Equal(t, rss.HealthStatusHealthy, body.Data.Status)
 		assert.Empty(t, body.Data.ErrorMessage)
 	})
+}
+
+func TestRSSHealthHandler_CheckOneAppliesSystemProxy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	proxyCalls := 0
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyCalls++
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = io.WriteString(w, validRSSFeed("Proxy Anime"))
+	}))
+	defer proxy.Close()
+
+	_, subRepo, _, configRepo := setupSubscriptionDiagnosticsTest(t)
+	subscription := model.Subscription{Name: "Proxy Anime", RssURL: "http://rss.invalid/feed"}
+	require.NoError(t, subRepo.Create(&subscription))
+	require.NoError(t, configRepo.Set("system_proxy", proxy.URL))
+	handler := NewRSSHealthHandler(rss.NewHealthChecker(subRepo), subRepo, configRepo)
+
+	w := performRSSHealthRequest(handler.CheckOne, http.MethodGet, "/rss/health/1", "/rss/health/:subscription_id")
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var body struct {
+		Data rss.HealthCheckResult `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.Equal(t, rss.HealthStatusHealthy, body.Data.Status)
+	require.Equal(t, 1, proxyCalls)
 }
 
 func TestRSSHealthHandler_CheckAllSummarizesLocalFeedResults(t *testing.T) {
