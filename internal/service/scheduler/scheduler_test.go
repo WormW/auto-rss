@@ -400,6 +400,56 @@ func TestRSSSourceBaselineDoesNotCompleteAfterConcurrentSourceChange(t *testing.
 	assert.Equal(t, originalWatermark, *got.LastRSSPubTime)
 }
 
+func TestRSSSourceBaselineDoesNotCompleteAfterABASourceChange(t *testing.T) {
+	fx := newSchedulerLedgerFixture(t, nil)
+	created := fx.createSubscription(t)
+	require.NoError(t, fx.db.Model(&model.Subscription{}).Where("id = ?", created.ID).Update("rss_baseline_pending", true).Error)
+
+	snapshot, err := repository.NewSubscriptionRepository(fx.db).GetByID(created.ID)
+	require.NoError(t, err)
+	require.True(t, snapshot.RSSBaselinePending)
+	require.NotNil(t, snapshot.LastRSSPubTime)
+	originalWatermark := *snapshot.LastRSSPubTime
+	originalURL := snapshot.RssURL
+
+	callbackName := "test:rss_baseline_aba"
+	callbackRan := false
+	require.NoError(t, fx.db.Callback().Update().Before("gorm:update").Register(callbackName, func(tx *gorm.DB) {
+		if callbackRan || tx.Statement.Table != (model.Subscription{}).TableName() {
+			return
+		}
+		callbackRan = true
+		changedAt := snapshot.UpdatedAt.Add(time.Second)
+		revertedAt := changedAt.Add(time.Second)
+		db := tx.Session(&gorm.Session{NewDB: true, SkipHooks: true})
+		if err := db.Exec(
+			"UPDATE subscriptions SET rss_url = ?, rss_baseline_pending = ?, updated_at = ? WHERE id = ?",
+			"https://intermediate.example/feed", true, changedAt, snapshot.ID,
+		).Error; err != nil {
+			tx.AddError(err)
+			return
+		}
+		if err := db.Exec(
+			"UPDATE subscriptions SET rss_url = ?, rss_baseline_pending = ?, updated_at = ? WHERE id = ?",
+			originalURL, true, revertedAt, snapshot.ID,
+		).Error; err != nil {
+			tx.AddError(err)
+		}
+	}))
+	t.Cleanup(func() { _ = fx.db.Callback().Update().Remove(callbackName) })
+
+	err = fx.scheduler.reconcileRSSBaseline(snapshot, nil)
+	require.ErrorContains(t, err, "source changed")
+	require.True(t, callbackRan)
+
+	got, err := repository.NewSubscriptionRepository(fx.db).GetByID(snapshot.ID)
+	require.NoError(t, err)
+	assert.Equal(t, originalURL, got.RssURL)
+	assert.True(t, got.RSSBaselinePending)
+	require.NotNil(t, got.LastRSSPubTime)
+	assert.Equal(t, originalWatermark, *got.LastRSSPubTime)
+}
+
 func TestSmartFetchAlwaysFetchesPendingRSSBaselineAfterCalendarGuard(t *testing.T) {
 	filter := NewSmartFetchFilter(nil, nil)
 	filter.strategy = DefaultSmartFetchStrategy()

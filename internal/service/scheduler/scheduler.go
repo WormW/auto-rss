@@ -451,7 +451,13 @@ func (s *scheduler) reconcileRSSBaseline(sub *model.Subscription, items []rss.RS
 			"rss_baseline_pending": false,
 		}
 		result := tx.Model(&model.Subscription{}).
-			Where("id = ? AND rss_url = ? AND rss_baseline_pending = ?", sub.ID, sub.RssURL, true).
+			Where(
+				"id = ? AND rss_url = ? AND rss_baseline_pending = ? AND updated_at = ?",
+				sub.ID,
+				sub.RssURL,
+				true,
+				sub.UpdatedAt,
+			).
 			Updates(updates)
 		if result.Error != nil {
 			return result.Error
