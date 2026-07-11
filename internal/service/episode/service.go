@@ -219,8 +219,8 @@ func episodeResource(episode *model.SubscriptionEpisode) model.EpisodeResource {
 func sameResource(current, candidate model.EpisodeResource) bool {
 	currentHash := strings.TrimSpace(current.Hash)
 	candidateHash := strings.TrimSpace(candidate.Hash)
-	if currentHash != "" || candidateHash != "" {
-		return currentHash != "" && candidateHash != "" && strings.EqualFold(currentHash, candidateHash)
+	if currentHash != "" && candidateHash != "" {
+		return strings.EqualFold(currentHash, candidateHash)
 	}
 	currentURL := strings.TrimSpace(current.URL)
 	candidateURL := strings.TrimSpace(candidate.URL)

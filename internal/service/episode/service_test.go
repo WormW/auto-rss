@@ -218,6 +218,99 @@ func TestEvaluateRSSItemDecisionMatrix(t *testing.T) {
 	}
 }
 
+func TestEvaluateRSSItemOwnedStateResourceMatchingMatrix(t *testing.T) {
+	statuses := []string{
+		model.EpisodeStatusDownloading,
+		model.EpisodeStatusDownloaded,
+		model.EpisodeStatusMarkedDownloaded,
+	}
+	cases := []struct {
+		name           string
+		current        model.EpisodeResource
+		candidate      model.EpisodeResource
+		wantAction     string
+		wantReason     string
+		wantCandidates int64
+	}{
+		{
+			name:       "hash matches case insensitively",
+			current:    model.EpisodeResource{Hash: " ABC ", URL: "https://x/old"},
+			candidate:  model.EpisodeResource{Hash: "abc", URL: "https://x/new"},
+			wantAction: DecisionSkip,
+			wantReason: "resource_already_known",
+		},
+		{
+			name:           "different hashes take priority over same URL",
+			current:        model.EpisodeResource{Hash: "old", URL: "https://x/same"},
+			candidate:      model.EpisodeResource{Hash: "new", URL: "https://x/same"},
+			wantAction:     DecisionCandidate,
+			wantReason:     "different_resource",
+			wantCandidates: 1,
+		},
+		{
+			name:       "candidate-only hash falls back to same URL",
+			current:    model.EpisodeResource{URL: " https://x/same "},
+			candidate:  model.EpisodeResource{Hash: "new", URL: "https://x/same"},
+			wantAction: DecisionSkip,
+			wantReason: "resource_already_known",
+		},
+		{
+			name:       "current-only hash falls back to same URL",
+			current:    model.EpisodeResource{Hash: "old", URL: "https://x/same"},
+			candidate:  model.EpisodeResource{URL: " https://x/same "},
+			wantAction: DecisionSkip,
+			wantReason: "resource_already_known",
+		},
+		{
+			name:       "URLs match after trimming",
+			current:    model.EpisodeResource{URL: " https://x/same "},
+			candidate:  model.EpisodeResource{URL: "https://x/same"},
+			wantAction: DecisionSkip,
+			wantReason: "resource_already_known",
+		},
+		{
+			name:           "different URLs create candidate",
+			current:        model.EpisodeResource{URL: "https://x/old"},
+			candidate:      model.EpisodeResource{URL: "https://x/new"},
+			wantAction:     DecisionCandidate,
+			wantReason:     "different_resource",
+			wantCandidates: 1,
+		},
+	}
+
+	for _, status := range statuses {
+		for _, tt := range cases {
+			t.Run(status+"/"+tt.name, func(t *testing.T) {
+				fx := newServiceFixture(t)
+				sub := model.Subscription{Name: t.Name()}
+				require.NoError(t, fx.db.Create(&sub).Error)
+				ledger := model.SubscriptionEpisode{
+					SubscriptionID:    sub.ID,
+					Episode:           1,
+					Status:            status,
+					StatusSource:      "test",
+					ActiveTorrentHash: tt.current.Hash,
+					ActiveTorrentURL:  tt.current.URL,
+					ActiveTitle:       tt.current.Title,
+				}
+				require.NoError(t, fx.db.Create(&ledger).Error)
+
+				decision, err := fx.service.EvaluateRSSItem(context.Background(), &sub, RSSResource{
+					OriginalEpisode: 1,
+					Resource:        tt.candidate,
+				}, false)
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantAction, decision.Action)
+				assert.Equal(t, tt.wantReason, decision.Reason)
+
+				var candidateCount int64
+				require.NoError(t, fx.db.Model(&model.EpisodeResourceCandidate{}).Count(&candidateCount).Error)
+				assert.Equal(t, tt.wantCandidates, candidateCount)
+			})
+		}
+	}
+}
+
 func TestObserveRSSItemAndEnsureRangeAreIdempotent(t *testing.T) {
 	fx := newServiceFixture(t)
 	sub := model.Subscription{ID: 1, Name: "show", EpisodeOffset: 170, TotalEpisodes: 4}
