@@ -1,6 +1,7 @@
 package downloader
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/WormW/auto-rss/internal/model"
@@ -47,11 +48,16 @@ func TestDownloadMonitorOwnsFirstAddAndReplacesRSSHash(t *testing.T) {
 	require.NoError(t, db.Create(&ledger).Error)
 
 	downloadRepo := repository.NewDownloadRepository(db)
-	qb := &retryLedgerQBClient{returnHash: "retry-success-hash"}
+	failingRepo := &failOnceHashCheckpointRepository{
+		DownloadRepository: downloadRepo,
+		actualHash:         "actual-hash",
+		failNextCheckpoint: true,
+	}
+	qb := &retryLedgerQBClient{returnHash: "actual-hash"}
 	monitor := NewDownloadMonitor(
 		db,
 		qb,
-		downloadRepo,
+		failingRepo,
 		repository.NewSubscriptionRepository(db),
 		repository.NewConfigRepository(db),
 		"",
@@ -59,11 +65,24 @@ func TestDownloadMonitorOwnsFirstAddAndReplacesRSSHash(t *testing.T) {
 	monitor.SetNotificationService(nil)
 	monitor.checkDownloads()
 
-	after, err := downloadRepo.GetByID(download.ID)
+	afterFirstRun, err := downloadRepo.GetByID(download.ID)
 	require.NoError(t, err)
-	assert.Equal(t, model.DownloadStatusDownloading, after.Status)
-	assert.Equal(t, "retry-success-hash", after.TorrentHash)
-	assert.Equal(t, []string{AutoRssCategory}, qb.addCategories)
+	assert.Equal(t, model.DownloadStatusPending, afterFirstRun.Status)
+	assert.Equal(t, "rss-resource-hash", afterFirstRun.TorrentHash)
+	assert.Equal(t, []string{pendingDownloadCategory(download.ID)}, qb.addCategories)
+	assert.Equal(t, pendingDownloadCategory(download.ID), qb.categoryForHash("actual-hash"))
+	assert.Empty(t, qb.setCategoryCalls)
+
+	monitor.checkDownloads()
+
+	afterSecondRun, err := downloadRepo.GetByID(download.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.DownloadStatusDownloading, afterSecondRun.Status)
+	assert.Equal(t, "actual-hash", afterSecondRun.TorrentHash)
+	assert.Equal(t, AutoRssCategory, qb.categoryForHash("actual-hash"))
+	assert.Equal(t, []setCategoryCall{{hash: "actual-hash", category: AutoRssCategory}}, qb.setCategoryCalls)
+	assert.Contains(t, qb.queryCategories, "")
+	assert.Contains(t, qb.queryCategories, AutoRssCategory)
 	afterLedger, err := repository.NewEpisodeRepository(db).GetBySubscriptionAndEpisode(sub.ID, 1)
 	require.NoError(t, err)
 	assert.Equal(t, model.EpisodeStatusDownloading, afterLedger.Status)
@@ -112,34 +131,84 @@ func TestDownloadMonitorLeavesPendingOutboxUntouchedWhileDownloadsPaused(t *test
 	paused = false
 	monitor.checkDownloads()
 
-	assert.Equal(t, []string{AutoRssCategory}, qb.addCategories)
+	assert.Equal(t, []string{pendingDownloadCategory(download.ID)}, qb.addCategories)
 	afterResume, err := downloadRepo.GetByID(download.ID)
 	require.NoError(t, err)
 	assert.Equal(t, model.DownloadStatusDownloading, afterResume.Status)
 	assert.Equal(t, "paused-actual-hash", afterResume.TorrentHash)
+	assert.Equal(t, AutoRssCategory, qb.categoryForHash("paused-actual-hash"))
+}
+
+func TestParsePendingDownloadCategory(t *testing.T) {
+	tests := []struct {
+		category string
+		wantID   uint
+		wantOK   bool
+	}{
+		{category: "AutoRss:pending:42", wantID: 42, wantOK: true},
+		{category: "AutoRss:pending:0"},
+		{category: "AutoRss:pending:01"},
+		{category: "AutoRss:pending:-1"},
+		{category: "AutoRss:pending:+1"},
+		{category: "AutoRss:pending:1:extra"},
+		{category: "AutoRss:pending: 1"},
+		{category: "autorss:pending:1"},
+		{category: "AutoRss"},
+		{category: "AutoRss:pending:18446744073709551616"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.category, func(t *testing.T) {
+			id, ok := parsePendingDownloadCategory(tt.category)
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.wantID, id)
+		})
+	}
 }
 
 type retryLedgerQBClient struct {
-	returnHash    string
-	torrents      []*TorrentInfo
-	addCategories []string
+	returnHash       string
+	torrents         []*TorrentInfo
+	addCategories    []string
+	queryCategories  []string
+	setCategoryCalls []setCategoryCall
+}
+
+type setCategoryCall struct {
+	hash     string
+	category string
 }
 
 func (q *retryLedgerQBClient) Login(string, string, string) error          { return nil }
 func (q *retryLedgerQBClient) TestConnection(string, string, string) error { return nil }
 func (q *retryLedgerQBClient) AddTorrent(_ string, _ string, category string) (string, error) {
 	q.addCategories = append(q.addCategories, category)
-	q.torrents = []*TorrentInfo{{Hash: q.returnHash, State: StateDownloading}}
+	q.torrents = append(q.torrents, &TorrentInfo{Hash: q.returnHash, State: StateDownloading, Category: category})
 	return q.returnHash, nil
 }
-func (q *retryLedgerQBClient) AddTorrentFile(string, []byte, string, string) (string, error) {
-	return q.returnHash, nil
+func (q *retryLedgerQBClient) AddTorrentFile(_ string, _ []byte, _ string, category string) (string, error) {
+	return q.AddTorrent("", "", category)
 }
 func (q *retryLedgerQBClient) GetTorrentInfo(string) (*TorrentInfo, error) { return nil, nil }
-func (q *retryLedgerQBClient) GetTorrentsByCategory(string) ([]*TorrentInfo, error) {
-	return q.torrents, nil
+func (q *retryLedgerQBClient) GetTorrentsByCategory(category string) ([]*TorrentInfo, error) {
+	q.queryCategories = append(q.queryCategories, category)
+	var result []*TorrentInfo
+	for _, torrent := range q.torrents {
+		if category == "" || torrent.Category == category {
+			result = append(result, torrent)
+		}
+	}
+	return result, nil
 }
-func (q *retryLedgerQBClient) SetCategory(string, string) error               { return nil }
+func (q *retryLedgerQBClient) SetCategory(hash, category string) error {
+	q.setCategoryCalls = append(q.setCategoryCalls, setCategoryCall{hash: hash, category: category})
+	for _, torrent := range q.torrents {
+		if torrent.Hash == hash {
+			torrent.Category = category
+		}
+	}
+	return nil
+}
 func (q *retryLedgerQBClient) SetLocation(string, string) error               { return nil }
 func (q *retryLedgerQBClient) RenameTorrentFile(string, string, string) error { return nil }
 func (q *retryLedgerQBClient) RemoveTorrentTask(string) error                 { return nil }
@@ -150,3 +219,26 @@ func (q *retryLedgerQBClient) SetProxy(string) error                          { 
 func (q *retryLedgerQBClient) DownloadTorrentFile(string) ([]byte, error)     { return nil, nil }
 
 var _ QBittorrentClient = (*retryLedgerQBClient)(nil)
+
+func (q *retryLedgerQBClient) categoryForHash(hash string) string {
+	for _, torrent := range q.torrents {
+		if torrent.Hash == hash {
+			return torrent.Category
+		}
+	}
+	return ""
+}
+
+type failOnceHashCheckpointRepository struct {
+	repository.DownloadRepository
+	actualHash         string
+	failNextCheckpoint bool
+}
+
+func (r *failOnceHashCheckpointRepository) Update(download *model.Download) error {
+	if r.failNextCheckpoint && download.Status == model.DownloadStatusPending && download.TorrentHash == r.actualHash {
+		r.failNextCheckpoint = false
+		return errors.New("injected hash checkpoint failure")
+	}
+	return r.DownloadRepository.Update(download)
+}
