@@ -133,13 +133,19 @@ func TestFileOrganizerRealLedgerCompletesAtomically(t *testing.T) {
 	assert.Equal(t, fx.download.ID, *ledger.ActiveDownloadID)
 }
 
-func TestFileOrganizerRealLedgerMoveFailureKeepsDownloading(t *testing.T) {
+func TestFileOrganizerRealLedgerMoveFailureKeepsCheckpoint(t *testing.T) {
 	fx := newOrganizerLedgerFixture(t)
 	fx.organizer.mover = &failingOrganizerMover{FileMover: NewFileMover()}
 
 	require.Error(t, fx.organizer.organizeFile(fx.sourcePath))
 
-	fx.assertDownloading(t, fx.download.ID)
+	persisted, err := fx.downloadRepo.GetByID(fx.download.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.DownloadStatusOrganizing, persisted.Status)
+	assert.Equal(t, fx.sourcePath, persisted.FilePath)
+	ledger, err := fx.episodeRepo.GetBySubscriptionAndEpisode(fx.subscription.ID, 1)
+	require.NoError(t, err)
+	assert.Equal(t, model.EpisodeStatusDownloading, ledger.Status)
 }
 
 func TestFileOrganizerRealLedgerCASFailureRollsBackDownload(t *testing.T) {
@@ -190,6 +196,7 @@ func TestFileOrganizerSamePathCompletesInterruptedPersistence(t *testing.T) {
 	require.NoError(t, os.WriteFile(target, []byte("video"), 0600))
 
 	require.NoError(t, organizer.organizeFile(target))
+	require.NoError(t, organizer.organizeFile(target))
 
 	persisted, err := downloadRepo.GetByID(download.ID)
 	require.NoError(t, err)
@@ -198,6 +205,89 @@ func TestFileOrganizerSamePathCompletesInterruptedPersistence(t *testing.T) {
 	after, err := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
 	require.NoError(t, err)
 	assert.Equal(t, model.EpisodeStatusDownloaded, after.Status)
+}
+
+func TestFileOrganizerStagesCheckpointBeforeMove(t *testing.T) {
+	fx := newOrganizerLedgerFixture(t)
+	require.NoError(t, fx.db.Exec(`CREATE TRIGGER fail_organizing_stage BEFORE UPDATE OF status ON downloads WHEN NEW.status = 'organizing' BEGIN SELECT RAISE(ABORT, 'injected stage failure'); END;`).Error)
+	info := fx.organizer.parser.Parse(filepath.Base(fx.sourcePath))
+	target := fx.organizer.generateNewPath(fx.subscription, info)
+
+	err := fx.organizer.organizeFile(fx.sourcePath)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "failed to persist organizing checkpoint")
+	_, sourceErr := os.Stat(fx.sourcePath)
+	require.NoError(t, sourceErr)
+	_, targetErr := os.Stat(target)
+	require.ErrorIs(t, targetErr, os.ErrNotExist)
+	fx.assertDownloading(t, fx.download.ID)
+}
+
+func TestFileOrganizerRecoversAfterCompensationFailure(t *testing.T) {
+	fx := newOrganizerLedgerFixture(t)
+	info := fx.organizer.parser.Parse(filepath.Base(fx.sourcePath))
+	target := fx.organizer.generateNewPath(fx.subscription, info)
+	require.NoError(t, fx.db.Exec(`CREATE TRIGGER fail_organizing_completion BEFORE UPDATE OF status ON subscription_episodes WHEN NEW.status = 'downloaded' BEGIN SELECT RAISE(ABORT, 'injected completion failure'); END;`).Error)
+	fx.organizer.mover = &compensationFailMover{FileMover: NewFileMover()}
+
+	err := fx.organizer.organizeFile(fx.sourcePath)
+	require.Error(t, err)
+	checkpoint, reloadErr := fx.downloadRepo.GetByID(fx.download.ID)
+	require.NoError(t, reloadErr)
+	assert.Equal(t, model.DownloadStatusOrganizing, checkpoint.Status)
+	assert.Equal(t, fx.sourcePath, checkpoint.FilePath)
+	assert.Equal(t, target, checkpoint.RenamedPath)
+	_, targetErr := os.Stat(target)
+	require.NoError(t, targetErr)
+
+	require.NoError(t, fx.db.Exec("DROP TRIGGER fail_organizing_completion").Error)
+	fx.organizer.mover = NewFileMover()
+	fx.organizer.recoverOrganizingDownloads()
+
+	persisted, reloadErr := fx.downloadRepo.GetByID(fx.download.ID)
+	require.NoError(t, reloadErr)
+	assert.Equal(t, model.DownloadStatusCompleted, persisted.Status)
+	assert.Equal(t, target, persisted.RenamedPath)
+	ledger, reloadErr := fx.episodeRepo.GetBySubscriptionAndEpisode(fx.subscription.ID, 1)
+	require.NoError(t, reloadErr)
+	assert.Equal(t, model.EpisodeStatusDownloaded, ledger.Status)
+}
+
+func TestFileOrganizerRecoversCheckpointBeforeMove(t *testing.T) {
+	fx := newOrganizerLedgerFixture(t)
+	info := fx.organizer.parser.Parse(filepath.Base(fx.sourcePath))
+	target := fx.organizer.generateNewPath(fx.subscription, info)
+	require.NoError(t, fx.db.Model(&model.Download{}).Where("id = ?", fx.download.ID).Updates(map[string]any{
+		"status": model.DownloadStatusOrganizing, "file_path": fx.sourcePath, "renamed_path": target,
+	}).Error)
+
+	fx.organizer.recoverOrganizingDownloads()
+
+	persisted, err := fx.downloadRepo.GetByID(fx.download.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.DownloadStatusCompleted, persisted.Status)
+	_, sourceErr := os.Stat(fx.sourcePath)
+	require.ErrorIs(t, sourceErr, os.ErrNotExist)
+	_, targetErr := os.Stat(target)
+	require.NoError(t, targetErr)
+}
+
+func TestFileOrganizerRecoveryFailureKeepsCheckpoint(t *testing.T) {
+	fx := newOrganizerLedgerFixture(t)
+	info := fx.organizer.parser.Parse(filepath.Base(fx.sourcePath))
+	target := fx.organizer.generateNewPath(fx.subscription, info)
+	require.NoError(t, fx.db.Model(&model.Download{}).Where("id = ?", fx.download.ID).Updates(map[string]any{
+		"status": model.DownloadStatusOrganizing, "file_path": fx.sourcePath, "renamed_path": target,
+	}).Error)
+	fx.organizer.mover = &failingOrganizerMover{FileMover: NewFileMover()}
+
+	fx.organizer.recoverOrganizingDownloads()
+
+	persisted, err := fx.downloadRepo.GetByID(fx.download.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.DownloadStatusOrganizing, persisted.Status)
+	assert.Equal(t, fx.sourcePath, persisted.FilePath)
+	assert.Equal(t, target, persisted.RenamedPath)
 }
 
 func TestFileOrganizerReportsPersistenceAndCompensationFailures(t *testing.T) {

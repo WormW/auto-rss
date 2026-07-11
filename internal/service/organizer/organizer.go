@@ -36,6 +36,8 @@ type FileOrganizer struct {
 	scanMux          sync.Mutex
 	scanRunning      bool
 	scanOnStart      bool
+	recoveryMux      sync.Mutex
+	recoveryInterval time.Duration
 	// New service interfaces
 	parser         *FileNameParser
 	matcher        SubscriptionMatcher
@@ -83,6 +85,7 @@ func NewFileOrganizer(
 		stabilizeTime:    5 * time.Second,
 		processing:       make(map[string]bool),
 		scanOnStart:      false,
+		recoveryInterval: time.Minute,
 		parser:           parser,
 		matcher:          matcher,
 		mover:            mover,
@@ -105,6 +108,7 @@ func (f *FileOrganizer) Start() error {
 		"scan_on_start", f.scanOnStart)
 
 	go f.watchLoop()
+	go f.recoveryLoop()
 	if f.scanOnStart {
 		go func() {
 			time.Sleep(2 * time.Second)
@@ -113,6 +117,20 @@ func (f *FileOrganizer) Start() error {
 	}
 
 	return nil
+}
+
+func (f *FileOrganizer) recoveryLoop() {
+	f.recoverOrganizingDownloads()
+	ticker := time.NewTicker(f.recoveryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			f.recoverOrganizingDownloads()
+		case <-f.stopChan:
+			return
+		}
+	}
 }
 
 func (f *FileOrganizer) SetScanOnStart(enabled bool) {
@@ -332,11 +350,30 @@ func (f *FileOrganizer) organizeFile(filePath string) error {
 	if _, err := utils.ValidatePath(newPath, f.destDir); err != nil {
 		return fmt.Errorf("generated path escapes destination directory: %w", err)
 	}
+	f.recoveryMux.Lock()
+	defer f.recoveryMux.Unlock()
 
 	alreadyAtTarget := filePath == newPath
+	if alreadyAtTarget && download != nil && download.Status == model.DownloadStatusCompleted &&
+		download.FilePath == newPath && download.RenamedPath == newPath {
+		return nil
+	}
 	if !alreadyAtTarget && f.mover.IsAlreadyOrganized(filePath, subscription) {
 		logger.Debug("File already organized, skipping", "path", filePath)
 		return nil
+	}
+
+	var originalDownload *model.Download
+	if download != nil && f.downloadRepo != nil {
+		original := *download
+		originalDownload = &original
+		download.Status = model.DownloadStatusOrganizing
+		download.FilePath = filePath
+		download.RenamedPath = newPath
+		if err := f.downloadRepo.Update(download); err != nil {
+			*download = original
+			return fmt.Errorf("failed to persist organizing checkpoint: %w", err)
+		}
 	}
 
 	moved := false
@@ -367,31 +404,8 @@ func (f *FileOrganizer) organizeFile(filePath string) error {
 	}
 
 	if download != nil && f.downloadRepo != nil {
-		originalDownload := *download
-		completedAt := time.Now()
-		download.Status = model.DownloadStatusCompleted
-		download.FilePath = newPath
-		download.RenamedPath = newPath
-		download.DownloadedAt = &completedAt
-		var updateErr error
-		if f.db == nil {
-			updateErr = f.downloadRepo.Update(download)
-			if updateErr == nil && download.Episode > 0 && f.episodeService != nil {
-				updateErr = f.episodeService.MarkDownloadCompleted(download, subscription, completedAt)
-			}
-		} else {
-			updateErr = f.db.Transaction(func(tx *gorm.DB) error {
-				if err := f.downloadRepo.UpdateInTx(tx, download); err != nil {
-					return err
-				}
-				if download.Episode > 0 && f.episodeService != nil {
-					return f.episodeService.MarkDownloadCompletedInTx(tx, download, subscription, completedAt)
-				}
-				return nil
-			})
-		}
+		updateErr := f.completeOrganizingDownload(download, subscription, newPath)
 		if updateErr != nil {
-			*download = originalDownload
 			var compensationErr error
 			if moved {
 				compensationErr = f.mover.Move(newPath, filePath)
@@ -407,6 +421,12 @@ func (f *FileOrganizer) organizeFile(filePath string) error {
 			if compensationErr != nil {
 				return errors.Join(persistErr, fmt.Errorf("failed to compensate file move from %s to %s: %w", newPath, filePath, compensationErr))
 			}
+			if originalDownload != nil {
+				if restoreErr := f.downloadRepo.Update(originalDownload); restoreErr != nil {
+					return errors.Join(persistErr, fmt.Errorf("failed to restore download after compensation: %w", restoreErr))
+				}
+				*download = *originalDownload
+			}
 			return persistErr
 		} else {
 			logger.Debug("Updated download status to completed",
@@ -414,14 +434,6 @@ func (f *FileOrganizer) organizeFile(filePath string) error {
 				"file_path", newPath)
 		}
 
-		if f.mediaLibrary != nil {
-			result := f.mediaLibrary.RefreshDownloadAfterImport(download)
-			logger.Info("Media library refresh after file organization",
-				"download_id", download.ID,
-				"status", result.Status,
-				"path", result.Path,
-				"message", result.Message)
-		}
 	}
 
 	if moved {
@@ -439,6 +451,111 @@ func (f *FileOrganizer) organizeFile(filePath string) error {
 		"new_path", newPath)
 
 	return nil
+}
+
+func (f *FileOrganizer) completeOrganizingDownload(download *model.Download, subscription *model.Subscription, targetPath string) error {
+	checkpoint := *download
+	completedAt := time.Now()
+	download.Status = model.DownloadStatusCompleted
+	download.FilePath = targetPath
+	download.RenamedPath = targetPath
+	download.DownloadedAt = &completedAt
+	var err error
+	if f.db == nil {
+		err = f.downloadRepo.Update(download)
+		if err == nil && download.Episode > 0 && f.episodeService != nil {
+			err = f.episodeService.MarkDownloadCompleted(download, subscription, completedAt)
+		}
+	} else {
+		err = f.db.Transaction(func(tx *gorm.DB) error {
+			if updateErr := f.downloadRepo.UpdateInTx(tx, download); updateErr != nil {
+				return updateErr
+			}
+			if download.Episode > 0 && f.episodeService != nil {
+				return f.episodeService.MarkDownloadCompletedInTx(tx, download, subscription, completedAt)
+			}
+			return nil
+		})
+	}
+	if err != nil {
+		*download = checkpoint
+		return err
+	}
+	if f.mediaLibrary != nil {
+		result := f.mediaLibrary.RefreshDownloadAfterImport(download)
+		logger.Info("Media library refresh after file organization",
+			"download_id", download.ID,
+			"status", result.Status,
+			"path", result.Path,
+			"message", result.Message)
+	}
+	return nil
+}
+
+func (f *FileOrganizer) recoverOrganizingDownloads() {
+	f.recoveryMux.Lock()
+	defer f.recoveryMux.Unlock()
+	if f.downloadRepo == nil {
+		return
+	}
+	downloads, _, err := f.downloadRepo.List(0, repository.MaxPageSize, model.DownloadStatusOrganizing)
+	if err != nil {
+		logger.Error("Failed to list organizing checkpoints", "error", err)
+		return
+	}
+	for i := range downloads {
+		if err := f.recoverOrganizingDownload(&downloads[i]); err != nil {
+			logger.Warn("Failed to recover organizing checkpoint",
+				"download_id", downloads[i].ID,
+				"source", downloads[i].FilePath,
+				"target", downloads[i].RenamedPath,
+				"error", err)
+		}
+	}
+}
+
+func (f *FileOrganizer) recoverOrganizingDownload(download *model.Download) error {
+	sourcePath := strings.TrimSpace(download.FilePath)
+	targetPath := strings.TrimSpace(download.RenamedPath)
+	if sourcePath == "" || targetPath == "" {
+		return fmt.Errorf("organizing checkpoint is missing source or target path")
+	}
+	if _, err := utils.ValidatePath(sourcePath, f.watchDir); err != nil {
+		return fmt.Errorf("checkpoint source escapes watch directory: %w", err)
+	}
+	if _, err := utils.ValidatePath(targetPath, f.destDir); err != nil {
+		return fmt.Errorf("checkpoint target escapes destination directory: %w", err)
+	}
+	targetExists := fileExists(targetPath)
+	sourceExists := fileExists(sourcePath)
+	if !targetExists {
+		if !sourceExists {
+			return fmt.Errorf("neither checkpoint source nor target exists")
+		}
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+			return fmt.Errorf("failed to create checkpoint target directory: %w", err)
+		}
+		if err := f.mover.Move(sourcePath, targetPath); err != nil {
+			return fmt.Errorf("failed to resume checkpoint move: %w", err)
+		}
+	}
+	subscription := &download.Subscription
+	if subscription.ID == 0 {
+		loaded, err := f.subscriptionRepo.GetByID(download.SubscriptionID)
+		if err != nil {
+			return fmt.Errorf("failed to load checkpoint subscription: %w", err)
+		}
+		subscription = loaded
+	}
+	if err := f.completeOrganizingDownload(download, subscription, targetPath); err != nil {
+		return fmt.Errorf("failed to complete organizing checkpoint: %w", err)
+	}
+	return nil
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 // generateNewPath 生成新文件路径

@@ -72,7 +72,7 @@ func TestFileOrganizerCompletesEpisodeInDownloadTransaction(t *testing.T) {
 	assert.Equal(t, model.DownloadStatusCompleted, persisted.Status)
 }
 
-func TestFileOrganizerMoveFailureKeepsDownloadActive(t *testing.T) {
+func TestFileOrganizerMoveFailureKeepsRecoveryCheckpoint(t *testing.T) {
 	watchDir := t.TempDir()
 	destDir := t.TempDir()
 	filePath := filepath.Join(watchDir, "[Group] Move Failure Show - 01 [1080p].mkv")
@@ -100,7 +100,9 @@ func TestFileOrganizerMoveFailureKeepsDownloadActive(t *testing.T) {
 	require.Error(t, err)
 	persisted, err := downloadRepo.GetByID(download.ID)
 	require.NoError(t, err)
-	assert.Equal(t, model.DownloadStatusDownloading, persisted.Status)
+	assert.Equal(t, model.DownloadStatusOrganizing, persisted.Status)
+	assert.Equal(t, filePath, persisted.FilePath)
+	assert.NotEmpty(t, persisted.RenamedPath)
 	assert.False(t, episodes.completedInTx)
 }
 

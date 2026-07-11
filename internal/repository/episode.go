@@ -179,9 +179,27 @@ func (r *episodeRepository) MarkDownloadedInTx(tx *gorm.DB, episodeID, downloadI
 		return result.Error
 	}
 	if result.RowsAffected != 1 {
+		var current model.SubscriptionEpisode
+		if err := tx.Where("id = ?", episodeID).First(&current).Error; err == nil &&
+			current.Status == model.EpisodeStatusDownloaded &&
+			current.ActiveDownloadID != nil && *current.ActiveDownloadID == downloadID &&
+			sameEpisodeResource(current, resource) {
+			return nil
+		}
 		return fmt.Errorf("download %d is not active for episode %d", downloadID, episodeID)
 	}
 	return nil
+}
+
+func sameEpisodeResource(episode model.SubscriptionEpisode, resource model.EpisodeResource) bool {
+	currentHash := strings.TrimSpace(episode.ActiveTorrentHash)
+	requestedHash := strings.TrimSpace(resource.Hash)
+	if currentHash != "" || requestedHash != "" {
+		return currentHash != "" && requestedHash != "" && strings.EqualFold(currentHash, requestedHash)
+	}
+	currentURL := strings.TrimSpace(episode.ActiveTorrentURL)
+	requestedURL := strings.TrimSpace(resource.URL)
+	return currentURL != "" && requestedURL != "" && currentURL == requestedURL
 }
 
 func (r *episodeRepository) MarkMissingIfActiveDownload(downloadID uint) error {

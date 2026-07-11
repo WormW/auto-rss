@@ -182,6 +182,24 @@ func TestEpisodeRepositoryMarkMissingDoesNotDowngradeDownloadedEpisode(t *testin
 	assert.Equal(t, "abc", got.ActiveTorrentHash)
 }
 
+func TestEpisodeRepositoryMarkDownloadedIsIdempotentOnlyForSameOwnerAndResource(t *testing.T) {
+	db, repo := setupEpisodeRepository(t)
+	downloadID := uint(12)
+	resource := model.EpisodeResource{Hash: "same-hash", URL: "magnet:same", Title: "same title"}
+	episode := model.SubscriptionEpisode{
+		SubscriptionID: 1, Episode: 1, Status: model.EpisodeStatusDownloaded,
+		StatusSource: model.EpisodeStatusSourceAutomatic, ActiveDownloadID: &downloadID,
+		ActiveTorrentHash: resource.Hash, ActiveTorrentURL: resource.URL, ActiveTitle: resource.Title,
+	}
+	require.NoError(t, db.Create(&episode).Error)
+
+	require.NoError(t, repo.MarkDownloaded(episode.ID, downloadID, resource, time.Now()))
+	require.Error(t, repo.MarkDownloaded(episode.ID, downloadID+1, resource, time.Now()))
+	require.Error(t, repo.MarkDownloaded(episode.ID, downloadID, model.EpisodeResource{
+		Hash: "different-hash", URL: resource.URL, Title: resource.Title,
+	}, time.Now()))
+}
+
 func TestEpisodeRepositoryUpsertCandidateKeepsWorkflowStatus(t *testing.T) {
 	_, repo := setupEpisodeRepository(t)
 	episode, err := repo.ObserveEpisode(1, 1)
