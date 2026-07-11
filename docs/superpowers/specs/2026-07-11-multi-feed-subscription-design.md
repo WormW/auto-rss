@@ -91,6 +91,18 @@ relative_episode = original_episode - subscription_feed.episode_offset
 
 下载记录增加可空的 `subscription_feed_id`，表示该任务由哪个 feed 触发。资源候选保存 `subscription_feed_id`，同时保留发现时的 feed 名称、字幕组、URL、偏移等快照。删除 feed 后，历史记录仍可展示资源来源。
 
+新增 `subscription_feed_seen_items` 运行时表，用于没有可靠发布时间的 RSS 快照去重：
+
+| 字段 | 含义 |
+| --- | --- |
+| `id` | 主键 |
+| `subscription_feed_id` | 所属 feed |
+| `resource_key` | 优先使用小写 torrent hash，否则使用规范化资源 URL |
+| `original_episode` | 发现时的原始集数 |
+| `first_seen_at` | 首次观察时间 |
+
+对 `(subscription_feed_id, resource_key)` 建立唯一约束。该表只表达“此 feed 已经展示过该资源”，不表达用户拥有该集，也不替代剧集台账或资源候选。它属于可重建运行时状态，不进入备份导出。
+
 ## Feed 生命周期
 
 ### 新增
@@ -103,6 +115,7 @@ relative_episode = original_episode - subscription_feed.episode_offset
 
 - 设置 `baseline_pending=true`。
 - 不沿用旧 URL 或旧映射的水位线。
+- 清空该 feed 的已见资源快照，由新基线重新建立。
 - 要求重新预览映射结果。
 
 只修改 `name`、`fansub` 或 `enabled` 不触发基线同步。重新启用未改变 URL 和偏移的 feed 时继续使用原水位线。
@@ -115,6 +128,8 @@ relative_episode = original_episode - subscription_feed.episode_offset
 
 删除 feed 不删除剧集台账、下载记录或资源候选。下载记录上的可空外键置空，候选和历史展示继续使用保存的来源快照。删除 feed 不使已下载剧集恢复为缺失。
 
+删除 feed 时同时删除它的 `subscription_feed_seen_items`；这些记录没有跨 feed 的历史展示价值。
+
 ## 基线同步
 
 新增 feed、修改 URL 或修改偏移后的首次成功检查只建立新源基线，不自动下载 RSS 中的历史资源：
@@ -122,16 +137,17 @@ relative_episode = original_episode - subscription_feed.episode_offset
 1. 使用 feed 自身的偏移把所有有效条目转换为相对集数。
 2. 对已有剧集台账比较资源；资源不同则按剧集台账设计建立人工候选。
 3. 对台账中不存在的历史集数建立 `missing` 条目，但不创建下载任务。
-4. 把本次 RSS 中可见的最新发布时间保存为该 feed 的 `last_rss_pub_time`。
-5. 设置 `baseline_pending=false`。
+4. 为本次所有具有稳定资源身份的条目写入 `subscription_feed_seen_items`。
+5. 把本次 RSS 中可见的最新发布时间保存为该 feed 的 `last_rss_pub_time`。
+6. 设置 `baseline_pending=false`。
 
-如果 RSS 条目没有可靠发布时间，仍以本次抓取快照完成基线。后续依靠剧集台账唯一约束和资源候选去重避免重复处理。
+如果 RSS 条目没有可靠发布时间，仍以本次抓取快照完成基线。后续检查先查询 `subscription_feed_seen_items`：已见资源直接跳过，新资源才进入台账决策，并在处理成功后写为已见。这样第二轮检查不会把基线中已有的历史缺集误当成新发布资源。
 
 基线同步失败时保持 `baseline_pending=true`，记录该 feed 的错误，其他 feed 继续正常运行。
 
 ## 增量处理与先到先得
 
-基线完成后，每个 feed 只处理发布时间超过自身水位线的新条目。处理顺序为：
+基线完成后，有可靠发布时间的条目只处理发布时间超过自身水位线的内容；无可靠发布时间的条目只处理该 feed 尚未见过的资源 key。处理顺序为：
 
 1. 解析 RSS 条目并提取原始集数。
 2. 使用 feed 的 `episode_offset` 转换为相对集数。
@@ -140,6 +156,7 @@ relative_episode = original_episode - subscription_feed.episode_offset
 5. 当状态为无记录或 `missing` 时，原子地把该集占用为 `downloading` 并创建唯一下载任务。
 6. 当状态为 `downloading`、`downloaded` 或 `marked_downloaded` 时，相同资源直接跳过，不同资源建立人工候选。
 7. 当状态为 `ignored` 时直接跳过，不建立普通候选。
+8. 条目完成跳过、候选或下载决策后，将其资源 key 幂等写入 feed 已见表。
 
 多个 feed 没有优先级。最先成功提交台账状态变化和下载任务的资源胜出。不能依赖调度器遍历顺序表达优先级。
 
@@ -240,6 +257,7 @@ POST   /api/v1/subscriptions/:id/feeds/:feedId/preview
 - 同一订阅不能添加规范化后相同的 URL。
 - 不同订阅允许使用相同 URL。
 - 删除 feed 不删除剧集台账、下载记录或候选。
+- 删除 feed 会删除其已见资源运行时记录。
 
 ### 集数映射
 
@@ -250,6 +268,7 @@ POST   /api/v1/subscriptions/:id/feeds/:feedId/preview
 ### 基线与水位线
 
 - 新 feed 首次同步只建立缺集和候选，不自动下载历史内容。
+- 无发布时间的基线条目在第二次检查时仍不会自动下载；真正新增的资源 key 可以进入正常决策。
 - 修改 URL 或偏移重新进入基线同步。
 - 修改名称或字幕组不触发基线同步。
 - 一个 feed 同步失败时不推进其水位线，其他 feed 可正常推进。
