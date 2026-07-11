@@ -60,6 +60,7 @@ web/.DS_Store
 .gsd
 .gsd-id
 .bg-shell/
+.worktrees/
 Thumbs.db
 *.code-workspace
 .env.*
