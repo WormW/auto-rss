@@ -118,6 +118,10 @@ func (m *mockSubscriptionRepo) Create(subscription *model.Subscription) error {
 	return nil
 }
 
+func (m *mockSubscriptionRepo) CreateInTx(_ *gorm.DB, subscription *model.Subscription) error {
+	return m.Create(subscription)
+}
+
 func (m *mockSubscriptionRepo) Update(subscription *model.Subscription) error {
 	if m.updateFunc != nil {
 		return m.updateFunc(subscription)

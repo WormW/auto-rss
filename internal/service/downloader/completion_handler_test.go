@@ -56,6 +56,10 @@ func (m *mockSubscriptionRepo) UpdateInTx(tx *gorm.DB, subscription *model.Subsc
 	return nil
 }
 
+func (m *mockSubscriptionRepo) CreateInTx(_ *gorm.DB, subscription *model.Subscription) error {
+	return m.Create(subscription)
+}
+
 // MockQBittorrentClient for testing
 type mockQBClient struct {
 	getTorrentInfoFunc  func(hash string) (*TorrentInfo, error)

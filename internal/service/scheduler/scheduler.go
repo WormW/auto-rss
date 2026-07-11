@@ -214,6 +214,16 @@ func (s *scheduler) checkRSSFeeds() {
 			"items", len(items),
 			"fetch_reason", fetchReason)
 
+		if sub.RSSBaselinePending {
+			if err := s.reconcileRSSBaseline(&sub, items); err != nil {
+				logger.Error("Failed to reconcile RSS source baseline",
+					"subscription", sub.Name,
+					"subscription_id", sub.ID,
+					"error", err)
+			}
+			continue
+		}
+
 		// 首次启用时间水位线时，优先按“已存在下载记录”回推到对应的最新 pubDate，避免误跳过后续新集。
 		if sub.LastRSSPubTime == nil {
 			bootstrapFromExisting := false
@@ -400,6 +410,57 @@ func (s *scheduler) checkRSSFeeds() {
 	}
 
 	logger.Info("RSS feed check completed")
+}
+
+func (s *scheduler) reconcileRSSBaseline(sub *model.Subscription, items []rss.RSSItem) error {
+	if s.episodeService == nil {
+		return errors.New("episode service is required")
+	}
+
+	var maxPubTime *time.Time
+	for _, item := range items {
+		if !item.PubTime.IsZero() && (maxPubTime == nil || item.PubTime.After(*maxPubTime)) {
+			pubCopy := item.PubTime
+			maxPubTime = &pubCopy
+		}
+		relativeEpisode := sub.RelativeEpisode(item.Episode)
+		if relativeEpisode <= 0 {
+			continue
+		}
+		if sub.TotalEpisodes > 0 && relativeEpisode > sub.TotalEpisodes {
+			continue
+		}
+		_, err := s.episodeService.EvaluateRSSItem(context.Background(), sub, episode.RSSResource{
+			OriginalEpisode: item.Episode,
+			Resource:        rssItemResource(&item),
+			Fansub:          item.Fansub,
+			Language:        string(item.Language),
+			PubTime:         item.PubTime,
+			SourceRSSURL:    sub.RssURL,
+		}, true)
+		if err != nil {
+			return err
+		}
+	}
+
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		now := time.Now()
+		updates := map[string]any{
+			"last_rss_pub_time":    maxPubTime,
+			"last_check_time":      now,
+			"rss_baseline_pending": false,
+		}
+		result := tx.Model(&model.Subscription{}).
+			Where("id = ? AND rss_url = ? AND rss_baseline_pending = ?", sub.ID, sub.RssURL, true).
+			Updates(updates)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("rss source changed while baseline was running")
+		}
+		return nil
+	})
 }
 
 func completedAtLogValue(completedAt *time.Time) any {

@@ -55,6 +55,10 @@ func (m *MockSubscriptionRepository) UpdateInTx(tx *gorm.DB, subscription *model
 	return nil
 }
 
+func (m *MockSubscriptionRepository) CreateInTx(_ *gorm.DB, subscription *model.Subscription) error {
+	return m.Create(subscription)
+}
+
 func (m *MockSubscriptionRepository) GetSubscriptionsWithDownloadCount() ([]repository.SubscriptionWithStats, error) {
 	return nil, nil
 }

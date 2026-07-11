@@ -204,6 +204,14 @@ func (s *Service) EnsureRange(subscriptionID uint, totalEpisodes int) error {
 	return s.repository.EnsureRange(subscriptionID, totalEpisodes)
 }
 
+func (s *Service) RunInTransaction(fn func(*gorm.DB) error) error {
+	return s.repository.RunInTransaction(fn)
+}
+
+func (s *Service) EnsureRangeInTx(tx *gorm.DB, subscriptionID uint, totalEpisodes int) error {
+	return s.repository.EnsureRangeInTx(tx, subscriptionID, totalEpisodes)
+}
+
 func (s *Service) RefreshSubscriptionProgress(subscriptionID uint) error {
 	return s.repository.RefreshSubscriptionProgress(subscriptionID)
 }

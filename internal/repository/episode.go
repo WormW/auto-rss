@@ -17,6 +17,7 @@ type EpisodeWithCandidateCount struct {
 }
 
 type EpisodeRepository interface {
+	RunInTransaction(fn func(*gorm.DB) error) error
 	ListBySubscription(subscriptionID uint) ([]model.SubscriptionEpisode, error)
 	ListWithCandidateCounts(subscriptionID uint) ([]EpisodeWithCandidateCount, error)
 	GetBySubscriptionAndEpisode(subscriptionID uint, episode int) (*model.SubscriptionEpisode, error)
@@ -34,6 +35,7 @@ type EpisodeRepository interface {
 	UpdateCandidate(candidate *model.EpisodeResourceCandidate) error
 	ObserveEpisode(subscriptionID uint, episode int) (*model.SubscriptionEpisode, error)
 	EnsureRange(subscriptionID uint, total int) error
+	EnsureRangeInTx(tx *gorm.DB, subscriptionID uint, total int) error
 	RefreshSubscriptionProgress(subscriptionID uint) error
 }
 
@@ -43,6 +45,10 @@ type episodeRepository struct {
 
 func NewEpisodeRepository(db *gorm.DB) EpisodeRepository {
 	return &episodeRepository{db: db}
+}
+
+func (r *episodeRepository) RunInTransaction(fn func(*gorm.DB) error) error {
+	return r.db.Transaction(fn)
 }
 
 func (r *episodeRepository) ListBySubscription(subscriptionID uint) ([]model.SubscriptionEpisode, error) {
@@ -281,23 +287,27 @@ func (r *episodeRepository) ObserveEpisode(subscriptionID uint, episode int) (*m
 }
 
 func (r *episodeRepository) EnsureRange(subscriptionID uint, total int) error {
+	return r.RunInTransaction(func(tx *gorm.DB) error {
+		return r.EnsureRangeInTx(tx, subscriptionID, total)
+	})
+}
+
+func (r *episodeRepository) EnsureRangeInTx(tx *gorm.DB, subscriptionID uint, total int) error {
 	if total <= 0 {
 		return nil
 	}
-	return r.db.Transaction(func(tx *gorm.DB) error {
-		for episode := 1; episode <= total; episode++ {
-			entry := model.SubscriptionEpisode{
-				SubscriptionID: subscriptionID,
-				Episode:        episode,
-				Status:         model.EpisodeStatusMissing,
-				StatusSource:   model.EpisodeStatusSourceAutomatic,
-			}
-			if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&entry).Error; err != nil {
-				return err
-			}
+	for episode := 1; episode <= total; episode++ {
+		entry := model.SubscriptionEpisode{
+			SubscriptionID: subscriptionID,
+			Episode:        episode,
+			Status:         model.EpisodeStatusMissing,
+			StatusSource:   model.EpisodeStatusSourceAutomatic,
 		}
-		return nil
-	})
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&entry).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *episodeRepository) RefreshSubscriptionProgress(subscriptionID uint) error {

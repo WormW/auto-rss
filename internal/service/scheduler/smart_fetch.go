@@ -175,6 +175,14 @@ func (f *SmartFetchFilter) EvaluateSubscription(sub *model.Subscription) (Subscr
 		return status, needsUpdate
 	}
 
+	if sub.RSSBaselinePending {
+		status.ShouldFetch = true
+		status.FetchReason = "rss_baseline_pending"
+		status.Explanation = "RSS 源等待基线对账，本轮强制拉取。"
+		status.NextFetchInterval = f.strategy.NormalInterval
+		return status, needsUpdate
+	}
+
 	status.IsCompleted = f.isCompleted(sub)
 	if !status.IsCompleted && sub.CompletedAt != nil {
 		sub.CompletedAt = nil

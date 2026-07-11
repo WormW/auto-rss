@@ -293,6 +293,7 @@ func normalizeSubscriptionSource(subscription *model.Subscription) {
 	if subscription.RssURL == "" && subscription.CollectionTorrent == "" {
 		subscription.SourceType = "calendar"
 		subscription.RSSSourceID = nil
+		subscription.RSSBaselinePending = false
 		subscription.SmartFetchOverride = "never"
 		subscription.SmartFetchEnabled = nil
 		return
@@ -542,6 +543,7 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		"client_ip", c.ClientIP())
 
 	normalizeSubscriptionSource(&subscription)
+	subscription.RSSBaselinePending = subscription.RssURL != ""
 
 	// 自动获取Bangumi数据
 	h.enrichWithBangumi(&subscription)
@@ -573,10 +575,21 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		}
 	}
 
-	if err := h.repo.Create(&subscription); err != nil {
+	var createErr error
+	if h.episodeRepo != nil {
+		createErr = h.episodeRepo.RunInTransaction(func(tx *gorm.DB) error {
+			if err := h.repo.CreateInTx(tx, &subscription); err != nil {
+				return err
+			}
+			return h.episodeRepo.EnsureRangeInTx(tx, subscription.ID, subscription.TotalEpisodes)
+		})
+	} else {
+		createErr = h.repo.Create(&subscription)
+	}
+	if createErr != nil {
 		logger.Error("Failed to create subscription",
 			"name", subscription.Name,
-			"error", err.Error())
+			"error", createErr.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
 			"message": "Failed to create subscription",
@@ -628,6 +641,7 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 
 	originalName := existing.Name
 	originalSeason := existing.Season
+	originalRSSURL := strings.TrimSpace(existing.RssURL)
 
 	var updates map[string]interface{}
 	if err := c.ShouldBindJSON(&updates); err != nil {
@@ -651,8 +665,10 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 	if name, ok := updates["name"].(string); ok {
 		existing.Name = name
 	}
+	rssURLUpdated := false
 	if rssURL, ok := updates["rss_url"].(string); ok {
-		existing.RssURL = rssURL
+		rssURLUpdated = true
+		existing.RssURL = strings.TrimSpace(rssURL)
 	}
 	if fansub, ok := updates["fansub"].(string); ok {
 		existing.Fansub = fansub
@@ -722,6 +738,9 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 	}
 
 	normalizeSubscriptionSource(existing)
+	if rssURLUpdated && existing.RssURL != originalRSSURL {
+		existing.RSSBaselinePending = existing.RssURL != ""
+	}
 	shouldDownloadCollection = shouldDownloadCollection && !existing.IsCalendarOnly()
 
 	if existing.BangumiCoverLocal == "" {
@@ -731,11 +750,22 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 		h.enrichWithBangumi(existing)
 	}
 
-	if err := h.repo.Update(existing); err != nil {
+	var updateErr error
+	if h.episodeRepo != nil {
+		updateErr = h.episodeRepo.RunInTransaction(func(tx *gorm.DB) error {
+			if err := h.repo.UpdateInTx(tx, existing); err != nil {
+				return err
+			}
+			return h.episodeRepo.EnsureRangeInTx(tx, existing.ID, existing.TotalEpisodes)
+		})
+	} else {
+		updateErr = h.repo.Update(existing)
+	}
+	if updateErr != nil {
 		logger.Error("Failed to update subscription",
 			"id", id,
 			"name", existing.Name,
-			"error", err.Error())
+			"error", updateErr.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
 			"message": "Failed to update subscription",

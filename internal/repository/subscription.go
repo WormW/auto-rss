@@ -33,6 +33,8 @@ type GroupStatistic struct {
 // SubscriptionRepository 订阅仓储接口
 type SubscriptionRepository interface {
 	Create(subscription *model.Subscription) error
+	// CreateInTx 在调用方事务中创建订阅
+	CreateInTx(tx *gorm.DB, subscription *model.Subscription) error
 	Update(subscription *model.Subscription) error
 	Delete(id uint) error
 	GetByID(id uint) (*model.Subscription, error)
@@ -90,6 +92,11 @@ func NewSubscriptionRepository(db *gorm.DB) SubscriptionRepository {
 // Create 创建订阅
 func (r *subscriptionRepository) Create(subscription *model.Subscription) error {
 	return r.db.Create(subscription).Error
+}
+
+// CreateInTx 在调用方事务中创建订阅
+func (r *subscriptionRepository) CreateInTx(tx *gorm.DB, subscription *model.Subscription) error {
+	return tx.Create(subscription).Error
 }
 
 // Update 更新订阅

@@ -116,6 +116,10 @@ func (m *MockSubscriptionRepository) UpdateInTx(tx *gorm.DB, sub *model.Subscrip
 	return args.Error(0)
 }
 
+func (m *MockSubscriptionRepository) CreateInTx(_ *gorm.DB, sub *model.Subscription) error {
+	return m.Create(sub)
+}
+
 // MockDownloadRepository mocks the DownloadRepository interface
 type MockDownloadRepository struct {
 	mock.Mock
