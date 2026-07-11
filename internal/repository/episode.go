@@ -218,39 +218,36 @@ func (r *episodeRepository) UpsertCandidate(episodeID uint, candidate *model.Epi
 	if strings.TrimSpace(candidate.ResourceKey) == "" {
 		return nil, false, errors.New("resource key is required")
 	}
-	candidate.SubscriptionEpisodeID = episodeID
 
 	lookup := model.EpisodeResourceCandidate{}
 	err := r.db.Where(
 		"subscription_episode_id = ? AND resource_key = ?",
-		candidate.SubscriptionEpisodeID,
+		episodeID,
 		candidate.ResourceKey,
 	).First(&lookup).Error
 	if err == nil {
-		candidate.ID = lookup.ID
-		candidate.Status = lookup.Status
 		return &lookup, false, nil
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, false, err
 	}
 
-	result := r.db.Clauses(clause.OnConflict{DoNothing: true}).Create(candidate)
+	candidateToCreate := *candidate
+	candidateToCreate.SubscriptionEpisodeID = episodeID
+	result := r.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&candidateToCreate)
 	if result.Error != nil {
 		return nil, false, result.Error
 	}
 	if result.RowsAffected == 1 {
-		return candidate, true, nil
+		return &candidateToCreate, true, nil
 	}
 	if err := r.db.Where(
 		"subscription_episode_id = ? AND resource_key = ?",
-		candidate.SubscriptionEpisodeID,
+		episodeID,
 		candidate.ResourceKey,
 	).First(&lookup).Error; err != nil {
 		return nil, false, err
 	}
-	candidate.ID = lookup.ID
-	candidate.Status = lookup.Status
 	return &lookup, false, nil
 }
 
@@ -304,36 +301,47 @@ func (r *episodeRepository) EnsureRange(subscriptionID uint, total int) error {
 }
 
 func (r *episodeRepository) RefreshSubscriptionProgress(subscriptionID uint) error {
-	var subscription model.Subscription
-	if err := r.db.First(&subscription, subscriptionID).Error; err != nil {
-		return err
-	}
-	episodes, err := r.ListBySubscription(subscriptionID)
-	if err != nil {
-		return err
-	}
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		var subscription model.Subscription
+		if err := tx.First(&subscription, subscriptionID).Error; err != nil {
+			return err
+		}
+		var episodes []model.SubscriptionEpisode
+		if err := tx.Where("subscription_id = ?", subscriptionID).Order("episode ASC").Find(&episodes).Error; err != nil {
+			return err
+		}
 
-	continuousOwned := 0
-	latest := 0
-	for _, episode := range episodes {
-		if episode.Episode > latest {
-			latest = episode.Episode
+		continuousOwned := 0
+		latest := 0
+		for _, episode := range episodes {
+			if episode.Episode > latest {
+				latest = episode.Episode
+			}
+			if episode.Episode == continuousOwned+1 && episodeStatusCountsAsOwned(episode.Status) {
+				continuousOwned++
+			}
 		}
-		if episode.Episode == continuousOwned+1 && episodeStatusCountsAsOwned(episode.Status) {
-			continuousOwned++
+		currentEpisode := progressWithOffset(continuousOwned, subscription.EpisodeOffset)
+		latestEpisode := progressWithOffset(latest, subscription.EpisodeOffset)
+		subscription.CurrentEpisode = currentEpisode
+		completedAt := subscription.CompletedAt
+		if subscription.IsCompleted() {
+			if completedAt == nil {
+				now := time.Now()
+				completedAt = &now
+			}
+		} else {
+			completedAt = nil
 		}
-	}
-	subscription.CurrentEpisode = progressWithOffset(continuousOwned, subscription.EpisodeOffset)
-	subscription.LatestEpisode = progressWithOffset(latest, subscription.EpisodeOffset)
-	if subscription.IsCompleted() {
-		if subscription.CompletedAt == nil {
-			now := time.Now()
-			subscription.CompletedAt = &now
-		}
-	} else {
-		subscription.CompletedAt = nil
-	}
-	return r.db.Save(&subscription).Error
+
+		return tx.Model(&model.Subscription{}).
+			Where("id = ?", subscriptionID).
+			Updates(map[string]any{
+				"current_episode": currentEpisode,
+				"latest_episode":  latestEpisode,
+				"completed_at":    completedAt,
+			}).Error
+	})
 }
 
 func clearActiveDownloadUpdates(status, source string) map[string]any {

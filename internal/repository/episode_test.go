@@ -197,24 +197,26 @@ func TestEpisodeRepositoryUpsertCandidateKeepsWorkflowStatus(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, created)
 	require.Equal(t, episode.ID, persisted.SubscriptionEpisodeID)
+	createdCandidateID := persisted.ID
 
 	retry := &model.EpisodeResourceCandidate{
-		SubscriptionEpisodeID: episode.ID,
+		SubscriptionEpisodeID: 999,
 		ResourceKey:           "hash:abc",
 		TorrentHash:           "ABC",
 		Title:                 "new title",
 		Status:                model.CandidateStatusPending,
 	}
+	retryBefore := *retry
 	persisted, created, err = repo.UpsertCandidate(episode.ID, retry)
 	require.NoError(t, err)
 	assert.False(t, created)
-	assert.Equal(t, candidate.ID, persisted.ID)
+	assert.Equal(t, createdCandidateID, persisted.ID)
+	assert.Equal(t, retryBefore, *retry)
 
 	candidates, err := repo.ListCandidates(episode.ID)
 	require.NoError(t, err)
 	require.Len(t, candidates, 1)
 	assert.Equal(t, model.CandidateStatusKeptExisting, candidates[0].Status)
-	assert.Equal(t, candidate.ID, retry.ID)
 
 	_, _, err = repo.UpsertCandidate(episode.ID, &model.EpisodeResourceCandidate{})
 	require.Error(t, err)
@@ -287,4 +289,50 @@ func TestEpisodeRepositoryEnsureRangeAndRefreshProgress(t *testing.T) {
 	var count int64
 	require.NoError(t, db.Model(&model.SubscriptionEpisode{}).Where("subscription_id = ?", sub.ID).Count(&count).Error)
 	assert.EqualValues(t, 4, count)
+}
+
+func TestEpisodeRepositoryRefreshProgressDoesNotOverwriteConcurrentSubscriptionFields(t *testing.T) {
+	db, repo := setupEpisodeRepository(t)
+	sub := model.Subscription{
+		ID:             1,
+		Name:           "offset",
+		RssURL:         "https://old.example/rss",
+		FilterKeywords: `["old"]`,
+		EpisodeOffset:  170,
+		TotalEpisodes:  2,
+	}
+	require.NoError(t, db.Create(&sub).Error)
+	require.NoError(t, db.Create(&[]model.SubscriptionEpisode{
+		{SubscriptionID: sub.ID, Episode: 1, Status: model.EpisodeStatusDownloaded, StatusSource: "test"},
+		{SubscriptionID: sub.ID, Episode: 2, Status: model.EpisodeStatusIgnored, StatusSource: "test"},
+		{SubscriptionID: sub.ID, Episode: 4, Status: model.EpisodeStatusDownloaded, StatusSource: "test"},
+	}).Error)
+
+	callbackName := "test:concurrent_subscription_update"
+	callbackRan := false
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register(callbackName, func(tx *gorm.DB) {
+		if callbackRan || tx.Statement.Table != (model.Subscription{}).TableName() {
+			return
+		}
+		callbackRan = true
+		err := tx.Session(&gorm.Session{NewDB: true, SkipHooks: true}).Exec(
+			"UPDATE subscriptions SET rss_url = ?, filter_keywords = ? WHERE id = ?",
+			"https://new.example/rss",
+			`["new"]`,
+			sub.ID,
+		).Error
+		tx.AddError(err)
+	}))
+	t.Cleanup(func() { _ = db.Callback().Update().Remove(callbackName) })
+
+	require.NoError(t, repo.RefreshSubscriptionProgress(sub.ID))
+	require.True(t, callbackRan)
+
+	var refreshed model.Subscription
+	require.NoError(t, db.First(&refreshed, sub.ID).Error)
+	assert.Equal(t, "https://new.example/rss", refreshed.RssURL)
+	assert.Equal(t, `["new"]`, refreshed.FilterKeywords)
+	assert.Equal(t, 172, refreshed.CurrentEpisode)
+	assert.Equal(t, 174, refreshed.LatestEpisode)
+	assert.NotNil(t, refreshed.CompletedAt)
 }
