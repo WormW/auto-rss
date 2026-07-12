@@ -26,6 +26,7 @@ type StatusSync interface {
 type statusSync struct {
 	downloadRepo    statusSyncDownloadRepository
 	notificationSvc NotificationService
+	episodeService  EpisodeCompletionService
 	gracePeriod     time.Duration
 }
 
@@ -38,10 +39,12 @@ type statusSyncDownloadRepository interface {
 func NewStatusSync(
 	downloadRepo statusSyncDownloadRepository,
 	notificationSvc NotificationService,
+	episodeService EpisodeCompletionService,
 ) StatusSync {
 	return &statusSync{
 		downloadRepo:    downloadRepo,
 		notificationSvc: notificationSvc,
+		episodeService:  episodeService,
 		gracePeriod:     ReconcileGracePeriod,
 	}
 }
@@ -92,16 +95,14 @@ func (s *statusSync) UpdateStatus(download *model.Download, torrent *TorrentInfo
 	oldStatus := download.Status
 
 	// 映射 qB 状态到内部状态
-	newStatus := mapQBStateToStatus(torrent.State)
-
-	// 如果状态是 downloading 但已完成，设置为 completed
-	if newStatus == "downloading" && isTorrentComplete(torrent) {
-		newStatus = "completed"
-	}
+	newStatus := downloadStatusForTorrent(torrent)
 
 	// 状态未变化
 	if oldStatus == newStatus {
 		return false, nil
+	}
+	if newStatus == model.DownloadStatusCompleted {
+		return true, nil
 	}
 
 	logger.Info("Download status changed",
@@ -111,6 +112,7 @@ func (s *statusSync) UpdateStatus(download *model.Download, torrent *TorrentInfo
 		"new_status", newStatus,
 		"progress", torrent.Progress)
 
+	original := *download
 	// 更新状态
 	download.Status = newStatus
 
@@ -120,13 +122,19 @@ func (s *statusSync) UpdateStatus(download *model.Download, torrent *TorrentInfo
 	}
 
 	// 保存到数据库
-	if err := s.downloadRepo.Update(download); err != nil {
+	var persistErr error
+	if newStatus == model.DownloadStatusFailed {
+		persistErr = persistDownloadFailure(s.downloadRepo, s.episodeService, download, shouldReleaseEpisodeAfterFailure(download))
+	} else {
+		persistErr = s.downloadRepo.Update(download)
+	}
+	if persistErr != nil {
+		*download = original
 		logger.Error("Failed to update download status",
 			"id", download.ID,
-			"error", err.Error())
-		return false, err
+			"error", persistErr.Error())
+		return false, persistErr
 	}
-
 	return true, nil
 }
 
@@ -169,17 +177,18 @@ func (s *statusSync) Reconcile(torrents []*TorrentInfo, downloadingTasks, stalle
 		}
 
 		// 标记为失败
+		original := *download
 		download.Status = "failed"
 		download.ErrorMessage = "Torrent missing in qBittorrent during monitor reconciliation"
 
-		if updateErr := s.downloadRepo.Update(download); updateErr != nil {
+		if updateErr := persistDownloadFailure(s.downloadRepo, s.episodeService, download, shouldReleaseEpisodeAfterFailure(download)); updateErr != nil {
+			*download = original
 			logger.Error("Failed to reconcile missing downloading task",
 				"download_id", download.ID,
 				"hash", hash,
 				"error", updateErr.Error())
 			continue
 		}
-
 		reconciled++
 
 		// 发送下载失败通知

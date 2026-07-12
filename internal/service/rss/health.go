@@ -28,27 +28,47 @@ const (
 // RSSHealthChecker RSS健康检查器
 type RSSHealthChecker struct {
 	subscriptionRepo repository.SubscriptionRepository
+	feedRepo         SubscriptionFeedReader
 	mu               sync.RWMutex
 	httpClient       *http.Client
 	proxyURL         string
 }
 
+type SubscriptionFeedReader interface {
+	ListBySubscription(subscriptionID uint) ([]model.SubscriptionFeed, error)
+	ListEnabledBySubscriptionIDs(subscriptionIDs []uint) ([]model.SubscriptionFeed, error)
+}
+
+type FeedHealthCheckResult struct {
+	SubscriptionFeedID uint         `json:"subscription_feed_id"`
+	Name               string       `json:"name"`
+	Fansub             string       `json:"fansub"`
+	RSSURL             string       `json:"rss_url"`
+	Status             HealthStatus `json:"status"`
+	ResponseTime       int64        `json:"response_time_ms"`
+	ErrorMessage       string       `json:"error_message,omitempty"`
+	LastPostDate       *time.Time   `json:"last_post_date,omitempty"`
+	LastSuccessAt      *time.Time   `json:"last_success_at,omitempty"`
+	LastError          string       `json:"last_error,omitempty"`
+}
+
 // HealthCheckResult 健康检查结果
 type HealthCheckResult struct {
-	SubscriptionID uint         `json:"subscription_id"`
-	Name           string       `json:"name"`
-	RssURL         string       `json:"rss_url"`
-	Status         HealthStatus `json:"status"`
-	LastCheckTime  time.Time    `json:"last_check_time"`
-	ResponseTime   int64        `json:"response_time_ms"` // 响应时间（毫秒）
-	ErrorMessage   string       `json:"error_message,omitempty"`
-	LastPostDate   *time.Time   `json:"last_post_date,omitempty"` // 最新文章发布时间
+	SubscriptionID uint                    `json:"subscription_id"`
+	Name           string                  `json:"name"`
+	Status         HealthStatus            `json:"status"`
+	LastCheckTime  time.Time               `json:"last_check_time"`
+	Feeds          []FeedHealthCheckResult `json:"feeds"`
 }
 
 // NewHealthChecker 创建健康检查器
-func NewHealthChecker(subRepo repository.SubscriptionRepository) *RSSHealthChecker {
+func NewHealthChecker(
+	subRepo repository.SubscriptionRepository,
+	feedRepo SubscriptionFeedReader,
+) *RSSHealthChecker {
 	return &RSSHealthChecker{
 		subscriptionRepo: subRepo,
+		feedRepo:         feedRepo,
 		httpClient: &http.Client{
 			Timeout:   30 * time.Second,
 			Transport: newHealthTransport(nil),
@@ -99,22 +119,93 @@ func newHealthTransport(proxy func(*http.Request) (*url.URL, error)) *http.Trans
 
 // CheckSubscription 检查单个订阅的健康状态
 func (c *RSSHealthChecker) CheckSubscription(ctx context.Context, sub *model.Subscription) *HealthCheckResult {
+	if c.feedRepo == nil {
+		feeds := []model.SubscriptionFeed{}
+		if strings.TrimSpace(sub.RssURL) != "" {
+			feeds = append(feeds, model.SubscriptionFeed{
+				SubscriptionID: sub.ID,
+				Name:           sub.Name,
+				Fansub:         sub.Fansub,
+				RSSURL:         sub.RssURL,
+				EpisodeOffset:  sub.EpisodeOffset,
+				Enabled:        true,
+			})
+		}
+		return c.CheckSubscriptionFeeds(ctx, sub, feeds)
+	}
+	feeds, err := c.feedRepo.ListBySubscription(sub.ID)
+	if err != nil {
+		return &HealthCheckResult{
+			SubscriptionID: sub.ID,
+			Name:           sub.Name,
+			Status:         HealthStatusUnknown,
+			LastCheckTime:  time.Now(),
+			Feeds:          []FeedHealthCheckResult{},
+		}
+	}
+	return c.CheckSubscriptionFeeds(ctx, sub, feeds)
+}
+
+func (c *RSSHealthChecker) CheckSubscriptionFeeds(
+	ctx context.Context,
+	sub *model.Subscription,
+	feeds []model.SubscriptionFeed,
+) *HealthCheckResult {
 	result := &HealthCheckResult{
 		SubscriptionID: sub.ID,
 		Name:           sub.Name,
-		RssURL:         sub.RssURL,
 		Status:         HealthStatusUnknown,
 		LastCheckTime:  time.Now(),
+		Feeds:          make([]FeedHealthCheckResult, 0, len(feeds)),
 	}
 
-	if sub.RssURL == "" {
+	var healthy, unhealthy, dead, enabled int
+	for i := range feeds {
+		if !feeds[i].Enabled {
+			continue
+		}
+		enabled++
+		feedResult := c.checkFeed(ctx, &feeds[i])
+		result.Feeds = append(result.Feeds, feedResult)
+		switch feedResult.Status {
+		case HealthStatusHealthy:
+			healthy++
+		case HealthStatusUnhealthy:
+			unhealthy++
+		case HealthStatusDead:
+			dead++
+		}
+	}
+
+	switch {
+	case healthy > 0:
+		result.Status = HealthStatusHealthy
+	case unhealthy > 0:
+		result.Status = HealthStatusUnhealthy
+	case enabled > 0 && dead == enabled:
+		result.Status = HealthStatusDead
+	default:
 		result.Status = HealthStatusUnknown
+	}
+	return result
+}
+
+func (c *RSSHealthChecker) checkFeed(ctx context.Context, feed *model.SubscriptionFeed) FeedHealthCheckResult {
+	result := FeedHealthCheckResult{
+		SubscriptionFeedID: feed.ID,
+		Name:               feed.Name,
+		Fansub:             feed.Fansub,
+		RSSURL:             feed.RSSURL,
+		Status:             HealthStatusUnknown,
+		LastSuccessAt:      feed.LastSuccessAt,
+		LastError:          feed.LastError,
+	}
+	if feed.RSSURL == "" {
 		result.ErrorMessage = "RSS URL is empty"
 		return result
 	}
-
 	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, "GET", sub.RssURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feed.RSSURL, nil)
 	if err != nil {
 		result.Status = HealthStatusDead
 		result.ErrorMessage = fmt.Sprintf("Failed to create request: %v", err)
@@ -167,12 +258,31 @@ func (c *RSSHealthChecker) CheckAllSubscriptions(ctx context.Context) ([]*Health
 		return nil, err
 	}
 
+	subscriptionIDs := make([]uint, 0, len(subs))
+	for i := range subs {
+		subscriptionIDs = append(subscriptionIDs, subs[i].ID)
+	}
+	feeds := make([]model.SubscriptionFeed, 0)
+	if c.feedRepo != nil {
+		feeds, err = c.feedRepo.ListEnabledBySubscriptionIDs(subscriptionIDs)
+		if err != nil {
+			return nil, err
+		}
+	}
+	feedsBySubscription := make(map[uint][]model.SubscriptionFeed)
+	for _, feed := range feeds {
+		feedsBySubscription[feed.SubscriptionID] = append(feedsBySubscription[feed.SubscriptionID], feed)
+	}
+
 	var results []*HealthCheckResult
-	for _, sub := range subs {
-		result := c.CheckSubscription(ctx, &sub)
+	for i, sub := range subs {
+		result := c.CheckSubscriptionFeeds(ctx, &sub, feedsBySubscription[sub.ID])
 		results = append(results, result)
 
-		// 避免请求过快
+		if i == len(subs)-1 {
+			continue
+		}
+		// 避免不同订阅之间请求过快。
 		select {
 		case <-ctx.Done():
 			return results, ctx.Err()
@@ -221,8 +331,7 @@ func (c *RSSHealthChecker) StartPeriodicCheck(interval time.Duration) {
 					logger.Warn("Dead RSS subscription detected",
 						"subscription_id", r.SubscriptionID,
 						"name", r.Name,
-						"rss_url", r.RssURL,
-						"error", r.ErrorMessage)
+						"feeds", len(r.Feeds))
 				}
 			}
 

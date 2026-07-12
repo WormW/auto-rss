@@ -62,10 +62,12 @@ func TestRSSHealthHandler_CheckOne(t *testing.T) {
 		repo := &mockSubscriptionRepo{
 			getByIDFunc: func(id uint) (*model.Subscription, error) {
 				assert.Equal(t, uint(7), id)
-				return &model.Subscription{ID: id, Name: "Healthy Anime", RssURL: feed.URL}, nil
+				return &model.Subscription{ID: id, Name: "Healthy Anime"}, nil
 			},
 		}
-		handler := newTestRSSHealthHandler(repo)
+		handler := newTestRSSHealthHandler(repo, model.SubscriptionFeed{
+			ID: 70, SubscriptionID: 7, Name: "Default", RSSURL: feed.URL, Enabled: true,
+		})
 
 		w := performRSSHealthRequest(handler.CheckOne, http.MethodGet, "/rss/health/7", "/rss/health/:subscription_id")
 
@@ -79,7 +81,8 @@ func TestRSSHealthHandler_CheckOne(t *testing.T) {
 		assert.Equal(t, uint(7), body.Data.SubscriptionID)
 		assert.Equal(t, "Healthy Anime", body.Data.Name)
 		assert.Equal(t, rss.HealthStatusHealthy, body.Data.Status)
-		assert.Empty(t, body.Data.ErrorMessage)
+		require.Len(t, body.Data.Feeds, 1)
+		assert.Equal(t, rss.HealthStatusHealthy, body.Data.Feeds[0].Status)
 	})
 }
 
@@ -98,7 +101,7 @@ func TestRSSHealthHandler_CheckOneAppliesSystemProxy(t *testing.T) {
 	subscription := model.Subscription{Name: "Proxy Anime", RssURL: "http://rss.invalid/feed"}
 	require.NoError(t, subRepo.Create(&subscription))
 	require.NoError(t, configRepo.Set("system_proxy", proxy.URL))
-	handler := NewRSSHealthHandler(rss.NewHealthChecker(subRepo), subRepo, configRepo)
+	handler := NewRSSHealthHandler(rss.NewHealthChecker(subRepo, nil), subRepo, configRepo)
 
 	w := performRSSHealthRequest(handler.CheckOne, http.MethodGet, "/rss/health/1", "/rss/health/:subscription_id")
 
@@ -121,14 +124,18 @@ func TestRSSHealthHandler_CheckAllSummarizesLocalFeedResults(t *testing.T) {
 	repo := &mockSubscriptionRepo{
 		getActiveFunc: func() ([]model.Subscription, error) {
 			return []model.Subscription{
-				{ID: 1, Name: "Healthy Anime", RssURL: healthyFeed.URL},
-				{ID: 2, Name: "Broken XML", RssURL: unhealthyFeed.URL},
-				{ID: 3, Name: "Dead Server", RssURL: deadFeed.URL},
+				{ID: 1, Name: "Healthy Anime"},
+				{ID: 2, Name: "Broken XML"},
+				{ID: 3, Name: "Dead Server"},
 				{ID: 4, Name: "No URL"},
 			}, nil
 		},
 	}
-	handler := newTestRSSHealthHandler(repo)
+	handler := newTestRSSHealthHandler(repo,
+		model.SubscriptionFeed{ID: 1, SubscriptionID: 1, RSSURL: healthyFeed.URL, Enabled: true},
+		model.SubscriptionFeed{ID: 2, SubscriptionID: 2, RSSURL: unhealthyFeed.URL, Enabled: true},
+		model.SubscriptionFeed{ID: 3, SubscriptionID: 3, RSSURL: deadFeed.URL, Enabled: true},
+	)
 
 	w := performRSSHealthRequest(handler.CheckAll, http.MethodGet, "/rss/health", "/rss/health")
 
@@ -162,12 +169,15 @@ func TestRSSHealthHandler_GetDeadReturnsOnlyDeadSubscriptions(t *testing.T) {
 	repo := &mockSubscriptionRepo{
 		getActiveFunc: func() ([]model.Subscription, error) {
 			return []model.Subscription{
-				{ID: 1, Name: "Healthy Anime", RssURL: healthyFeed.URL},
-				{ID: 2, Name: "Dead Server", RssURL: deadFeed.URL},
+				{ID: 1, Name: "Healthy Anime"},
+				{ID: 2, Name: "Dead Server"},
 			}, nil
 		},
 	}
-	handler := newTestRSSHealthHandler(repo)
+	handler := newTestRSSHealthHandler(repo,
+		model.SubscriptionFeed{ID: 1, SubscriptionID: 1, RSSURL: healthyFeed.URL, Enabled: true},
+		model.SubscriptionFeed{ID: 2, SubscriptionID: 2, RSSURL: deadFeed.URL, Enabled: true},
+	)
 
 	w := performRSSHealthRequest(handler.GetDead, http.MethodGet, "/rss/dead", "/rss/dead")
 
@@ -256,8 +266,32 @@ func TestRSSHealthHandler_TriggerCheck(t *testing.T) {
 	})
 }
 
-func newTestRSSHealthHandler(repo *mockSubscriptionRepo) *RSSHealthHandler {
-	return NewRSSHealthHandler(rss.NewHealthChecker(repo), repo)
+type rssHealthFeedRepo struct {
+	feedsBySubscription map[uint][]model.SubscriptionFeed
+}
+
+func (r *rssHealthFeedRepo) ListBySubscription(subscriptionID uint) ([]model.SubscriptionFeed, error) {
+	return append([]model.SubscriptionFeed(nil), r.feedsBySubscription[subscriptionID]...), nil
+}
+
+func (r *rssHealthFeedRepo) ListEnabledBySubscriptionIDs(subscriptionIDs []uint) ([]model.SubscriptionFeed, error) {
+	feeds := make([]model.SubscriptionFeed, 0)
+	for _, subscriptionID := range subscriptionIDs {
+		for _, feed := range r.feedsBySubscription[subscriptionID] {
+			if feed.Enabled {
+				feeds = append(feeds, feed)
+			}
+		}
+	}
+	return feeds, nil
+}
+
+func newTestRSSHealthHandler(repo *mockSubscriptionRepo, feeds ...model.SubscriptionFeed) *RSSHealthHandler {
+	feedRepo := &rssHealthFeedRepo{feedsBySubscription: make(map[uint][]model.SubscriptionFeed)}
+	for _, feed := range feeds {
+		feedRepo.feedsBySubscription[feed.SubscriptionID] = append(feedRepo.feedsBySubscription[feed.SubscriptionID], feed)
+	}
+	return NewRSSHealthHandler(rss.NewHealthChecker(repo, feedRepo), repo)
 }
 
 func performRSSHealthRequest(handler gin.HandlerFunc, method, target, route string) *httptest.ResponseRecorder {

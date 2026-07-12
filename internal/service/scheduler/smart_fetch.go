@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -63,13 +64,15 @@ type SubscriptionFetchStatus struct {
 type SmartFetchFilter struct {
 	strategy     *SmartFetchStrategy
 	downloadRepo repository.DownloadRepository
+	episodeRepo  repository.EpisodeRepository
 }
 
 // NewSmartFetchFilter 创建智能拉取过滤器
-func NewSmartFetchFilter(downloadRepo repository.DownloadRepository) *SmartFetchFilter {
+func NewSmartFetchFilter(downloadRepo repository.DownloadRepository, episodeRepo repository.EpisodeRepository) *SmartFetchFilter {
 	return &SmartFetchFilter{
 		strategy:     DefaultSmartFetchStrategy(),
 		downloadRepo: downloadRepo,
+		episodeRepo:  episodeRepo,
 	}
 }
 
@@ -134,12 +137,12 @@ func (f *SmartFetchFilter) SetStrategy(strategy *SmartFetchStrategy) {
 
 // FilterSubscriptions 过滤应该拉取的订阅
 // 返回：拉取状态列表，需要更新的订阅索引列表
-func (f *SmartFetchFilter) FilterSubscriptions(subscriptions []model.Subscription) ([]SubscriptionFetchStatus, []int) {
+func (f *SmartFetchFilter) FilterSubscriptions(subscriptions []model.Subscription, pendingFeeds map[uint]bool) ([]SubscriptionFetchStatus, []int) {
 	var results []SubscriptionFetchStatus
 	var needsUpdateIndexes []int
 
 	for i := range subscriptions {
-		status, needsUpdate := f.EvaluateSubscription(&subscriptions[i])
+		status, needsUpdate := f.EvaluateSubscription(&subscriptions[i], pendingFeeds[subscriptions[i].ID])
 		results = append(results, status)
 		if needsUpdate {
 			needsUpdateIndexes = append(needsUpdateIndexes, i)
@@ -151,7 +154,7 @@ func (f *SmartFetchFilter) FilterSubscriptions(subscriptions []model.Subscriptio
 
 // EvaluateSubscription 评估单个订阅是否应该拉取
 // 返回：拉取状态，是否需要更新数据库
-func (f *SmartFetchFilter) EvaluateSubscription(sub *model.Subscription) (SubscriptionFetchStatus, bool) {
+func (f *SmartFetchFilter) EvaluateSubscription(sub *model.Subscription, hasPendingFeed bool) (SubscriptionFetchStatus, bool) {
 	status := SubscriptionFetchStatus{
 		Subscription:      sub,
 		ShouldFetch:       false,
@@ -172,6 +175,14 @@ func (f *SmartFetchFilter) EvaluateSubscription(sub *model.Subscription) (Subscr
 		return status, needsUpdate
 	}
 
+	if hasPendingFeed {
+		status.ShouldFetch = true
+		status.FetchReason = "feed_baseline_pending"
+		status.Explanation = "订阅源等待基线对账，本轮强制拉取。"
+		status.NextFetchInterval = f.strategy.NormalInterval
+		return status, needsUpdate
+	}
+
 	status.IsCompleted = f.isCompleted(sub)
 	if !status.IsCompleted && sub.CompletedAt != nil {
 		sub.CompletedAt = nil
@@ -187,6 +198,24 @@ func (f *SmartFetchFilter) EvaluateSubscription(sub *model.Subscription) (Subscr
 		status.Explanation = "智能拉取未启用，本轮按普通 RSS 检查执行。"
 		status.NextFetchInterval = f.strategy.NormalInterval
 		return status, needsUpdate
+	}
+
+	// 台账不可用时不能将订阅误判为完整，即使订阅已达到完结停止窗口。
+	var missingEpisodes []int
+	if f.strategy.CheckLocalComplete && sub.TotalEpisodes > 0 {
+		var err error
+		missingEpisodes, err = f.getMissingEpisodes(sub)
+		if err != nil {
+			logger.Error("Episode ledger unavailable for completeness check",
+				"subscription_id", sub.ID,
+				"error", err.Error())
+			status.ShouldFetch = true
+			status.FetchReason = "episode_ledger_unavailable"
+			status.Explanation = "剧集台账暂不可用，本轮保守执行拉取。"
+			status.NextFetchInterval = f.strategy.NormalInterval
+			return status, needsUpdate
+		}
+		status.MissingEpisodes = missingEpisodes
 	}
 
 	// 1. 检查是否已完结且跳过已完结
@@ -224,13 +253,6 @@ func (f *SmartFetchFilter) EvaluateSubscription(sub *model.Subscription) (Subscr
 	// 2. 检查是否在活跃窗口期（更新日前后）
 	inWindow, daysUntilAir := f.isInActiveWindow(sub)
 	status.IsInActiveWindow = inWindow
-
-	// 3. 检查本地完整性
-	var missingEpisodes []int
-	if f.strategy.CheckLocalComplete && sub.TotalEpisodes > 0 {
-		missingEpisodes = f.getMissingEpisodes(sub)
-		status.MissingEpisodes = missingEpisodes
-	}
 
 	// 决策逻辑
 	switch {
@@ -387,47 +409,39 @@ func (f *SmartFetchFilter) isInActiveWindow(sub *model.Subscription) (bool, int)
 }
 
 // getMissingEpisodes 获取缺少的集数
-func (f *SmartFetchFilter) getMissingEpisodes(sub *model.Subscription) []int {
+func (f *SmartFetchFilter) getMissingEpisodes(sub *model.Subscription) ([]int, error) {
 	if sub.TotalEpisodes <= 0 {
 		// 不知道总集数，无法判断
-		return nil
+		return nil, nil
 	}
-	if f.downloadRepo == nil {
-		logger.Warn("Skipping local completeness check because download repository is nil",
-			"subscription_id", sub.ID)
-		return nil
+	if f.episodeRepo == nil {
+		return nil, errors.New("episode repository is nil")
 	}
-
-	// 获取已下载的集数
-	downloads, err := f.downloadRepo.ListBySubscriptionID(sub.ID)
+	episodes, err := f.episodeRepo.ListBySubscription(sub.ID)
 	if err != nil {
-		logger.Error("Failed to get downloads for completeness check",
-			"subscription_id", sub.ID,
-			"error", err.Error())
-		return nil
+		return nil, fmt.Errorf("list episode ledger: %w", err)
 	}
 
-	// 构建已下载集数集合
-	downloadedEpisodes := make(map[int]bool)
-	for _, d := range downloads {
-		if d.Episode > 0 && (d.Status == "completed" || d.Status == "downloading") {
-			downloadedEpisodes[d.Episode] = true
+	statusByEpisode := make(map[int]string, len(episodes))
+	for _, ledger := range episodes {
+		if ledger.Episode >= 1 && ledger.Episode <= sub.TotalEpisodes {
+			statusByEpisode[ledger.Episode] = ledger.Status
 		}
 	}
-
-	// 计算偏移
-	offset := sub.EpisodeOffset
-
-	// 找出缺失的集数
 	var missing []int
-	for ep := 1; ep <= sub.TotalEpisodes; ep++ {
-		actualEp := ep + offset
-		if !downloadedEpisodes[actualEp] {
-			missing = append(missing, ep)
+	for episode := 1; episode <= sub.TotalEpisodes; episode++ {
+		switch statusByEpisode[episode] {
+		case model.EpisodeStatusDownloading,
+			model.EpisodeStatusDownloaded,
+			model.EpisodeStatusMarkedDownloaded,
+			model.EpisodeStatusIgnored:
+			continue
+		default:
+			missing = append(missing, episode)
 		}
 	}
 
-	return missing
+	return missing, nil
 }
 
 // parseWeekday 解析星期字符串为数字 (0-6)

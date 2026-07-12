@@ -58,6 +58,9 @@ func (m *mockQBittorrentClient) AddTorrent(torrentURL, downloadPath, category st
 	}
 	return "new-hash-123", nil
 }
+func (m *mockQBittorrentClient) AddTorrentExclusive(torrentURL, downloadPath, category, expectedHash string) (string, error) {
+	return m.AddTorrent(torrentURL, downloadPath, category)
+}
 
 func (m *mockQBittorrentClient) GetTorrentInfo(hash string) (*downloader.TorrentInfo, error) {
 	return nil, nil
@@ -77,6 +80,8 @@ func (m *mockQBittorrentClient) SetLocation(hash string, location string) error 
 func (m *mockQBittorrentClient) RenameTorrentFile(hash string, oldPath string, newPath string) error {
 	return nil
 }
+func (m *mockQBittorrentClient) PauseTorrent(hash string) error  { return nil }
+func (m *mockQBittorrentClient) ResumeTorrent(hash string) error { return nil }
 func (m *mockQBittorrentClient) GetTorrentFiles(hash string) ([]downloader.TorrentFile, error) {
 	return nil, nil
 }
@@ -185,7 +190,7 @@ func TestRetryHandler_Returns404IfDownloadNotFound(t *testing.T) {
 	}
 }
 
-func TestRetryHandler_CallsDeleteTorrentWhenHashExists(t *testing.T) {
+func TestRetryHandlerQueuesCleanupWithoutDeletingTorrent(t *testing.T) {
 	db, downloadRepo, configRepo := setupRetryTest(t)
 	mockQB := &mockQBittorrentClient{}
 	handler := NewDownloadHandler(downloadRepo, mockQB, configRepo)
@@ -224,17 +229,8 @@ func TestRetryHandler_CallsDeleteTorrentWhenHashExists(t *testing.T) {
 		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Verify explicit payload deletion was called.
-	if !mockQB.deleteWithPayloadCalled {
-		t.Error("expected DeleteTorrentWithPayload to be called")
-	}
-
-	if !mockQB.lastDeleteFiles {
-		t.Error("expected retry to request payload deletion")
-	}
-
-	if mockQB.deletedHash != "test-hash-abc123" {
-		t.Errorf("expected deleted hash to be 'test-hash-abc123', got %q", mockQB.deletedHash)
+	if mockQB.deleteWithPayloadCalled {
+		t.Error("retry handler must leave payload cleanup to DownloadMonitor")
 	}
 }
 
@@ -304,16 +300,16 @@ func TestRetryHandler_ResetsRetryFields(t *testing.T) {
 		t.Errorf("expected LastError to be empty, got %q", updated.LastError)
 	}
 
-	if updated.Status != "downloading" {
-		t.Errorf("expected Status to be 'downloading', got %q", updated.Status)
+	if updated.Status != model.DownloadStatusRetryCleanup {
+		t.Errorf("expected Status to be retry_cleanup, got %q", updated.Status)
 	}
 
-	if updated.TorrentHash != "new-hash-123" {
-		t.Errorf("expected TorrentHash to be updated to 'new-hash-123', got %q", updated.TorrentHash)
+	if updated.TorrentHash != "test-hash-1" {
+		t.Errorf("expected old TorrentHash cleanup checkpoint, got %q", updated.TorrentHash)
 	}
 }
 
-func TestRetryHandler_CallsAddTorrent(t *testing.T) {
+func TestRetryHandlerLeavesFirstAddToDownloadMonitor(t *testing.T) {
 	db, downloadRepo, configRepo := setupRetryTest(t)
 	mockQB := &mockQBittorrentClient{}
 	handler := NewDownloadHandler(downloadRepo, mockQB, configRepo)
@@ -351,22 +347,12 @@ func TestRetryHandler_CallsAddTorrent(t *testing.T) {
 		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Verify AddTorrent was called with correct parameters
-	if !mockQB.addCalled {
-		t.Error("expected AddTorrent to be called")
-	}
-
-	if mockQB.addedURL != "magnet:test-retry-url" {
-		t.Errorf("expected added URL to be 'magnet:test-retry-url', got %q", mockQB.addedURL)
-	}
-
-	// Should contain the anime name in the path
-	if mockQB.addedPath == "" {
-		t.Error("expected download path to be set")
+	if mockQB.addCalled {
+		t.Error("retry handler must leave qBittorrent AddTorrent to DownloadMonitor")
 	}
 }
 
-func TestRetryHandler_OnAddTorrentSuccess_UpdatesStatusToDownloading(t *testing.T) {
+func TestRetryHandlerQueuesPendingEvenIfAddWouldSucceed(t *testing.T) {
 	db, downloadRepo, configRepo := setupRetryTest(t)
 	mockQB := &mockQBittorrentClient{
 		addTorrentFunc: func(torrentURL, downloadPath, category string) (string, error) {
@@ -408,22 +394,22 @@ func TestRetryHandler_OnAddTorrentSuccess_UpdatesStatusToDownloading(t *testing.
 		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Verify status updated to downloading
+	// The handler does not invoke the configured AddTorrent result.
 	updated, err := downloadRepo.GetByID(testDownload.ID)
 	if err != nil {
 		t.Fatalf("failed to get updated download: %v", err)
 	}
 
-	if updated.Status != "downloading" {
-		t.Errorf("expected Status to be 'downloading', got %q", updated.Status)
+	if updated.Status != model.DownloadStatusRetryCleanup {
+		t.Errorf("expected Status to be retry_cleanup, got %q", updated.Status)
 	}
 
-	if updated.TorrentHash != "success-hash-xyz" {
-		t.Errorf("expected TorrentHash to be 'success-hash-xyz', got %q", updated.TorrentHash)
+	if updated.TorrentHash != "old-hash" {
+		t.Errorf("expected old hash cleanup checkpoint, got %q", updated.TorrentHash)
 	}
 }
 
-func TestRetryHandler_OnAddTorrentFailure_KeepsFailedStatus(t *testing.T) {
+func TestRetryHandlerQueuesPendingEvenIfAddWouldFail(t *testing.T) {
 	db, downloadRepo, configRepo := setupRetryTest(t)
 	mockQB := &mockQBittorrentClient{
 		addTorrentFunc: func(torrentURL, downloadPath, category string) (string, error) {
@@ -460,23 +446,22 @@ func TestRetryHandler_OnAddTorrentFailure_KeepsFailedStatus(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	// Validate response - should still return 200 but with failure indication
+	// AddTorrent is deferred, so the configured qB failure is not observed here.
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Verify status stays failed and error is recorded
 	updated, err := downloadRepo.GetByID(testDownload.ID)
 	if err != nil {
 		t.Fatalf("failed to get updated download: %v", err)
 	}
 
-	if updated.Status != "failed" {
-		t.Errorf("expected Status to remain 'failed', got %q", updated.Status)
+	if updated.Status != model.DownloadStatusRetryCleanup {
+		t.Errorf("expected Status to be retry_cleanup, got %q", updated.Status)
 	}
 
-	if updated.LastError != "qBittorrent rejected torrent" {
-		t.Errorf("expected LastError to be set, got %q", updated.LastError)
+	if updated.LastError != "" {
+		t.Errorf("expected LastError to be cleared for retry, got %q", updated.LastError)
 	}
 }
 
@@ -548,12 +533,12 @@ func TestRetryHandler_NoQBClient_SkipsTorrentOperations(t *testing.T) {
 		t.Errorf("expected RetryCount to be reset to 0, got %d", updated.RetryCount)
 	}
 
-	if updated.Status != "pending" {
-		t.Errorf("expected Status to be 'pending' when no qbClient, got %q", updated.Status)
+	if updated.Status != model.DownloadStatusRetryCleanup {
+		t.Errorf("expected Status to be retry_cleanup when no qbClient, got %q", updated.Status)
 	}
 }
 
-func TestRetryHandler_DeleteTorrentError_Ignored(t *testing.T) {
+func TestRetryHandlerDoesNotInvokeDeleteTorrent(t *testing.T) {
 	db, downloadRepo, configRepo := setupRetryTest(t)
 	mockQB := &mockQBittorrentClient{
 		deleteTorrentFunc: func(hash string, deleteFiles bool) error {
@@ -595,12 +580,7 @@ func TestRetryHandler_DeleteTorrentError_Ignored(t *testing.T) {
 		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Verify retry still proceeded after explicit payload deletion failed.
-	if !mockQB.deleteWithPayloadCalled {
-		t.Error("expected DeleteTorrentWithPayload to be called")
-	}
-
-	if !mockQB.lastDeleteFiles {
-		t.Error("expected retry to request payload deletion")
+	if mockQB.deleteWithPayloadCalled {
+		t.Error("retry handler must not call DeleteTorrentWithPayload")
 	}
 }

@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vue-tsc && vite build",
     "preview": "vite preview",
-    "test:episodes": "node --experimental-strip-types --test tests/episodes.test.ts",
+    "test:episodes": "node --experimental-strip-types --test tests/episodes.test.ts tests/episode-ledger.test.ts",
+    "test:subscription-feeds": "node --experimental-strip-types --test tests/subscription-feeds.test.ts",
     "test:diagnostics": "node --experimental-strip-types --test tests/subscription-diagnostics.test.ts"
   },
   "dependencies": {

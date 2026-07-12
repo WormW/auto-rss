@@ -5,19 +5,9 @@ import (
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
-
-func openMigrationTestDB(t *testing.T) *gorm.DB {
-	t.Helper()
-
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	require.NoError(t, err)
-	return db
-}
 
 func TestMigrateRSSTimeout(t *testing.T) {
 	// Create in-memory database for testing
@@ -135,119 +125,518 @@ func TestRunMigrationsAddsDiskCleanupFailureColumns(t *testing.T) {
 	}
 }
 
+func TestRunMigrationsAddsReplacementRecoverySnapshotColumnsToExistingLedger(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("Failed to connect to test database: %v", err)
+	}
+	if err := db.Exec(`CREATE TABLE episode_resource_candidates (
+		id integer PRIMARY KEY AUTOINCREMENT,
+		subscription_episode_id integer NOT NULL,
+		resource_key text,
+		status text,
+		replacement_stage text
+	)`).Error; err != nil {
+		t.Fatalf("create legacy candidate table: %v", err)
+	}
+	if err := db.AutoMigrate(&MigrationRecord{}); err != nil {
+		t.Fatalf("create migration table: %v", err)
+	}
+	for _, id := range []string{
+		"202504090001", "202504090002", "202504230001", "202606120001",
+		"202606150001", "202606150002", "202606180001", "202607110001",
+	} {
+		if err := db.Create(&MigrationRecord{ID: id}).Error; err != nil {
+			t.Fatalf("seed migration %s: %v", id, err)
+		}
+	}
+
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+	if !db.Migrator().HasColumn(&model.EpisodeResourceCandidate{}, "old_download_id") {
+		t.Fatal("expected old_download_id recovery snapshot column")
+	}
+	if !db.Migrator().HasColumn(&model.EpisodeResourceCandidate{}, "old_torrent_hash") {
+		t.Fatal("expected old_torrent_hash recovery snapshot column")
+	}
+	if !db.Migrator().HasIndex(&model.EpisodeResourceCandidate{}, "idx_episode_candidate_single_replacing") {
+		t.Fatal("expected unique replacing candidate index")
+	}
+	if !db.Migrator().HasColumn(&model.Download{}, "replacement_torrent_owned") {
+		t.Fatal("expected replacement_torrent_owned ownership marker")
+	}
+}
+
+func TestRunMigrationsAddsReplacementOwnershipAfterRecoveryMigrationApplied(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("Failed to connect to test database: %v", err)
+	}
+	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}, &MigrationRecord{}); err != nil {
+		t.Fatalf("create pre-ownership schema: %v", err)
+	}
+	if err := db.Migrator().DropColumn(&model.Download{}, "replacement_torrent_owned"); err != nil {
+		t.Fatalf("drop ownership column to simulate 120001 schema: %v", err)
+	}
+	for _, id := range []string{
+		"202504090001", "202504090002", "202504230001", "202606120001",
+		"202606150001", "202606150002", "202606180001", "202607110001", "202607120001",
+	} {
+		if err := db.Create(&MigrationRecord{ID: id}).Error; err != nil {
+			t.Fatalf("seed migration %s: %v", id, err)
+		}
+	}
+
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+	if !db.Migrator().HasColumn(&model.Download{}, "replacement_torrent_owned") {
+		t.Fatal("expected replacement_torrent_owned from a migration after 120001")
+	}
+	version, err := GetCurrentVersion(db)
+	if err != nil {
+		t.Fatalf("GetCurrentVersion failed: %v", err)
+	}
+	if version != "202607120002" {
+		t.Fatalf("migration version = %q, want 202607120002", version)
+	}
+}
+
 func TestRunMigrationsBackfillsEpisodeLedgerWithoutInferringGaps(t *testing.T) {
-	db := openMigrationTestDB(t)
-	require.NoError(t, db.AutoMigrate(&model.Subscription{}, &model.Download{}))
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("Failed to connect to test database: %v", err)
+	}
+	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}); err != nil {
+		t.Fatalf("Failed to migrate legacy schema: %v", err)
+	}
 
-	sub := model.Subscription{Name: "Offset Anime", RssURL: "https://old.test/rss", EpisodeOffset: 170, CurrentEpisode: 173}
-	require.NoError(t, db.Create(&sub).Error)
-	require.NoError(t, db.Create(&model.Download{
-		SubscriptionID: sub.ID,
-		Episode:        171,
-		Title:          "Offset Anime - 171",
-		TorrentURL:     "https://old.test/171.torrent",
-		TorrentHash:    "hash-171",
-		Status:         model.DownloadStatusCompleted,
-		RenamedPath:    "/media/Offset Anime S01E01.mkv",
-	}).Error)
-	require.NoError(t, db.Create(&model.Download{
-		SubscriptionID: sub.ID,
-		Episode:        173,
-		Title:          "Offset Anime - 173",
-		TorrentURL:     "https://old.test/173.torrent",
-		TorrentHash:    "hash-173",
-		Status:         model.DownloadStatusDownloading,
-	}).Error)
+	subscription := model.Subscription{
+		Name:           "Offset Show",
+		EpisodeOffset:  170,
+		CurrentEpisode: 173,
+	}
+	if err := db.Create(&subscription).Error; err != nil {
+		t.Fatalf("Failed to create subscription: %v", err)
+	}
+	downloadedAt := time.Now().Add(-time.Hour)
+	downloads := []model.Download{
+		{
+			SubscriptionID: subscription.ID,
+			Title:          "Offset Show 171",
+			Episode:        171,
+			TorrentURL:     "https://example.test/offset-171.torrent",
+			TorrentHash:    "offset-171",
+			RenamedPath:    "/library/Offset Show/Offset Show S01E01.mkv",
+			Status:         model.DownloadStatusCompleted,
+			DownloadedAt:   &downloadedAt,
+		},
+		{
+			SubscriptionID: subscription.ID,
+			Title:          "Offset Show 173",
+			Episode:        173,
+			TorrentURL:     "https://example.test/offset-173.torrent",
+			TorrentHash:    "offset-173",
+			Status:         model.DownloadStatusDownloading,
+		},
+	}
+	if err := db.Create(&downloads).Error; err != nil {
+		t.Fatalf("Failed to create downloads: %v", err)
+	}
 
-	require.NoError(t, RunMigrations(db))
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
 
 	var episodes []model.SubscriptionEpisode
-	require.NoError(t, db.Order("episode").Find(&episodes).Error)
-	require.Len(t, episodes, 2)
-	assert.Equal(t, 1, episodes[0].Episode)
-	assert.Equal(t, model.EpisodeStatusDownloaded, episodes[0].Status)
-	assert.Equal(t, 3, episodes[1].Episode)
-	assert.Equal(t, model.EpisodeStatusDownloading, episodes[1].Status)
+	if err := db.Order("episode ASC").Find(&episodes).Error; err != nil {
+		t.Fatalf("Failed to load episode ledger: %v", err)
+	}
+	if len(episodes) != 2 {
+		t.Fatalf("expected only downloaded/active episodes, got %d: %#v", len(episodes), episodes)
+	}
+	if episodes[0].Episode != 1 || episodes[0].Status != model.EpisodeStatusDownloaded {
+		t.Fatalf("episode 1 = (%d, %q), want (1, %q)", episodes[0].Episode, episodes[0].Status, model.EpisodeStatusDownloaded)
+	}
+	if episodes[1].Episode != 3 || episodes[1].Status != model.EpisodeStatusDownloading {
+		t.Fatalf("episode 3 = (%d, %q), want (3, %q)", episodes[1].Episode, episodes[1].Status, model.EpisodeStatusDownloading)
+	}
 }
 
 func TestRunMigrationsMergesSameEpisodeResourcesDeterministically(t *testing.T) {
-	db := openMigrationTestDB(t)
-	require.NoError(t, db.AutoMigrate(&model.Subscription{}, &model.Download{}))
-
-	sub := model.Subscription{Name: "Merge Anime", RssURL: "https://merge.test/rss"}
-	require.NoError(t, db.Create(&sub).Error)
-	require.NoError(t, db.Create(&model.Download{
-		SubscriptionID: sub.ID,
-		Episode:        1,
-		Title:          "E01 pending",
-		TorrentURL:     "https://merge.test/pending",
-		TorrentHash:    "pending-hash",
-		Status:         model.DownloadStatusDownloading,
-	}).Error)
-	completed := model.Download{
-		SubscriptionID: sub.ID,
-		Episode:        1,
-		Title:          "E01 completed",
-		TorrentURL:     "https://merge.test/completed",
-		TorrentHash:    "completed-hash",
-		Status:         model.DownloadStatusCompleted,
-		RenamedPath:    "/media/E01.mkv",
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("Failed to connect to test database: %v", err)
 	}
-	require.NoError(t, db.Create(&completed).Error)
+	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}); err != nil {
+		t.Fatalf("Failed to migrate legacy schema: %v", err)
+	}
 
-	require.NoError(t, RunMigrations(db))
+	subscription := model.Subscription{Name: "Duplicate Resources"}
+	if err := db.Create(&subscription).Error; err != nil {
+		t.Fatalf("Failed to create subscription: %v", err)
+	}
+	downloads := []model.Download{
+		{
+			SubscriptionID: subscription.ID,
+			Title:          "Downloading resource",
+			Episode:        1,
+			TorrentURL:     "https://example.test/downloading.torrent",
+			TorrentHash:    "downloading-resource",
+			Status:         model.DownloadStatusDownloading,
+		},
+		{
+			SubscriptionID: subscription.ID,
+			Title:          "Completed resource",
+			Episode:        1,
+			TorrentURL:     "https://example.test/completed.torrent",
+			TorrentHash:    "completed-resource",
+			RenamedPath:    "/library/Duplicate Resources/Duplicate Resources S01E01.mkv",
+			Status:         model.DownloadStatusCompleted,
+		},
+	}
+	if err := db.Create(&downloads).Error; err != nil {
+		t.Fatalf("Failed to create downloads: %v", err)
+	}
+
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
 
 	var episodes []model.SubscriptionEpisode
-	require.NoError(t, db.Find(&episodes).Error)
-	require.Len(t, episodes, 1)
-	assert.Equal(t, model.EpisodeStatusDownloaded, episodes[0].Status)
-	assert.Equal(t, completed.ID, *episodes[0].ActiveDownloadID)
-	assert.Equal(t, "completed-hash", episodes[0].ActiveTorrentHash)
-	assert.Equal(t, "https://merge.test/completed", episodes[0].ActiveTorrentURL)
+	if err := db.Find(&episodes).Error; err != nil {
+		t.Fatalf("Failed to load episode ledger: %v", err)
+	}
+	if len(episodes) != 1 {
+		t.Fatalf("expected one merged episode, got %d", len(episodes))
+	}
+	episode := episodes[0]
+	if episode.Status != model.EpisodeStatusDownloaded {
+		t.Fatalf("status = %q, want %q", episode.Status, model.EpisodeStatusDownloaded)
+	}
+	if episode.ActiveDownloadID == nil || *episode.ActiveDownloadID != downloads[1].ID {
+		t.Fatalf("active download = %v, want %d", episode.ActiveDownloadID, downloads[1].ID)
+	}
+	if episode.ActiveTorrentHash != downloads[1].TorrentHash ||
+		episode.ActiveTorrentURL != downloads[1].TorrentURL ||
+		episode.ActiveTitle != downloads[1].Title {
+		t.Fatalf("active resource = (%q, %q, %q), want completed resource", episode.ActiveTorrentHash, episode.ActiveTorrentURL, episode.ActiveTitle)
+	}
 }
 
 func TestRunMigrationsCreatesMissingRowsWithoutMarkingCurrentRangeDownloaded(t *testing.T) {
-	db := openMigrationTestDB(t)
-	require.NoError(t, db.AutoMigrate(&model.Subscription{}, &model.Download{}))
-
-	sub := model.Subscription{
-		Name:           "Known Range",
-		RssURL:         "https://range.test/rss",
-		CurrentEpisode: 3,
-		LatestEpisode:  3,
-		TotalEpisodes:  3,
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("Failed to connect to test database: %v", err)
 	}
-	require.NoError(t, db.Create(&sub).Error)
+	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}); err != nil {
+		t.Fatalf("Failed to migrate legacy schema: %v", err)
+	}
 
-	require.NoError(t, RunMigrations(db))
+	subscription := model.Subscription{
+		Name:           "Known Range",
+		TotalEpisodes:  3,
+		LatestEpisode:  3,
+		CurrentEpisode: 3,
+	}
+	if err := db.Create(&subscription).Error; err != nil {
+		t.Fatalf("Failed to create subscription: %v", err)
+	}
+
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
 
 	var episodes []model.SubscriptionEpisode
-	require.NoError(t, db.Order("episode").Find(&episodes).Error)
-	require.Len(t, episodes, 3)
-	for index, ledger := range episodes {
-		assert.Equal(t, index+1, ledger.Episode)
-		assert.Equal(t, model.EpisodeStatusMissing, ledger.Status)
+	if err := db.Order("episode ASC").Find(&episodes).Error; err != nil {
+		t.Fatalf("Failed to load episode ledger: %v", err)
+	}
+	if len(episodes) != 3 {
+		t.Fatalf("expected 3 missing episodes, got %d", len(episodes))
+	}
+	for i, episode := range episodes {
+		wantEpisode := i + 1
+		if episode.Episode != wantEpisode || episode.Status != model.EpisodeStatusMissing {
+			t.Fatalf("episode[%d] = (%d, %q), want (%d, %q)", i, episode.Episode, episode.Status, wantEpisode, model.EpisodeStatusMissing)
+		}
 	}
 }
 
 func TestRunMigrationsEpisodeLedgerConstraintsAreIdempotent(t *testing.T) {
-	db := openMigrationTestDB(t)
-	require.NoError(t, RunMigrations(db))
-	require.NoError(t, RunMigrations(db))
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("Failed to connect to test database: %v", err)
+	}
+	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}); err != nil {
+		t.Fatalf("Failed to migrate legacy schema: %v", err)
+	}
 
-	first := model.SubscriptionEpisode{SubscriptionID: 1, Episode: 1, Status: model.EpisodeStatusMissing, StatusSource: "test"}
-	require.NoError(t, db.Create(&first).Error)
-	duplicate := model.SubscriptionEpisode{SubscriptionID: 1, Episode: 1, Status: model.EpisodeStatusMissing, StatusSource: "test"}
-	require.Error(t, db.Create(&duplicate).Error)
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("first RunMigrations failed: %v", err)
+	}
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("second RunMigrations failed: %v", err)
+	}
+
+	first := model.SubscriptionEpisode{
+		SubscriptionID: 1,
+		Episode:        1,
+		Status:         model.EpisodeStatusMissing,
+		StatusSource:   model.EpisodeStatusSourceMigration,
+	}
+	if err := db.Create(&first).Error; err != nil {
+		t.Fatalf("Failed to create first episode: %v", err)
+	}
+	duplicate := first
+	duplicate.ID = 0
+	if err := db.Create(&duplicate).Error; err == nil {
+		t.Fatal("expected duplicate subscription_id + episode insert to fail")
+	}
 }
 
 func TestRunMigrationsMarksExistingRSSSubscriptionsForSafeBaseline(t *testing.T) {
-	db := openMigrationTestDB(t)
-	require.NoError(t, db.AutoMigrate(&model.Subscription{}, &model.Download{}))
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("Failed to connect to test database: %v", err)
+	}
+	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}); err != nil {
+		t.Fatalf("Failed to migrate legacy schema: %v", err)
+	}
 
-	sub := model.Subscription{Name: "Existing", RssURL: "https://existing.test/rss"}
-	require.NoError(t, db.Create(&sub).Error)
-	require.NoError(t, RunMigrations(db))
-	require.NoError(t, db.First(&sub, sub.ID).Error)
-	assert.True(t, sub.RSSBaselinePending)
+	subscription := model.Subscription{
+		Name:   "Existing RSS",
+		RssURL: "https://example.test/feed.xml",
+	}
+	if err := db.Create(&subscription).Error; err != nil {
+		t.Fatalf("Failed to create subscription: %v", err)
+	}
+
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+
+	var migrated model.Subscription
+	if err := db.First(&migrated, subscription.ID).Error; err != nil {
+		t.Fatalf("Failed to load subscription: %v", err)
+	}
+	if !migrated.RSSBaselinePending {
+		t.Fatal("expected existing RSS subscription to require a safe baseline")
+	}
+}
+
+func TestBackfillSubscriptionEpisodesFailedDownloadRemainsUnclaimed(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("Failed to connect to test database: %v", err)
+	}
+	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}); err != nil {
+		t.Fatalf("Failed to migrate legacy schema: %v", err)
+	}
+
+	subscription := model.Subscription{Name: "Failed Download"}
+	if err := db.Create(&subscription).Error; err != nil {
+		t.Fatalf("Failed to create subscription: %v", err)
+	}
+	downloadedAt := time.Now().Add(-time.Hour)
+	download := model.Download{
+		SubscriptionID: subscription.ID,
+		Title:          "Failed Download 1",
+		Episode:        1,
+		TorrentURL:     "https://example.test/failed.torrent",
+		TorrentHash:    "failed-resource",
+		Status:         model.DownloadStatusFailed,
+		DownloadedAt:   &downloadedAt,
+	}
+	if err := db.Create(&download).Error; err != nil {
+		t.Fatalf("Failed to create failed download: %v", err)
+	}
+
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+
+	var episode model.SubscriptionEpisode
+	if err := db.Where("subscription_id = ? AND episode = ?", subscription.ID, 1).First(&episode).Error; err != nil {
+		t.Fatalf("Failed to load episode ledger: %v", err)
+	}
+	if episode.Status != model.EpisodeStatusMissing {
+		t.Fatalf("status = %q, want %q", episode.Status, model.EpisodeStatusMissing)
+	}
+	if episode.ActiveDownloadID != nil {
+		t.Fatalf("active download = %v, want nil", episode.ActiveDownloadID)
+	}
+	if episode.ActiveTorrentHash != "" || episode.ActiveTorrentURL != "" || episode.ActiveTitle != "" {
+		t.Fatalf("failed download remained active: hash=%q url=%q title=%q", episode.ActiveTorrentHash, episode.ActiveTorrentURL, episode.ActiveTitle)
+	}
+	if episode.DownloadedAt != nil {
+		t.Fatalf("downloaded_at = %v, want nil", episode.DownloadedAt)
+	}
+}
+
+func TestBackfillSubscriptionEpisodesRollsBackAllChangesOnFailure(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("Failed to connect to test database: %v", err)
+	}
+	if err := db.AutoMigrate(
+		&model.Subscription{},
+		&model.Download{},
+		&model.SubscriptionEpisode{},
+	); err != nil {
+		t.Fatalf("Failed to migrate schema: %v", err)
+	}
+
+	subscription := model.Subscription{
+		Name:   "Transactional Backfill",
+		RssURL: "https://example.test/transactional.xml",
+	}
+	if err := db.Create(&subscription).Error; err != nil {
+		t.Fatalf("Failed to create subscription: %v", err)
+	}
+	download := model.Download{
+		SubscriptionID: subscription.ID,
+		Title:          "Transactional Backfill 1",
+		Episode:        1,
+		TorrentURL:     "https://example.test/transactional-1.torrent",
+		TorrentHash:    "transactional-1",
+		Status:         model.DownloadStatusCompleted,
+	}
+	if err := db.Create(&download).Error; err != nil {
+		t.Fatalf("Failed to create download: %v", err)
+	}
+	if err := db.Exec(`
+		CREATE TRIGGER fail_rss_baseline
+		BEFORE UPDATE OF rss_baseline_pending ON subscriptions
+		WHEN NEW.rss_baseline_pending = 1
+		BEGIN
+			SELECT RAISE(FAIL, 'forced baseline failure');
+		END
+	`).Error; err != nil {
+		t.Fatalf("Failed to create failure trigger: %v", err)
+	}
+
+	if err := backfillSubscriptionEpisodes(db); err == nil {
+		t.Fatal("expected backfill to fail while updating RSS baseline")
+	}
+
+	var episodeCount int64
+	if err := db.Model(&model.SubscriptionEpisode{}).Count(&episodeCount).Error; err != nil {
+		t.Fatalf("Failed to count episode ledger: %v", err)
+	}
+	if episodeCount != 0 {
+		t.Fatalf("episode ledger count = %d, want 0 after rollback", episodeCount)
+	}
+	var reloaded model.Subscription
+	if err := db.First(&reloaded, subscription.ID).Error; err != nil {
+		t.Fatalf("Failed to reload subscription: %v", err)
+	}
+	if reloaded.RSSBaselinePending {
+		t.Fatal("RSS baseline marker should be rolled back")
+	}
+}
+
+func TestRunMigrationsBackfillsDefaultSubscriptionFeed(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("Failed to connect to test database: %v", err)
+	}
+	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}); err != nil {
+		t.Fatalf("Failed to migrate legacy schema: %v", err)
+	}
+
+	waterline := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	subscription := model.Subscription{
+		Name:               "Offset Anime",
+		RssURL:             " https://EXAMPLE.test:443/feed?b=2&a=1 ",
+		Fansub:             "Group A",
+		EpisodeOffset:      100,
+		LastRSSPubTime:     &waterline,
+		RSSBaselinePending: true,
+		Status:             "active",
+		Enabled:            true,
+	}
+	if err := db.Create(&subscription).Error; err != nil {
+		t.Fatalf("Failed to create subscription: %v", err)
+	}
+
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+
+	var feeds []model.SubscriptionFeed
+	if err := db.Find(&feeds).Error; err != nil {
+		t.Fatalf("Failed to load subscription feeds: %v", err)
+	}
+	if len(feeds) != 1 {
+		t.Fatalf("feed count = %d, want 1", len(feeds))
+	}
+	feed := feeds[0]
+	if feed.SubscriptionID != subscription.ID || feed.Name != "Group A" || feed.Fansub != "Group A" {
+		t.Fatalf("unexpected feed ownership: %#v", feed)
+	}
+	if feed.EpisodeOffset != 100 {
+		t.Fatalf("episode offset = %d, want 100", feed.EpisodeOffset)
+	}
+	if feed.LastRSSPubTime == nil || !feed.LastRSSPubTime.Equal(waterline) {
+		t.Fatalf("waterline = %v, want %v", feed.LastRSSPubTime, waterline)
+	}
+	if !feed.BaselinePending {
+		t.Fatal("backfilled feed must inherit the subscription baseline marker")
+	}
+	if feed.RSSURLNormalized != "https://example.test/feed?a=1&b=2" {
+		t.Fatalf("normalized URL = %q", feed.RSSURLNormalized)
+	}
+}
+
+func TestRunMigrationsSubscriptionFeedBackfillIsIdempotent(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("Failed to connect to test database: %v", err)
+	}
+	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}); err != nil {
+		t.Fatalf("Failed to migrate legacy schema: %v", err)
+	}
+	subscription := model.Subscription{Name: "Anime", RssURL: "https://example.test/rss", Enabled: true}
+	if err := db.Create(&subscription).Error; err != nil {
+		t.Fatalf("Failed to create subscription: %v", err)
+	}
+
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("first RunMigrations failed: %v", err)
+	}
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("second RunMigrations failed: %v", err)
+	}
+
+	var count int64
+	if err := db.Model(&model.SubscriptionFeed{}).Where("subscription_id = ?", subscription.ID).Count(&count).Error; err != nil {
+		t.Fatalf("Failed to count subscription feeds: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("feed count = %d, want 1", count)
+	}
+}
+
+func TestRunMigrationsAddsNullableFeedReferences(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("Failed to connect to test database: %v", err)
+	}
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+
+	if !db.Migrator().HasColumn(&model.Download{}, "subscription_feed_id") {
+		t.Fatal("downloads.subscription_feed_id is missing")
+	}
+	if !db.Migrator().HasColumn(&model.EpisodeResourceCandidate{}, "subscription_feed_id") {
+		t.Fatal("episode_resource_candidates.subscription_feed_id is missing")
+	}
+	if !db.Migrator().HasColumn(&model.EpisodeResourceCandidate{}, "source_feed_name") {
+		t.Fatal("episode_resource_candidates.source_feed_name is missing")
+	}
+	if !db.Migrator().HasTable(&model.SubscriptionFeedSeenItem{}) {
+		t.Fatal("subscription_feed_seen_items table is missing")
+	}
 }

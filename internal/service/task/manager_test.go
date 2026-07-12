@@ -2,7 +2,9 @@ package task
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -410,4 +412,105 @@ func TestManager_GetManager_Singleton(t *testing.T) {
 	// All should be the same instance
 	assert.Same(t, m1, m2)
 	assert.Same(t, m2, m3)
+}
+
+func TestReplacementTaskTypeUsesStableAPIValue(t *testing.T) {
+	assert.Equal(t, TaskType("replacement"), TaskTypeReplacement)
+}
+
+func TestManagerStartPreparedTaskDoesNotPrepareWhileAnotherTaskRuns(t *testing.T) {
+	resetManager()
+	manager := GetManager()
+	release := make(chan struct{})
+	started, err := manager.StartTask(TaskTypeCollect, 1, "blocking", func(context.Context, *Task) error {
+		<-release
+		return nil
+	})
+	require.NoError(t, err)
+	require.NotNil(t, started)
+
+	var prepareCalls atomic.Int32
+	task, err := manager.StartPreparedTask(TaskTypeReplacement, 1, "replacement", func() error {
+		prepareCalls.Add(1)
+		return nil
+	}, func(context.Context, *Task) error {
+		return nil
+	})
+	require.ErrorIs(t, err, ErrTaskRunning)
+	assert.Nil(t, task)
+	assert.Zero(t, prepareCalls.Load())
+	close(release)
+}
+
+func TestManagerStartPreparedTaskPrepareFailureCreatesNoTask(t *testing.T) {
+	resetManager()
+	manager := GetManager()
+	prepareErr := errors.New("claim conflict")
+
+	started, err := manager.StartPreparedTask(TaskTypeReplacement, 1, "replacement", func() error {
+		return prepareErr
+	}, func(context.Context, *Task) error {
+		t.Fatal("task callback must not run after prepare failure")
+		return nil
+	})
+	require.ErrorIs(t, err, prepareErr)
+	assert.Nil(t, started)
+	assert.Nil(t, manager.GetCurrentTask())
+}
+
+func TestManagerStartPreparedTaskSuccessfulPrepareStartsExactlyOneTask(t *testing.T) {
+	resetManager()
+	manager := GetManager()
+	var prepareCalls atomic.Int32
+	callbackCalls := make(chan struct{}, 2)
+
+	started, err := manager.StartPreparedTask(TaskTypeReplacement, 1, "replacement", func() error {
+		prepareCalls.Add(1)
+		return nil
+	}, func(context.Context, *Task) error {
+		callbackCalls <- struct{}{}
+		return nil
+	})
+	require.NoError(t, err)
+	require.NotNil(t, started)
+	select {
+	case <-callbackCalls:
+	case <-time.After(time.Second):
+		t.Fatal("prepared task callback did not start")
+	}
+	select {
+	case <-callbackCalls:
+		t.Fatal("prepared task callback started more than once")
+	default:
+	}
+	assert.EqualValues(t, 1, prepareCalls.Load())
+}
+
+func TestManagerStartPreparedTaskConvertsPreparePanicAndRemainsUsable(t *testing.T) {
+	manager := NewManager()
+
+	started, err := manager.StartPreparedTask(TaskTypeReplacement, 7, "panic prepare", func() error {
+		panic("injected prepare panic")
+	}, func(context.Context, *Task) error {
+		t.Fatal("callback must not run after prepare panic")
+		return nil
+	})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "prepare task panic prepare")
+	assert.ErrorContains(t, err, "injected prepare panic")
+	assert.Nil(t, started)
+	assert.Nil(t, manager.GetCurrentTask())
+
+	callbackStarted := make(chan struct{})
+	next, err := manager.StartTask(TaskTypeCollect, 8, "after panic", func(context.Context, *Task) error {
+		close(callbackStarted)
+		return nil
+	})
+	require.NoError(t, err)
+	require.NotNil(t, next)
+	select {
+	case <-callbackStarted:
+	case <-time.After(time.Second):
+		t.Fatal("manager did not start a task after prepare panic")
+	}
 }

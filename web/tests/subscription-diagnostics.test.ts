@@ -55,6 +55,32 @@ test('单项扩展数据采用浅合并并保留其他检查指标', () => {
   assert.deepEqual(next.files.missing_episodes, [52])
 })
 
+test('RSS 单项检查更新 feed 健康结果', () => {
+  const initial = createInitialDiagnostics()
+  const feeds: SubscriptionDiagnostics['feeds'] = [{
+    subscription_feed_id: 7,
+    name: '字幕组 A',
+    fansub: 'A',
+    rss_url: 'https://example.test/a.xml',
+    status: 'healthy',
+    response_time_ms: 18
+  }]
+
+  const next = mergeDiagnosticCheck(initial, {
+    check: {
+      key: 'rss_reachability',
+      label: 'RSS 可达性',
+      checked: true,
+      status: 'healthy',
+      summary: '1 个订阅源可用',
+      detail: ''
+    },
+    feeds
+  })
+
+  assert.deepEqual(next.feeds, feeds)
+})
+
 test('汇总忽略未检查项并按已检查项计算最坏状态', () => {
   const checks = createInitialDiagnostics().checks
   checks[0] = { ...checks[0], checked: true, status: 'healthy' }
@@ -112,6 +138,7 @@ function createInitialDiagnostics(): SubscriptionDiagnostics {
     name: 'Anime',
     enabled: true,
     checked_at: '2026-07-11T12:00:00Z',
+    feeds: [],
     summary: {
       overall: 'unknown',
       checked: 0,

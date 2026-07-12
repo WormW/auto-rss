@@ -6,9 +6,7 @@ import (
 	"strings"
 
 	"github.com/WormW/auto-rss/internal/model"
-	"github.com/WormW/auto-rss/internal/pkg/constants"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
-	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/gin-gonic/gin"
@@ -19,6 +17,7 @@ type DownloadHandler struct {
 	repo       repository.DownloadRepository
 	qbClient   downloader.QBittorrentClient
 	configRepo repository.ConfigRepository
+	requeueSvc DownloadRequeueService
 }
 
 type DownloadDiagnosticAction struct {
@@ -41,8 +40,12 @@ type DownloadDiagnostics struct {
 }
 
 // NewDownloadHandler 创建下载处理器实例
-func NewDownloadHandler(repo repository.DownloadRepository, qbClient downloader.QBittorrentClient, configRepo repository.ConfigRepository) *DownloadHandler {
-	return &DownloadHandler{repo: repo, qbClient: qbClient, configRepo: configRepo}
+func NewDownloadHandler(repo repository.DownloadRepository, qbClient downloader.QBittorrentClient, configRepo repository.ConfigRepository, requeueSvc ...DownloadRequeueService) *DownloadHandler {
+	var requeue DownloadRequeueService
+	if len(requeueSvc) > 0 {
+		requeue = requeueSvc[0]
+	}
+	return &DownloadHandler{repo: repo, qbClient: qbClient, configRepo: configRepo, requeueSvc: requeue}
 }
 
 // GetByID 获取下载任务详情
@@ -316,32 +319,15 @@ func (h *DownloadHandler) Retry(c *gin.Context) {
 		return
 	}
 
-	// 2. 如果存在旧种子，从 qBittorrent 删除
-	if download.TorrentHash != "" && h.qbClient != nil {
-		logger.Info("Deleting old torrent for retry",
-			"download_id", id,
-			"hash", download.TorrentHash,
-			"file_path", download.FilePath,
-			"renamed_path", download.RenamedPath)
-		if err := h.qbClient.DeleteTorrentWithPayload(download.TorrentHash); err != nil {
-			logger.Warn("Failed to delete old torrent from qBittorrent (ignoring)",
-				"download_id", id,
-				"hash", download.TorrentHash,
-				"error", err.Error())
-			// 忽略删除错误，旧种子可能不存在
-		}
+	if h.requeueSvc != nil {
+		err = h.requeueSvc.RequeueDownload(download, &download.Subscription)
+	} else if download.Episode > 0 {
+		err = errEpisodeRetryLifecycleUnavailable
+	} else {
+		resetDownloadForManualRetry(download)
+		err = h.repo.Update(download)
 	}
-
-	// 3. 重置重试相关字段
-	download.RetryCount = 0
-	download.RetryReason = "user_retry"
-	download.NextRetryAt = nil
-	download.LastError = ""
-	download.Status = "pending"
-	download.TorrentHash = "" // 清除旧hash
-
-	// 4. 保存重置后的状态
-	if err := h.repo.Update(download); err != nil {
+	if err != nil {
 		logger.Error("Failed to reset download for retry",
 			"download_id", id,
 			"error", err.Error())
@@ -351,57 +337,10 @@ func (h *DownloadHandler) Retry(c *gin.Context) {
 		})
 		return
 	}
-
-	// 5. 如果 qbClient 可用，立即添加新种子
-	if h.qbClient != nil {
-		// 获取下载路径配置
-		basePath := constants.DefaultDownloadPath
-		if h.configRepo != nil {
-			if config, err := h.configRepo.Get("download_path"); err == nil && config.Value != "" {
-				basePath = config.Value
-			}
-		}
-
-		// 生成下载路径（包含番剧名子目录）
-		downloadPath := basePath
-		if download.Subscription.Name != "" {
-			downloadPath = utils.GenerateDownloadPath(basePath, download.Subscription.Name)
-		}
-
-		// 添加种子到 qBittorrent
-		torrentHash, err := h.qbClient.AddTorrent(download.TorrentURL, downloadPath, "")
-		if err != nil {
-			logger.Error("Failed to add torrent for retry",
-				"download_id", id,
-				"torrent_url", download.TorrentURL,
-				"error", err.Error())
-			download.Status = "failed"
-			download.LastError = err.Error()
-			h.repo.Update(download)
-			c.JSON(http.StatusOK, gin.H{
-				"code":    500,
-				"message": "Failed to add torrent: " + err.Error(),
-			})
-			return
-		}
-
-		// 更新为下载中状态
-		download.Status = "downloading"
-		download.TorrentHash = torrentHash
-		if err := h.repo.Update(download); err != nil {
-			logger.Error("Failed to update download status after retry",
-				"download_id", id,
-				"error", err.Error())
-		}
-
-		logger.Info("Retry successful - torrent added",
-			"download_id", id,
-			"new_hash", torrentHash)
-	}
-
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
-		"message": "Success",
+		"message": "Retry cleanup queued",
+		"data":    gin.H{"status": download.Status},
 	})
 }
 

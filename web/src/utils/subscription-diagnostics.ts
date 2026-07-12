@@ -18,6 +18,7 @@ export function mergeDiagnosticCheck(
     ...current,
     summary: summarizeDiagnosticChecks(checks),
     checks,
+    feeds: result.feeds ?? current.feeds,
     downloads: result.downloads
       ? { ...current.downloads, ...result.downloads }
       : current.downloads,

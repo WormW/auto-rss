@@ -231,7 +231,9 @@
                         {{ getYearSeasonLabel(sub.air_year, sub.air_date) }}
                       </n-tag>
                       <n-tag size="small">S{{ sub.season }}</n-tag>
-                      <n-tag v-if="sub.fansub" size="small" type="info">{{ sub.fansub }}</n-tag>
+                      <n-tag v-if="getSubscriptionFeedCount(sub)" size="small" type="info">
+                        RSS × {{ getSubscriptionFeedCount(sub) }}
+                      </n-tag>
                       <n-tag
                         v-if="sub.bangumi_id"
                         size="small"
@@ -289,11 +291,17 @@
                       <div class="action-buttons">
                         <n-tooltip trigger="hover">
                           <template #trigger>
-                            <n-button text size="small" @click="handleOffsetEdit(sub)">
-                              <template #icon><n-icon size="16"><CalculatorOutlined /></n-icon></template>
+                            <n-button
+                              text
+                              size="small"
+                              class="episode-manager-trigger"
+                              aria-label="剧集管理"
+                              @click="handleEpisodeManager(sub)"
+                            >
+                              <template #icon><n-icon size="16"><ProfileOutlined /></n-icon></template>
                             </n-button>
                           </template>
-                          调整偏移
+                          剧集管理
                         </n-tooltip>
                         <n-tooltip trigger="hover">
                           <template #trigger>
@@ -408,7 +416,9 @@
                       {{ getYearSeasonLabel(sub.air_year, sub.air_date) }}
                     </n-tag>
                     <n-tag size="small">S{{ sub.season }}</n-tag>
-                    <n-tag v-if="sub.fansub" size="small" type="info">{{ sub.fansub }}</n-tag>
+                    <n-tag v-if="getSubscriptionFeedCount(sub)" size="small" type="info">
+                      RSS × {{ getSubscriptionFeedCount(sub) }}
+                    </n-tag>
                   </div>
 
                   <div class="progress-row">
@@ -441,6 +451,20 @@
                   <div class="action-row">
                     <span v-if="sub.last_download_at" class="last-time">{{ formatTime(sub.last_download_at) }}</span>
                     <div class="action-buttons">
+                      <n-tooltip trigger="hover">
+                        <template #trigger>
+                          <n-button
+                            text
+                            size="small"
+                            class="episode-manager-trigger"
+                            aria-label="剧集管理"
+                            @click="handleEpisodeManager(sub)"
+                          >
+                            <template #icon><n-icon size="16"><ProfileOutlined /></n-icon></template>
+                          </n-button>
+                        </template>
+                        剧集管理
+                      </n-tooltip>
                       <n-tooltip trigger="hover">
                         <template #trigger>
                           <n-button text size="small" @click="handleDiagnostics(sub)">
@@ -505,18 +529,11 @@
     <!-- 番剧搜索组件 -->
     <AnimeSearch ref="animeSearchRef" @subscribe="handleSearchSubscribe" />
 
-    <!-- 偏移量快速编辑弹窗 -->
-    <n-modal v-model:show="showOffsetModal" preset="dialog" title="调整集数偏移">
-      <div style="padding: 16px 0;">
-        <p>当前偏移: {{ offsetEditingSub?.episode_offset || 0 }}</p>
-        <p style="color: #666; font-size: 12px;">正数表示跳过前几集，负数表示从负数开始计数</p>
-        <n-input-number v-model:value="tempOffset" style="width: 100%; margin-top: 12px;" />
-      </div>
-      <template #action>
-        <n-button @click="showOffsetModal = false">取消</n-button>
-        <n-button type="primary" @click="saveOffset">保存</n-button>
-      </template>
-    </n-modal>
+    <EpisodeManagerDrawer
+      v-model:show="showEpisodeManager"
+      :subscription="episodeManagerSub"
+      @changed="loadSubscriptions"
+    />
 
     <!-- 缺失剧集弹窗 -->
     <n-modal v-model:show="showMissingModal" preset="card" title="缺失剧集" style="width: 400px;">
@@ -696,6 +713,31 @@
             </div>
           </div>
 
+          <div v-if="diagnosticsData.feeds?.length" class="diagnostic-feeds">
+            <div class="diagnostic-section-title">订阅源</div>
+            <div class="diagnostic-feed-list">
+              <div
+                v-for="feed in diagnosticsData.feeds"
+                :key="feed.subscription_feed_id"
+                class="diagnostic-feed-row"
+              >
+                <div class="diagnostic-feed-name">
+                  <strong>{{ feed.name }}</strong>
+                  <span>{{ feed.fansub || feed.rss_url }}</span>
+                </div>
+                <n-tag size="tiny" :type="getFeedHealthTagType(feed.status)">
+                  {{ getFeedHealthLabel(feed.status) }}
+                </n-tag>
+                <div class="diagnostic-feed-time">
+                  {{ feed.last_success_at ? `最近成功 ${formatTime(feed.last_success_at)}` : '尚无成功记录' }}
+                </div>
+                <n-ellipsis v-if="feed.error_message || feed.last_error" class="diagnostic-feed-error">
+                  {{ feed.error_message || feed.last_error }}
+                </n-ellipsis>
+              </div>
+            </div>
+          </div>
+
           <div class="diagnostics-metrics">
             <div class="diagnostic-metric">
               <span>下载任务</span>
@@ -787,7 +829,7 @@
           <n-tabs v-model:value="activeTab" type="line">
             <n-tab-pane name="rss_source" tab="从RSS源">
               <n-form label-width="80px">
-                <n-form-item label="RSS 地址">
+                <n-form-item label="首个 feed URL">
                   <n-input
                     v-model:value="formData.rss_url"
                     type="textarea"
@@ -820,7 +862,7 @@
                     :disabled="step2Loading"
                   />
                 </n-form-item>
-                <n-form-item label="RSS 地址">
+                <n-form-item label="首个 feed URL (可选)">
                   <n-input
                     v-model:value="formData.rss_url"
                     type="textarea"
@@ -856,31 +898,26 @@
           <n-space justify="end" style="margin-top: 16px;">
               <n-button @click="showModal = false" :disabled="step2Loading">取消</n-button>
               <n-button type="primary" @click="handleGetRssData" :loading="step2Loading">
-              {{ activeTab === 'calendar' ? '下一步' : '下一步并预览' }}
+              下一步
             </n-button>
           </n-space>
         </div>
 
         <!-- 第二步: 详细配置 -->
         <div v-else>
-          <div style="max-height: 500px; overflow-y: auto; padding-right: 12px;">
+          <div class="subscription-form-scroll">
             <n-form ref="formRef" :model="formData" label-width="100px" label-placement="left">
               <n-form-item label="番剧名称" path="name">
                 <n-input v-model:value="formData.name" placeholder="请输入番剧名称" />
               </n-form-item>
 
-              <n-form-item label="RSS 地址 (可选)">
-                <n-input
-                  v-model:value="formData.rss_url"
-                  type="textarea"
-                  :autosize="{ minRows: 2 }"
-                  :placeholder="isCalendarOnlyForm ? '不填写 RSS，仅用于日历提醒' : 'RSS 地址 (与合集种子至少填一个)'"
-                  :disabled="isCalendarOnlyForm"
+              <n-form-item v-if="!isCalendarOnlyForm" label="RSS feeds" class="feed-editor-form-item">
+                <SubscriptionFeedsEditor
+                  :key="feedEditorKey"
+                  v-model="feedDrafts"
+                  :subscription-id="editingId"
+                  @validation-change="feedsValid = $event"
                 />
-              </n-form-item>
-
-              <n-form-item label="字幕组" v-if="!isCalendarOnlyForm">
-                <n-input v-model:value="formData.fansub" placeholder="字幕组名称" />
               </n-form-item>
 
               <n-form-item label="字幕语言" v-if="formData.language">
@@ -960,10 +997,6 @@
                 <n-input-number v-model:value="formData.total_episodes" :min="0" style="width: 100%;" placeholder="0表示未知" />
               </n-form-item>
 
-              <n-form-item label="集数偏移">
-                <n-input-number v-model:value="formData.episode_offset" style="width: 100%;" />
-              </n-form-item>
-
               <n-form-item label="合集种子 (可选)" v-if="!isCalendarOnlyForm">
                 <n-input
                   v-model:value="formData.collection_torrent"
@@ -998,53 +1031,18 @@
               </n-form-item>
             </n-form>
 
-            <div class="rule-preview" v-if="!isCalendarOnlyForm && (previewResult || previewLoading)">
-              <div class="preview-header-line">
-                <div class="preview-title">RSS 预览</div>
-                <n-space size="small" v-if="previewResult">
-                  <n-tag size="small" type="success">新增 {{ previewResult.summary.download_items }}</n-tag>
-                  <n-tag size="small" type="warning">替换 {{ previewResult.summary.replace_items }}</n-tag>
-                  <n-tag size="small" type="default">跳过 {{ previewResult.summary.skipped_items + previewResult.summary.duplicate_items }}</n-tag>
-                </n-space>
-              </div>
-              <n-spin :show="previewLoading">
-                <n-empty v-if="previewResult && previewResult.items.length === 0" description="RSS 无条目" />
-                <div v-else class="preview-list">
-                  <div
-                    v-for="item in previewResult?.items || []"
-                    :key="`${item.torrent_hash || item.title}-${item.episode}`"
-                    class="preview-item"
-                    :class="`preview-${item.action}`"
-                  >
-                    <div class="preview-item-main">
-                      <div class="preview-item-title">{{ item.title }}</div>
-                      <div class="preview-item-meta">
-                        <n-tag size="tiny" :type="getPreviewActionConfig(item.action).type">
-                          {{ getPreviewActionConfig(item.action).label }}
-                        </n-tag>
-                        <n-tag size="tiny" v-if="item.episode">第 {{ item.episode }} 集</n-tag>
-                        <n-tag size="tiny" v-if="item.fansub">{{ item.fansub }}</n-tag>
-                        <n-tag size="tiny" v-if="item.language">{{ item.language }}</n-tag>
-                        <span>{{ item.reason }}</span>
-                      </div>
-                      <div class="preview-rename" v-if="item.rename_preview">
-                        {{ item.rename_preview }}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </n-spin>
-            </div>
           </div>
 
           <n-space justify="space-between" style="margin-top: 16px;">
             <n-button @click="showRssStep = true">上一步</n-button>
             <n-space>
-              <n-button @click="runSubscriptionPreview" :loading="previewLoading" :disabled="!formData.rss_url || isCalendarOnlyForm">
-                刷新预览
-              </n-button>
               <n-button @click="showModal = false">取消</n-button>
-              <n-button type="primary" @click="handleSubmit" :loading="submitLoading">
+              <n-button
+                type="primary"
+                :disabled="!canSubmitSubscription"
+                @click="handleSubmit"
+                :loading="submitLoading"
+              >
                 {{ editingId ? '更新' : '创建' }}
               </n-button>
             </n-space>
@@ -1095,10 +1093,14 @@ import {
   type SubscriptionDiagnosticCheck,
   type SubscriptionDiagnosticCheckResponse,
   type SubscriptionDiagnostics,
-  type SubscriptionPreview,
   type SubscriptionRetryFailedResponse
 } from '@/api'
 import { api } from '@/api'
+import {
+  subscriptionFeedApi,
+  type SubscriptionFeed,
+  type SubscriptionFeedInput
+} from '@/api/subscription-feed'
 import {
   getDiagnosticActionFollowUp,
   isCurrentDiagnosticRequest,
@@ -1115,15 +1117,21 @@ import {
   UnorderedListOutlined,
   CalendarOutlined,
   WarningOutlined,
-  CalculatorOutlined,
   FileSearchOutlined,
   PlayCircleOutlined,
   PauseCircleOutlined,
   FolderOpenOutlined,
   InfoCircleOutlined,
-  ToolOutlined
+  ToolOutlined,
+  ProfileOutlined
 } from '@vicons/antd'
 import AnimeSearch from '@/components/AnimeSearch.vue'
+import EpisodeManagerDrawer from '@/components/EpisodeManagerDrawer.vue'
+import SubscriptionFeedsEditor from '@/components/SubscriptionFeedsEditor.vue'
+import {
+  buildFeedSavePlan,
+  normalizeFeedURLForComparison
+} from '@/utils/subscription-feeds'
 import {
   getEpisodeProgressPercent,
   getRelativeCurrentEpisode,
@@ -1143,11 +1151,14 @@ const showModal = ref(false)
 const showRssStep = ref(true)
 const step2Loading = ref(false)
 const submitLoading = ref(false)
-const previewLoading = ref(false)
-const previewResult = ref<SubscriptionPreview | null>(null)
 const activeTab = ref('rss_source')
 const editingId = ref<number | undefined>()
 const animeSearchRef = ref<InstanceType<typeof AnimeSearch> | null>(null)
+const feedDrafts = ref<SubscriptionFeedInput[]>([])
+const originalFeeds = ref<SubscriptionFeedInput[]>([])
+const feedsValid = ref(true)
+const feedDataLoaded = ref(true)
+const feedEditorKey = ref(0)
 
 // 视图和筛选状态
 const viewMode = ref<'card' | 'list'>('card')
@@ -1158,13 +1169,12 @@ const filterFansub = ref<string | null>(null)
 const selectedIds = ref<number[]>([])
 
 // 弹窗状态
-const showOffsetModal = ref(false)
-const offsetEditingSub = ref<Subscription | null>(null)
-const tempOffset = ref(0)
 const showMissingModal = ref(false)
 const missingEpisodesSub = ref<Subscription | null>(null)
 const showPreviewModal = ref(false)
 const previewSub = ref<Subscription | null>(null)
+const showEpisodeManager = ref(false)
+const episodeManagerSub = ref<Subscription | null>(null)
 
 // 文件夹扫描弹窗
 const showScanModal = ref(false)
@@ -1220,17 +1230,6 @@ const smartFetchOverrideOptions = [
   { label: '强制启用', value: 'always' },
   { label: '强制关闭', value: 'never' }
 ]
-
-const previewActionConfig: Record<string, { label: string; type: 'success' | 'warning' | 'error' | 'info' | 'default' }> = {
-  download: { label: '新增', type: 'success' },
-  replace: { label: '替换', type: 'warning' },
-  duplicate: { label: '重复', type: 'default' },
-  skip: { label: '跳过', type: 'default' }
-}
-
-const getPreviewActionConfig = (action: string) => {
-  return previewActionConfig[action] || { label: action, type: 'default' as const }
-}
 
 const getSmartFetchStatus = (id: number) => smartFetchStatusMap.value[id]
 
@@ -1382,7 +1381,9 @@ const listColumns = computed<DataTableColumns<Subscription>>(() => [
         <div>
           <div style="font-weight: 500;">{row.name}</div>
           <NSpace size={4} style="margin-top: 4px;">
-            {row.fansub && <NTag size="tiny" type="info">{row.fansub}</NTag>}
+            {getSubscriptionFeedCount(row) > 0 && (
+              <NTag size="tiny" type="info">RSS × {getSubscriptionFeedCount(row)}</NTag>
+            )}
             <NTag size="tiny">S{row.season}</NTag>
           </NSpace>
         </div>
@@ -1463,9 +1464,25 @@ const listColumns = computed<DataTableColumns<Subscription>>(() => [
     title: '操作',
     key: 'actions',
     fixed: 'right',
-    width: 180,
+    width: 220,
     render: (row) => (
       <NSpace>
+        <NTooltip trigger="hover">
+          {{
+            trigger: () => (
+              <NButton
+                text
+                size="small"
+                class="episode-manager-trigger"
+                aria-label="剧集管理"
+                onClick={() => handleEpisodeManager(row)}
+              >
+                <NIcon size={16}><ProfileOutlined /></NIcon>
+              </NButton>
+            ),
+            default: () => '剧集管理'
+          }}
+        </NTooltip>
         <NButton text size="small" onClick={() => handleDiagnostics(row)}>
           <NIcon size={16}><ToolOutlined /></NIcon>
         </NButton>
@@ -1525,6 +1542,12 @@ const formData = ref({
 })
 
 const isCalendarOnlyForm = computed(() => formData.value.source_type === 'calendar')
+const canSubmitSubscription = computed(() => {
+  if (!formData.value.name.trim()) return false
+  if (isCalendarOnlyForm.value) return true
+  if (!feedDrafts.value.length && !formData.value.collection_torrent.trim()) return false
+  return feedDataLoaded.value && feedsValid.value
+})
 
 // 时间选择器
 const airTimeValue = computed({
@@ -1768,27 +1791,6 @@ const batchCollect = async () => {
   })
 }
 
-// 快捷操作
-const handleOffsetEdit = (sub: Subscription) => {
-  offsetEditingSub.value = sub
-  tempOffset.value = sub.episode_offset || 0
-  showOffsetModal.value = true
-}
-
-const saveOffset = async () => {
-  if (!offsetEditingSub.value) return
-  try {
-    await subscriptionApi.update(offsetEditingSub.value.id, {
-      episode_offset: tempOffset.value
-    })
-    message.success('偏移量已更新')
-    showOffsetModal.value = false
-    loadSubscriptions()
-  } catch (error: any) {
-    message.error(error.message || '更新失败')
-  }
-}
-
 const showMissingEpisodes = (sub: Subscription) => {
   missingEpisodesSub.value = sub
   showMissingModal.value = true
@@ -1797,39 +1799,6 @@ const showMissingEpisodes = (sub: Subscription) => {
 const showQuickPreview = (sub: Subscription) => {
   previewSub.value = sub
   showPreviewModal.value = true
-}
-
-const resetRulePreview = () => {
-  previewResult.value = null
-  previewLoading.value = false
-}
-
-const runSubscriptionPreview = async () => {
-  if (isCalendarOnlyForm.value) {
-    return
-  }
-  if (!formData.value.rss_url) {
-    message.warning('请输入 RSS 地址')
-    return
-  }
-
-  previewLoading.value = true
-  try {
-    const response: any = await subscriptionApi.preview({
-      ...formData.value,
-      id: editingId.value,
-      limit: 50
-    })
-    if (!response?.data?.summary || !Array.isArray(response.data.items)) {
-      throw new Error('预览接口返回异常')
-    }
-    previewResult.value = response.data
-  } catch (error: any) {
-    previewResult.value = null
-    message.error(error.response?.data?.message || error.message || '预览失败')
-  } finally {
-    previewLoading.value = false
-  }
 }
 
 // 打开Bangumi页面
@@ -1864,7 +1833,7 @@ const handleEnrichBangumi = async (sub: Subscription) => {
 // 对话框操作
 const showAddDialog = () => {
   editingId.value = undefined
-  resetRulePreview()
+  resetFeedDrafts()
   formData.value = {
     name: '',
     rss_url: '',
@@ -1905,7 +1874,7 @@ const applyCalendarOnlyMode = () => {
   formData.value.rss_source_id = undefined
   formData.value.smart_fetch_enabled = null
   formData.value.smart_fetch_override = 'never'
-  resetRulePreview()
+  resetFeedDrafts()
 }
 
 const handleSearchSubscribe = (data: {
@@ -1915,7 +1884,6 @@ const handleSearchSubscribe = (data: {
   language?: string
   rss_source_id?: number
 }) => {
-  resetRulePreview()
   formData.value = {
     ...formData.value,
     name: data.title,
@@ -1928,13 +1896,42 @@ const handleSearchSubscribe = (data: {
     rss_source_id: data.rss_source_id,
     source_type: data.rss_source_id ? 'rss_source' : 'manual'
   }
+  resetFeedDrafts([{
+    name: data.fansub || '默认 RSS',
+    fansub: data.fansub,
+    rss_url: data.rss_url,
+    episode_offset: 0,
+    enabled: true
+  }], false)
   showRssStep.value = false
   showModal.value = true
 }
 
-const handleEdit = (sub: Subscription) => {
+const handleEdit = async (sub: Subscription) => {
   editingId.value = sub.id
-  resetRulePreview()
+  showRssStep.value = false
+  showModal.value = true
+  step2Loading.value = true
+  try {
+    const [subscriptionResponse, feedsResponse]: any[] = await Promise.all([
+      subscriptionApi.getById(sub.id),
+      subscriptionFeedApi.list(sub.id)
+    ])
+    const current = (subscriptionResponse?.data || sub) as Subscription
+    setFormFromSubscription(current)
+    const feeds = (feedsResponse?.data || []) as SubscriptionFeed[]
+    resetFeedDrafts(feeds, true)
+  } catch (error: any) {
+    message.error(error.response?.data?.message || error.message || '加载订阅配置失败')
+    setFormFromSubscription(sub)
+    resetFeedDrafts([], false)
+    feedDataLoaded.value = false
+  } finally {
+    step2Loading.value = false
+  }
+}
+
+const setFormFromSubscription = (sub: Subscription) => {
   formData.value = {
     name: sub.name,
     rss_url: sub.rss_url,
@@ -1959,8 +1956,11 @@ const handleEdit = (sub: Subscription) => {
     rss_source_id: sub.rss_source_id,
     source_type: sub.source_type || 'manual'
   }
-  showRssStep.value = false
-  showModal.value = true
+}
+
+const handleEpisodeManager = (sub: Subscription) => {
+  episodeManagerSub.value = sub
+  showEpisodeManager.value = true
 }
 
 const handleGetRssData = async () => {
@@ -1983,15 +1983,16 @@ const handleGetRssData = async () => {
     }
     formData.value.source_type = formData.value.rss_source_id ? 'rss_source' : 'manual'
   }
-  step2Loading.value = true
-  try {
-    showRssStep.value = false
-    if (!isCalendarOnlyForm.value && formData.value.rss_url) {
-      await runSubscriptionPreview()
-    }
-  } finally {
-    step2Loading.value = false
+  if (!isCalendarOnlyForm.value && formData.value.rss_url && feedDrafts.value.length === 0) {
+    resetFeedDrafts([{
+      name: formData.value.fansub || '默认 RSS',
+      fansub: formData.value.fansub,
+      rss_url: formData.value.rss_url,
+      episode_offset: formData.value.episode_offset,
+      enabled: true
+    }], false)
   }
+  showRssStep.value = false
 }
 
 const handleSubmit = async () => {
@@ -2001,18 +2002,25 @@ const handleSubmit = async () => {
   }
   if (isCalendarOnlyForm.value) {
     applyCalendarOnlyMode()
-  } else if (!formData.value.rss_url && !formData.value.collection_torrent) {
-    message.error('请填写 RSS 地址或合集种子地址')
+  } else if (!feedDrafts.value.length && !formData.value.collection_torrent) {
+    message.error('请添加 RSS feed 或填写合集种子地址')
+    return
+  } else if (!feedsValid.value) {
+    message.error('请完成 feed 映射预览并修正无效配置')
     return
   }
 
   submitLoading.value = true
   try {
     if (editingId.value) {
-      await subscriptionApi.update(editingId.value, formData.value)
+      await subscriptionApi.update(editingId.value, sharedSubscriptionPayload())
+      await saveFeedChanges(editingId.value)
       message.success('更新成功')
     } else {
-      await subscriptionApi.create(formData.value)
+      await subscriptionApi.create({
+        ...sharedSubscriptionPayload(),
+        feeds: feedDrafts.value.map(feedToInput)
+      })
       message.success('创建成功')
     }
     showModal.value = false
@@ -2035,8 +2043,106 @@ const handleSubmit = async () => {
       return
     }
     message.error(responseData?.message || error.message || '操作失败')
+    if (editingId.value) {
+      await reloadFeedDrafts(editingId.value, true)
+    }
   } finally {
     submitLoading.value = false
+  }
+}
+
+const resetFeedDrafts = (feeds: SubscriptionFeedInput[] = [], valid = feeds.length === 0) => {
+  feedDrafts.value = feeds.map(feed => ({ ...feed }))
+  originalFeeds.value = feeds.map(feed => ({ ...feed }))
+  feedsValid.value = valid
+  feedDataLoaded.value = true
+  feedEditorKey.value++
+}
+
+const feedToInput = (feed: SubscriptionFeedInput): SubscriptionFeedInput => ({
+  ...(feed.id ? { id: feed.id } : {}),
+  name: feed.name,
+  fansub: feed.fansub || '',
+  rss_url: feed.rss_url,
+  episode_offset: feed.episode_offset,
+  enabled: feed.enabled
+})
+
+const sharedSubscriptionPayload = (): Partial<Subscription> => {
+  const payload: Partial<Subscription> = { ...formData.value }
+  delete payload.rss_url
+  delete payload.fansub
+  delete payload.episode_offset
+  return payload
+}
+
+const feedOperationError = (action: string, feed: SubscriptionFeedInput, error: any) => {
+  const detail = error.response?.data?.message || error.message || '未知错误'
+  return new Error(`${feed.name || feed.rss_url} ${action}失败：${detail}`)
+}
+
+const saveFeedChanges = async (subscriptionId: number) => {
+  const plan = buildFeedSavePlan(originalFeeds.value, feedDrafts.value)
+  for (const feed of plan.create) {
+    try {
+      await subscriptionFeedApi.create(subscriptionId, feedToInput(feed))
+    } catch (error: any) {
+      throw feedOperationError('创建', feed, error)
+    }
+  }
+  for (const feed of plan.update) {
+    if (!feed.id) continue
+    try {
+      await subscriptionFeedApi.update(subscriptionId, feed.id, feedToInput(feed))
+    } catch (error: any) {
+      throw feedOperationError('更新', feed, error)
+    }
+  }
+  for (const feedId of plan.remove) {
+    const feed = originalFeeds.value.find(item => item.id === feedId) || {
+      name: `feed #${feedId}`,
+      rss_url: '',
+      episode_offset: 0,
+      enabled: false
+    }
+    try {
+      await subscriptionFeedApi.remove(subscriptionId, feedId)
+    } catch (error: any) {
+      throw feedOperationError('删除', feed, error)
+    }
+  }
+}
+
+const reloadFeedDrafts = async (subscriptionId: number, preserveDrafts = false) => {
+  try {
+    const response: any = await subscriptionFeedApi.list(subscriptionId)
+    const feeds = (response?.data || []) as SubscriptionFeed[]
+    if (!preserveDrafts) {
+      resetFeedDrafts(feeds, true)
+      return
+    }
+
+    const serverByID = new Map(feeds.map(feed => [feed.id, feed]))
+    const serverByURL = new Map(feeds.map(feed => [
+      normalizeFeedURLForComparison(feed.rss_url),
+      feed
+    ]))
+    const matchedServerIDs = new Set<number>()
+    const mergedDrafts = feedDrafts.value.map(draft => {
+      const server = (draft.id ? serverByID.get(draft.id) : undefined) ||
+        serverByURL.get(normalizeFeedURLForComparison(draft.rss_url))
+      if (!server) return { ...draft }
+      matchedServerIDs.add(server.id)
+      return { ...server, ...feedToInput(draft), id: server.id }
+    })
+    for (const feed of feeds) {
+      if (!matchedServerIDs.has(feed.id)) mergedDrafts.push({ ...feed })
+    }
+    originalFeeds.value = feeds.map(feed => ({ ...feed }))
+    feedDrafts.value = mergedDrafts
+    feedDataLoaded.value = true
+  } catch (error: any) {
+    message.error(error.response?.data?.message || error.message || '重新加载 feed 失败')
   }
 }
 
@@ -2299,6 +2405,27 @@ const getDiagnosticStatusLabel = (status: DiagnosticStatus) => {
   return labels[status] || status
 }
 
+const getFeedHealthTagType = (status: string): 'success' | 'warning' | 'error' | 'default' => {
+  if (status === 'healthy') return 'success'
+  if (status === 'unhealthy') return 'warning'
+  if (status === 'dead') return 'error'
+  return 'default'
+}
+
+const getFeedHealthLabel = (status: string) => {
+  const labels: Record<string, string> = {
+    healthy: '正常',
+    unhealthy: '内容异常',
+    dead: '不可用',
+    unknown: '未知'
+  }
+  return labels[status] || status
+}
+
+const getSubscriptionFeedCount = (sub: Subscription) => {
+  return sub.feed_count ?? (sub.rss_url ? 1 : 0)
+}
+
 const getDiagnosticCheckStatusLabel = (check: SubscriptionDiagnosticCheck) => {
   if (check.checked && check.status === 'unknown') return '无法判断'
   return getDiagnosticStatusLabel(check.status)
@@ -2402,6 +2529,15 @@ onMounted(() => {
       smart_fetch_override: 'follow',
       rss_source_id: route.query.rss_source_id ? parseInt(route.query.rss_source_id as string) : undefined,
       source_type: 'rss_source'
+    }
+    if (formData.value.rss_url) {
+      resetFeedDrafts([{
+        name: formData.value.fansub || '默认 RSS',
+        fansub: formData.value.fansub,
+        rss_url: formData.value.rss_url,
+        episode_offset: 0,
+        enabled: true
+      }], false)
     }
   }
   loadSubscriptions()
@@ -3148,6 +3284,59 @@ onMounted(() => {
   font-weight: 600;
 }
 
+.diagnostic-feed-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.diagnostic-feed-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto minmax(140px, auto) minmax(180px, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 8px 0;
+  border-top: 1px solid #edf0f5;
+}
+
+.diagnostic-feed-name {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.diagnostic-feed-name strong,
+.diagnostic-feed-name span,
+.diagnostic-feed-time {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diagnostic-feed-name strong {
+  font-size: 13px;
+}
+
+.diagnostic-feed-name span,
+.diagnostic-feed-time {
+  color: #666;
+  font-size: 11px;
+}
+
+.diagnostic-feed-time {
+  font-variant-numeric: tabular-nums;
+}
+
+.diagnostic-feed-error {
+  color: #d03050;
+  font-size: 12px;
+}
+
+.feed-editor-form-item :deep(.n-form-item-blank) {
+  min-width: 0;
+  width: 100%;
+}
+
 .diagnostic-failures {
   padding-top: 2px;
 }
@@ -3205,8 +3394,13 @@ onMounted(() => {
 
 /* Modal 响应式 */
 .modal-card {
-  width: 600px;
-  max-width: 95vw;
+  width: min(920px, 96vw);
+}
+
+.subscription-form-scroll {
+  max-height: min(680px, 68vh);
+  overflow-y: auto;
+  padding-right: 12px;
 }
 
 @media (max-width: 768px) {
@@ -3279,6 +3473,15 @@ onMounted(() => {
 
   .diagnostics-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .diagnostic-feed-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .diagnostic-feed-time,
+  .diagnostic-feed-error {
+    grid-column: 1 / -1;
   }
 }
 </style>

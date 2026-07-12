@@ -14,11 +14,36 @@ import (
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/rss"
+	"github.com/WormW/auto-rss/internal/service/scheduler"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
+
+type fakeSubscriptionCollector struct {
+	summary        scheduler.CollectSummary
+	err            error
+	subscriptionID uint
+	calls          int
+}
+
+func (f *fakeSubscriptionCollector) CollectSubscription(_ context.Context, subscriptionID uint) (scheduler.CollectSummary, error) {
+	f.calls++
+	f.subscriptionID = subscriptionID
+	return f.summary, f.err
+}
+
+func TestCollectEpisodesDelegatesToMultiFeedCollector(t *testing.T) {
+	collector := &fakeSubscriptionCollector{summary: scheduler.CollectSummary{
+		FeedsChecked: 2, DownloadsCreated: 1, CandidatesCreated: 1,
+	}}
+	handler := &SubscriptionHandler{collector: collector}
+	err := handler.doCollectEpisodes(context.Background(), nil, &model.Subscription{ID: 7, Name: "Anime"})
+	require.NoError(t, err)
+	assert.Equal(t, uint(7), collector.subscriptionID)
+	assert.Equal(t, 1, collector.calls)
+}
 
 // mockSubscriptionRepo is a mock implementation of SubscriptionRepository for testing
 type mockSubscriptionRepo struct {
@@ -42,6 +67,7 @@ type mockRSSParser struct {
 	items      []rss.RSSItem
 	err        error
 	fetchCalls int
+	afterFetch func()
 }
 
 type smartFetchConfigRepo struct {
@@ -50,11 +76,17 @@ type smartFetchConfigRepo struct {
 
 func (m *mockRSSParser) FetchAndParse(rssURL string) ([]rss.RSSItem, error) {
 	m.fetchCalls++
+	if m.afterFetch != nil {
+		m.afterFetch()
+	}
 	return m.items, m.err
 }
 
 func (m *mockRSSParser) FetchAndParseWithTimeout(rssURL string, timeout time.Duration) ([]rss.RSSItem, error) {
 	m.fetchCalls++
+	if m.afterFetch != nil {
+		m.afterFetch()
+	}
 	return m.items, m.err
 }
 
@@ -118,10 +150,22 @@ func (m *mockSubscriptionRepo) Create(subscription *model.Subscription) error {
 	return nil
 }
 
+func (m *mockSubscriptionRepo) CreateInTx(_ *gorm.DB, subscription *model.Subscription) error {
+	return m.Create(subscription)
+}
+
 func (m *mockSubscriptionRepo) Update(subscription *model.Subscription) error {
 	if m.updateFunc != nil {
 		return m.updateFunc(subscription)
 	}
+	return nil
+}
+
+func (m *mockSubscriptionRepo) UpdateRSSWatermark(_ uint, _ string, _ time.Time, _ *time.Time) error {
+	return nil
+}
+
+func (m *mockSubscriptionRepo) UpdateRSSWatermarkInTx(_ *gorm.DB, _ uint, _ string, _ time.Time, _ *time.Time) error {
 	return nil
 }
 
@@ -356,8 +400,38 @@ func TestSubscriptionHandler_ListSmartFetchStatus(t *testing.T) {
 	assert.NotEmpty(t, resp.Data.List[0].Explanation)
 }
 
+func TestSubscriptionHandler_ListSmartFetchStatusUsesPendingFeed(t *testing.T) {
+	fx := newEpisodeCollectionFixture(t)
+	sub := fx.createSubscription(t, nil)
+	feeds, err := fx.feedRepo.ListBySubscription(sub.ID)
+	require.NoError(t, err)
+	require.Len(t, feeds, 1)
+	feeds[0].BaselinePending = true
+	require.NoError(t, fx.feedRepo.Update(&feeds[0]))
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/subscriptions/smart-fetch/status", fx.handler.ListSmartFetchStatus)
+	req := httptest.NewRequest(http.MethodGet, "/subscriptions/smart-fetch/status", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var resp struct {
+		Data struct {
+			List []SubscriptionSmartFetchStatus `json:"list"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Data.List, 1)
+	assert.True(t, resp.Data.List[0].ShouldFetch)
+	assert.Equal(t, "feed_baseline_pending", resp.Data.List[0].Reason)
+}
+
 func TestSubscriptionHandler_PreviewAppliesRules(t *testing.T) {
-	handler := NewSubscriptionHandler(&mockSubscriptionRepo{}, &mockDownloadRepo{}, nil, nil, "/downloads")
+	fx := newEpisodeCollectionFixture(t)
+	handler := fx.handler
+	handler.downloadPath = "/downloads"
 	handler.rssParser = &mockRSSParser{items: []rss.RSSItem{
 		{
 			Title:       "[ANi] Test Anime - 01 [1080p][CHS]",
@@ -424,108 +498,66 @@ func TestSubscriptionHandler_PreviewAppliesRules(t *testing.T) {
 }
 
 func TestSubscriptionHandler_CollectEpisodesSmallTorrentGuard(t *testing.T) {
-	const (
-		defaultThreshold = int64(50 * 1024 * 1024)
-		subscriptionID   = uint(1)
-	)
+	const defaultThreshold = int64(50 * 1024 * 1024)
 
 	tests := []struct {
-		name              string
-		sizeBytes         int64
-		configValue       string
-		existingDownloads []model.Download
-		wantCreated       int
-		wantDeleted       int
-		wantQBAdds        int
+		name           string
+		sizeBytes      int64
+		configValue    string
+		existingOwned  bool
+		wantDownloads  int64
+		wantCandidates int64
 	}{
 		{
-			name:        "unknown size continues",
-			sizeBytes:   0,
-			wantCreated: 1,
-			wantQBAdds:  1,
+			name:          "unknown size continues",
+			sizeBytes:     0,
+			wantDownloads: 1,
 		},
 		{
-			name:        "under threshold skips with default",
-			sizeBytes:   defaultThreshold - 1,
-			wantCreated: 0,
-			wantQBAdds:  0,
+			name:          "under threshold skips with default",
+			sizeBytes:     defaultThreshold - 1,
+			wantDownloads: 0,
 		},
 		{
-			name:        "over threshold continues",
-			sizeBytes:   defaultThreshold,
-			wantCreated: 1,
-			wantQBAdds:  1,
+			name:          "over threshold continues",
+			sizeBytes:     defaultThreshold,
+			wantDownloads: 1,
 		},
 		{
-			name:        "zero config bypasses guard",
-			sizeBytes:   defaultThreshold - 1,
-			configValue: "0",
-			wantCreated: 1,
-			wantQBAdds:  1,
+			name:          "zero config bypasses guard",
+			sizeBytes:     defaultThreshold - 1,
+			configValue:   "0",
+			wantDownloads: 1,
 		},
 		{
-			name:      "under threshold replacement does not delete existing",
-			sizeBytes: defaultThreshold - 1,
-			existingDownloads: []model.Download{
-				{
-					ID:             99,
-					SubscriptionID: subscriptionID,
-					Title:          "Existing Anime 01",
-					Episode:        1,
-					TorrentHash:    "existing-hash",
-					Status:         model.DownloadStatusDownloading,
-				},
-			},
-			wantCreated: 0,
-			wantDeleted: 0,
-			wantQBAdds:  0,
+			name:          "under threshold different resource keeps owned download",
+			sizeBytes:     defaultThreshold - 1,
+			existingOwned: true,
+			wantDownloads: 1,
 		},
 		{
-			name:      "over threshold replacement deletes after guard",
-			sizeBytes: defaultThreshold,
-			existingDownloads: []model.Download{
-				{
-					ID:             99,
-					SubscriptionID: subscriptionID,
-					Title:          "Existing Anime 01",
-					Episode:        1,
-					TorrentHash:    "existing-hash",
-					Status:         model.DownloadStatusDownloading,
-				},
-			},
-			wantCreated: 1,
-			wantDeleted: 1,
-			wantQBAdds:  1,
+			name:           "over threshold different resource creates candidate",
+			sizeBytes:      defaultThreshold,
+			existingOwned:  true,
+			wantDownloads:  1,
+			wantCandidates: 1,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			created := 0
-			deleted := 0
-			downloadRepo := &mockDownloadRepo{
-				listBySubIDFunc: func(id uint) ([]model.Download, error) {
-					require.Equal(t, subscriptionID, id)
-					return tt.existingDownloads, nil
-				},
-				createFunc: func(download *model.Download) error {
-					created++
-					download.ID = uint(100 + created)
-					return nil
-				},
-				deleteFunc: func(id uint) error {
-					deleted++
-					return nil
-				},
-			}
-			qbClient := &collectEpisodesSmallTorrentQBClient{}
-			configRepo := &smartFetchConfigRepo{values: map[string]string{}}
+			fx := newEpisodeCollectionFixture(t)
+			sub := fx.createSubscription(t, nil)
 			if tt.configValue != "" {
-				configRepo.values["min_torrent_size_bytes"] = tt.configValue
+				require.NoError(t, fx.handler.configRepo.Set("min_torrent_size_bytes", tt.configValue))
+			}
+			if tt.existingOwned {
+				seedDownloadedEpisode(t, fx, sub, model.EpisodeResource{
+					Hash: "existing-hash", URL: "magnet:?xt=urn:btih:existing", Title: "Existing Anime 01",
+				})
 			}
 
-			handler := NewSubscriptionHandler(&mockSubscriptionRepo{}, downloadRepo, configRepo, qbClient, t.TempDir())
-			handler.rssParser = &mockRSSParser{items: []rss.RSSItem{
+			fx.handler.rssParser = &mockRSSParser{items: []rss.RSSItem{
 				{
 					Title:       "Test Anime 01",
 					Episode:     1,
@@ -537,21 +569,15 @@ func TestSubscriptionHandler_CollectEpisodesSmallTorrentGuard(t *testing.T) {
 				},
 			}}
 
-			err := handler.doCollectEpisodes(context.Background(), nil, &model.Subscription{
-				ID:       subscriptionID,
-				Name:     "Test Anime",
-				RssURL:   "https://example.com/rss.xml",
-				Enabled:  true,
-				Fansub:   "ANi",
-				Season:   1,
-				AirDay:   "1",
-				AirTime:  "12:00",
-				Language: string(rss.LangUnknown),
-			})
+			err := fx.handler.doCollectEpisodes(context.Background(), nil, &sub)
 			require.NoError(t, err)
-			assert.Equal(t, tt.wantCreated, created)
-			assert.Equal(t, tt.wantDeleted, deleted)
-			assert.Equal(t, tt.wantQBAdds, qbClient.addCalls)
+			var downloadCount int64
+			require.NoError(t, fx.db.Model(&model.Download{}).Where("subscription_id = ?", sub.ID).Count(&downloadCount).Error)
+			assert.Equal(t, tt.wantDownloads, downloadCount)
+			var candidateCount int64
+			require.NoError(t, fx.db.Model(&model.EpisodeResourceCandidate{}).Count(&candidateCount).Error)
+			assert.Equal(t, tt.wantCandidates, candidateCount)
+			assert.Zero(t, fx.qb.addCalls)
 		})
 	}
 }
@@ -569,6 +595,9 @@ func (m *collectEpisodesSmallTorrentQBClient) TestConnection(host, username, pas
 func (m *collectEpisodesSmallTorrentQBClient) AddTorrent(torrentURL string, savePath string, category string) (string, error) {
 	m.addCalls++
 	return "added-hash", nil
+}
+func (m *collectEpisodesSmallTorrentQBClient) AddTorrentExclusive(torrentURL, savePath, category, expectedHash string) (string, error) {
+	return m.AddTorrent(torrentURL, savePath, category)
 }
 func (m *collectEpisodesSmallTorrentQBClient) AddTorrentFile(filename string, fileContent []byte, savePath string, category string) (string, error) {
 	m.addCalls++
@@ -589,6 +618,8 @@ func (m *collectEpisodesSmallTorrentQBClient) SetLocation(hash string, location 
 func (m *collectEpisodesSmallTorrentQBClient) RenameTorrentFile(hash string, oldPath string, newPath string) error {
 	return nil
 }
+func (m *collectEpisodesSmallTorrentQBClient) PauseTorrent(hash string) error  { return nil }
+func (m *collectEpisodesSmallTorrentQBClient) ResumeTorrent(hash string) error { return nil }
 func (m *collectEpisodesSmallTorrentQBClient) RemoveTorrentTask(hash string) error {
 	return nil
 }

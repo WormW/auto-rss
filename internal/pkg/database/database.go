@@ -126,6 +126,8 @@ func Migrate(db *gorm.DB) error {
 	return db.AutoMigrate(
 		&model.RSSSource{},
 		&model.Subscription{},
+		&model.SubscriptionFeed{},
+		&model.SubscriptionFeedSeenItem{},
 		&model.Download{},
 		&model.SubscriptionEpisode{},
 		&model.EpisodeResourceCandidate{},

@@ -133,7 +133,7 @@ func (h *RSSHealthHandler) CheckOne(c *gin.Context) {
 		"subscription_id", id,
 		"name", result.Name,
 		"status", result.Status,
-		"response_time_ms", result.ResponseTime)
+		"feeds", len(result.Feeds))
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
@@ -264,14 +264,13 @@ func (h *RSSHealthHandler) runAsyncHealthCheck(ctx context.Context, t *task.Task
 	manager := task.GetManager()
 	manager.UpdateProgress(5, "正在获取订阅列表...")
 
-	// 获取所有活跃订阅
-	subs, err := h.subRepo.GetActiveSubscriptions()
+	results, err := h.healthChecker.CheckAllSubscriptions(ctx)
 	if err != nil {
-		logger.Error("Failed to get active subscriptions for health check", "error", err.Error())
+		logger.Error("Failed to check active subscriptions", "error", err.Error())
 		return err
 	}
 
-	totalSubs := len(subs)
+	totalSubs := len(results)
 	if totalSubs == 0 {
 		manager.UpdateProgress(100, "没有需要检查的订阅")
 		manager.SetResult(gin.H{
@@ -280,38 +279,6 @@ func (h *RSSHealthHandler) runAsyncHealthCheck(ctx context.Context, t *task.Task
 			"dead":    0,
 		})
 		return nil
-	}
-
-	manager.UpdateProgress(10, "开始检查订阅健康状态...")
-
-	var results []*rss.HealthCheckResult
-	for i, sub := range subs {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		// 检查单个订阅
-		result := h.healthChecker.CheckSubscription(ctx, &sub)
-		results = append(results, result)
-
-		// 更新进度
-		progress := 10 + (i+1)*90/totalSubs
-		message := "检查中..."
-		if result.Status == rss.HealthStatusDead {
-			message = "发现失效订阅"
-		}
-		manager.UpdateProgress(progress, message)
-
-		// 避免请求过快
-		if i < totalSubs-1 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(500 * time.Millisecond):
-			}
-		}
 	}
 
 	manager.UpdateProgress(100, "检查完成")

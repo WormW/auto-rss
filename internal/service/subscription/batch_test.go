@@ -82,6 +82,9 @@ func (m *mockSubscriptionRepo) GetActiveSubscriptions() ([]model.Subscription, e
 func (m *mockSubscriptionRepo) UpdateInTx(tx *gorm.DB, sub *model.Subscription) error {
 	return m.Update(sub)
 }
+func (m *mockSubscriptionRepo) CreateInTx(_ *gorm.DB, sub *model.Subscription) error {
+	return m.Create(sub)
+}
 func (m *mockSubscriptionRepo) GetSubscriptionsWithDownloadCount() ([]repository.SubscriptionWithStats, error) {
 	return nil, nil
 }

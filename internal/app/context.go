@@ -7,6 +7,7 @@ import (
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/bangumi"
+	"github.com/WormW/auto-rss/internal/service/episode"
 	"github.com/WormW/auto-rss/internal/service/medialibrary"
 	"github.com/WormW/auto-rss/internal/service/organizer"
 	"gorm.io/gorm"
@@ -21,6 +22,7 @@ type Context struct {
 	downloadRepo     repository.DownloadRepository
 	bangumiService   *bangumi.BangumiService
 	mediaLibrarySvc  *medialibrary.Service
+	episodeService   *episode.Service
 	renameTemplate   string
 	fileOrganizer    *organizer.FileOrganizer
 	shutdownHooks    []func()
@@ -34,6 +36,7 @@ func NewContext(db *gorm.DB, cfg *config.Config, subscriptionRepo repository.Sub
 		subscriptionRepo: subscriptionRepo,
 		downloadRepo:     downloadRepo,
 		bangumiService:   bangumiService,
+		episodeService:   episode.NewService(repository.NewEpisodeRepository(db)),
 	}
 }
 
@@ -114,6 +117,7 @@ func (ctx *Context) ReloadFileOrganizer() error {
 		ctx.db,
 		ctx.bangumiService,
 		ctx.renameTemplate,
+		ctx.episodeService,
 		ctx.mediaLibrarySvc,
 	)
 	if err != nil {

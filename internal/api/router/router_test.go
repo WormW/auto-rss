@@ -2,6 +2,7 @@ package router
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,12 +22,15 @@ import (
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/downloader"
+	"github.com/WormW/auto-rss/internal/service/episode"
 	"github.com/WormW/auto-rss/internal/service/recovery"
 	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/WormW/auto-rss/internal/service/scheduler"
 	"github.com/WormW/auto-rss/internal/service/task"
 	"github.com/gin-gonic/gin"
 	"github.com/robfig/cron/v3"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -38,6 +43,9 @@ func (m *mockScheduler) AddJob(string, func()) (cron.EntryID, error) {
 	return 0, nil
 }
 func (m *mockScheduler) RunRSSCheckNow() error { return nil }
+func (m *mockScheduler) CollectSubscription(context.Context, uint) (scheduler.CollectSummary, error) {
+	return scheduler.CollectSummary{}, nil
+}
 
 func newTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
@@ -47,6 +55,8 @@ func newTestDB(t *testing.T) *gorm.DB {
 	}
 	if err := db.AutoMigrate(
 		&model.Subscription{},
+		&model.SubscriptionFeed{},
+		&model.SubscriptionFeedSeenItem{},
 		&model.SubscriptionTag{},
 		&model.SubscriptionTagRelation{},
 		&model.Download{},
@@ -58,10 +68,153 @@ func newTestDB(t *testing.T) *gorm.DB {
 		&model.RefreshToken{},
 		&model.Notification{},
 		&model.NotificationSetting{},
+		&model.SubscriptionEpisode{},
+		&model.EpisodeResourceCandidate{},
 	); err != nil {
 		t.Fatalf("failed to migrate sqlite db: %v", err)
 	}
 	return db
+}
+
+func TestSetupRegistersSubscriptionFeedRoutes(t *testing.T) {
+	router, _, _ := setupRouterForTestWithConfig(t, false, nil)
+	want := map[string]bool{
+		http.MethodGet + " /api/v1/subscriptions/:id/feeds":                  false,
+		http.MethodPost + " /api/v1/subscriptions/:id/feeds":                 false,
+		http.MethodPut + " /api/v1/subscriptions/:id/feeds/:feedId":          false,
+		http.MethodDelete + " /api/v1/subscriptions/:id/feeds/:feedId":       false,
+		http.MethodPost + " /api/v1/subscriptions/:id/feeds/preview":         false,
+		http.MethodPost + " /api/v1/subscriptions/:id/feeds/:feedId/preview": false,
+	}
+	for _, route := range router.Routes() {
+		key := route.Method + " " + route.Path
+		if _, ok := want[key]; ok {
+			want[key] = true
+		}
+	}
+	for route, registered := range want {
+		if !registered {
+			t.Errorf("subscription feed route not registered: %s", route)
+		}
+	}
+}
+
+func TestSetupRegistersEpisodeLedgerManagementRoutes(t *testing.T) {
+	router, _, _ := setupRouterForTestWithConfig(t, false, nil)
+	want := map[string]bool{
+		http.MethodGet + " /api/v1/subscriptions/:id/episodes":                                                  false,
+		http.MethodPut + " /api/v1/subscriptions/:id/episodes/status":                                           false,
+		http.MethodGet + " /api/v1/subscriptions/:id/episodes/:episode/candidates":                              false,
+		http.MethodPost + " /api/v1/subscriptions/:id/episodes/:episode/candidates/:candidate_id/keep":          false,
+		http.MethodPost + " /api/v1/subscriptions/:id/episodes/:episode/candidates/:candidate_id/replace":       false,
+		http.MethodPost + " /api/v1/subscriptions/:id/episodes/:episode/candidates/:candidate_id/retry-cleanup": false,
+	}
+	for _, route := range router.Routes() {
+		key := route.Method + " " + route.Path
+		if _, ok := want[key]; ok {
+			want[key] = true
+		}
+	}
+	for route, registered := range want {
+		if !registered {
+			t.Errorf("episode management route not registered: %s", route)
+		}
+	}
+}
+
+func TestSetupStartsReplacementRecoveryAsynchronouslyOnce(t *testing.T) {
+	db := newTestDB(t)
+	cfg := newRouterTestConfig(false)
+	qbClient := downloader.NewQBittorrentClient()
+	appCtx := newTestAppContext(db, cfg)
+
+	original := newScheduler
+	newScheduler = func(*gorm.DB, repository.SubscriptionRepository, repository.SubscriptionFeedRepository, repository.DownloadRepository, repository.ConfigRepository, string, rss.Parser, downloader.QBittorrentClient, *episode.Service) scheduler.Scheduler {
+		return &mockScheduler{}
+	}
+	defer func() { newScheduler = original }()
+
+	var calls atomic.Int32
+	started := make(chan struct{})
+	recovery := func(ctx context.Context) (int, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-ctx.Done()
+		return 3, ctx.Err()
+	}
+
+	type setupResult struct {
+		router *gin.Engine
+		err    error
+	}
+	setupDone := make(chan setupResult, 1)
+	go func() {
+		r, err := setup(db, cfg, qbClient, appCtx, "", setupDependencies{replacementRecovery: recovery})
+		setupDone <- setupResult{router: r, err: err}
+	}()
+
+	select {
+	case result := <-setupDone:
+		require.NoError(t, result.err)
+		require.NotNil(t, result.router)
+	case <-time.After(2 * time.Second):
+		t.Fatal("router setup blocked on replacement recovery")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("replacement recovery was not started")
+	}
+	assert.EqualValues(t, 1, calls.Load())
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		appCtx.Shutdown()
+		close(shutdownDone)
+	}()
+	select {
+	case <-shutdownDone:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not cancel replacement recovery")
+	}
+	assert.EqualValues(t, 1, calls.Load())
+}
+
+func TestStartReplacementRecoveryShutdownTimeoutIsBounded(t *testing.T) {
+	db := newTestDB(t)
+	cfg := newRouterTestConfig(false)
+	appCtx := newTestAppContext(db, cfg)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	exited := make(chan struct{})
+	recovery := func(context.Context) (int, error) {
+		close(started)
+		<-release
+		close(exited)
+		return 0, nil
+	}
+	startReplacementRecovery(appCtx, recovery, 25*time.Millisecond)
+	<-started
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		appCtx.Shutdown()
+		close(shutdownDone)
+	}()
+	select {
+	case <-shutdownDone:
+	case <-time.After(time.Second):
+		close(release)
+		<-exited
+		t.Fatal("shutdown blocked past the replacement recovery timeout")
+	}
+	close(release)
+	select {
+	case <-exited:
+	case <-time.After(time.Second):
+		t.Fatal("replacement recovery did not exit after blocker release")
+	}
 }
 
 func newRouterTestConfig(authEnabled bool) *config.Config {
@@ -115,13 +268,15 @@ func setupRouterForTestWithConfig(t *testing.T, authEnabled bool, configure func
 	appCtx := newTestAppContext(db, cfg)
 
 	original := newScheduler
-	newScheduler = func(*gorm.DB, repository.SubscriptionRepository, repository.DownloadRepository, repository.ConfigRepository, string, rss.Parser, downloader.QBittorrentClient) scheduler.Scheduler {
+	newScheduler = func(*gorm.DB, repository.SubscriptionRepository, repository.SubscriptionFeedRepository, repository.DownloadRepository, repository.ConfigRepository, string, rss.Parser, downloader.QBittorrentClient, *episode.Service) scheduler.Scheduler {
 		return &mockScheduler{}
 	}
 	t.Cleanup(func() { newScheduler = original })
 	t.Cleanup(appCtx.Shutdown)
 
-	r, err := Setup(db, cfg, qbClient, appCtx, "")
+	r, err := setup(db, cfg, qbClient, appCtx, "", setupDependencies{
+		replacementRecovery: func(context.Context) (int, error) { return 0, nil },
+	})
 	if err != nil {
 		t.Fatalf("failed to setup router: %v", err)
 	}
@@ -134,7 +289,7 @@ func TestSetup_ReturnsErrorWhenSchedulerStartFailsAndBlockingEnabled(t *testing.
 	qbClient := downloader.NewQBittorrentClient()
 
 	original := newScheduler
-	newScheduler = func(*gorm.DB, repository.SubscriptionRepository, repository.DownloadRepository, repository.ConfigRepository, string, rss.Parser, downloader.QBittorrentClient) scheduler.Scheduler {
+	newScheduler = func(*gorm.DB, repository.SubscriptionRepository, repository.SubscriptionFeedRepository, repository.DownloadRepository, repository.ConfigRepository, string, rss.Parser, downloader.QBittorrentClient, *episode.Service) scheduler.Scheduler {
 		return &mockScheduler{startErr: errors.New("boom")}
 	}
 	defer func() { newScheduler = original }()
@@ -809,6 +964,14 @@ func TestSetup_RoutesRSSHealthValidationThroughAPIGroup(t *testing.T) {
 	deadSubscription := model.Subscription{Name: "Router Dead Anime", RssURL: deadFeed.URL, Season: 1, Enabled: true, Status: "active"}
 	if err := db.Create(&deadSubscription).Error; err != nil {
 		t.Fatalf("failed to seed dead subscription: %v", err)
+	}
+	for _, subscriptionFeed := range []model.SubscriptionFeed{
+		{SubscriptionID: subscription.ID, Name: "Default", RSSURL: feed.URL, RSSURLNormalized: feed.URL, Enabled: true},
+		{SubscriptionID: deadSubscription.ID, Name: "Default", RSSURL: deadFeed.URL, RSSURLNormalized: deadFeed.URL, Enabled: true},
+	} {
+		if err := repository.NewSubscriptionFeedRepository(db).Create(&subscriptionFeed); err != nil {
+			t.Fatalf("failed to seed subscription feed: %v", err)
+		}
 	}
 
 	recorder := httptest.NewRecorder()

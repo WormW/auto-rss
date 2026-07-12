@@ -4,16 +4,37 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"github.com/WormW/auto-rss/internal/pkg/utils"
+	"github.com/WormW/auto-rss/internal/repository"
+	"github.com/WormW/auto-rss/internal/service/episode"
 	"gorm.io/gorm"
 )
 
 const (
-	SchemaVersion = "1.0"
-	RedactedValue = "__AUTO_RSS_REDACTED__"
+	SchemaVersion       = "1.2"
+	legacySchemaVersion = "1.0"
+	ledgerSchemaVersion = "1.1"
+	RedactedValue       = "__AUTO_RSS_REDACTED__"
+	MaxPackageBytes     = 8 << 20
+
+	MaxSubscriptionsPerPackage = 10_000
+	MaxEpisodesPerPackage      = 100_000
+	MaxCandidatesPerPackage    = 200_000
+	MaxPackageItems            = 300_000
+
+	MaxSubscriptionKeyBytes = 4 << 10
+	MaxTorrentHashBytes     = 256
+	MaxURLBytes             = 16 << 10
+	MaxTitleBytes           = 4 << 10
+	MaxFansubBytes          = 1 << 10
+	MaxLanguageBytes        = 256
+	MaxStatusBytes          = 256
+	MaxFailureReasonBytes   = 16 << 10
 
 	StrategySkip      = "skip"
 	StrategyOverwrite = "overwrite"
@@ -23,6 +44,22 @@ const (
 	SourceAutoRSS     = "auto-rss"
 	SourceAutoBangumi = "auto-bangumi"
 )
+
+var ErrPackageTooLarge = errors.New("backup package too large")
+
+type PackageLimitError struct {
+	Field  string
+	Actual int
+	Limit  int
+}
+
+func (e *PackageLimitError) Error() string {
+	return fmt.Sprintf("%s: %s is %d, limit is %d", ErrPackageTooLarge, e.Field, e.Actual, e.Limit)
+}
+
+func (e *PackageLimitError) Unwrap() error {
+	return ErrPackageTooLarge
+}
 
 type Service struct {
 	db *gorm.DB
@@ -44,6 +81,8 @@ type Package struct {
 	Groups               []model.SubscriptionGroup   `json:"groups"`
 	Tags                 []model.SubscriptionTag     `json:"tags"`
 	Subscriptions        []SubscriptionRecord        `json:"subscriptions"`
+	Episodes             []EpisodeRecord             `json:"episodes,omitempty"`
+	EpisodeCandidates    []CandidateRecord           `json:"episode_candidates,omitempty"`
 	SubscriptionTags     []SubscriptionTagRecord     `json:"subscription_tags"`
 	NotificationSettings []NotificationSettingRecord `json:"notification_settings"`
 }
@@ -54,6 +93,8 @@ type PackageSummary struct {
 	Groups               int `json:"groups"`
 	Tags                 int `json:"tags"`
 	Subscriptions        int `json:"subscriptions"`
+	Episodes             int `json:"episodes"`
+	EpisodeCandidates    int `json:"episode_candidates"`
 	SubscriptionTags     int `json:"subscription_tags"`
 	NotificationSettings int `json:"notification_settings"`
 }
@@ -69,8 +110,50 @@ type ConfigRecord struct {
 
 type SubscriptionRecord struct {
 	model.Subscription
-	GroupName     string `json:"group_name,omitempty"`
-	RSSSourceName string `json:"rss_source_name,omitempty"`
+	GroupName     string                   `json:"group_name,omitempty"`
+	RSSSourceName string                   `json:"rss_source_name,omitempty"`
+	Feeds         []model.SubscriptionFeed `json:"feeds,omitempty"`
+}
+
+type EpisodeRecord struct {
+	SubscriptionKey   string     `json:"subscription_key"`
+	Episode           int        `json:"episode"`
+	Status            string     `json:"status"`
+	ActiveTorrentHash string     `json:"active_torrent_hash,omitempty"`
+	ActiveTorrentURL  string     `json:"active_torrent_url,omitempty"`
+	ActiveTitle       string     `json:"active_title,omitempty"`
+	StatusSource      string     `json:"status_source"`
+	DownloadedAt      *time.Time `json:"downloaded_at,omitempty"`
+}
+
+type CandidateRecord struct {
+	SubscriptionKey string     `json:"subscription_key"`
+	Episode         int        `json:"episode"`
+	TorrentHash     string     `json:"torrent_hash,omitempty"`
+	TorrentURL      string     `json:"torrent_url"`
+	Title           string     `json:"title"`
+	Fansub          string     `json:"fansub,omitempty"`
+	Language        string     `json:"language,omitempty"`
+	PubTime         *time.Time `json:"pub_time,omitempty"`
+	SourceRSSURL    string     `json:"source_rss_url,omitempty"`
+	Status          string     `json:"status"`
+	FailureReason   string     `json:"failure_reason,omitempty"`
+
+	runtimeStage string
+}
+
+func (record *CandidateRecord) UnmarshalJSON(data []byte) error {
+	type stableCandidateRecord CandidateRecord
+	var wire struct {
+		stableCandidateRecord
+		ReplacementStage string `json:"replacement_stage"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*record = CandidateRecord(wire.stableCandidateRecord)
+	record.runtimeStage = strings.TrimSpace(wire.ReplacementStage)
+	return nil
 }
 
 type SubscriptionTagRecord struct {
@@ -120,6 +203,8 @@ type currentState struct {
 	groups        map[string]model.SubscriptionGroup
 	tags          map[string]model.SubscriptionTag
 	subscriptions map[string]model.Subscription
+	episodes      map[string]model.SubscriptionEpisode
+	candidates    map[string]model.EpisodeResourceCandidate
 	settings      map[string]model.NotificationSetting
 }
 
@@ -148,6 +233,21 @@ func (s *Service) Export(includeSensitive bool) (*Package, error) {
 	if err := s.db.Order("name ASC, season ASC, id ASC").Find(&subscriptions).Error; err != nil {
 		return nil, err
 	}
+	var feeds []model.SubscriptionFeed
+	if err := s.db.Order("subscription_id ASC, id ASC").Find(&feeds).Error; err != nil {
+		return nil, err
+	}
+
+	var episodes []model.SubscriptionEpisode
+	if err := s.db.Order("subscription_id ASC, episode ASC").Find(&episodes).Error; err != nil {
+		return nil, err
+	}
+
+	var candidates []model.EpisodeResourceCandidate
+	if err := s.db.Order("subscription_episode_id ASC, id ASC").Find(&candidates).Error; err != nil {
+		return nil, err
+	}
+	hasOwnership := len(episodes) > 0 || len(candidates) > 0
 
 	var relations []model.SubscriptionTagRelation
 	if err := s.db.Find(&relations).Error; err != nil {
@@ -171,9 +271,24 @@ func (s *Service) Export(includeSensitive bool) (*Package, error) {
 	for _, tag := range tags {
 		tagNames[tag.ID] = tag.Name
 	}
+	feedsBySubscription := make(map[uint][]model.SubscriptionFeed)
+	for _, feed := range feeds {
+		feedsBySubscription[feed.SubscriptionID] = append(feedsBySubscription[feed.SubscriptionID], sanitizeFeedForBackup(feed))
+	}
 	subscriptionByID := make(map[uint]model.Subscription, len(subscriptions))
+	subscriptionKeyByID := make(map[uint]string, len(subscriptions))
+	seenSubscriptionKeys := make(map[string]uint, len(subscriptions))
 	for _, sub := range subscriptions {
+		key := subscriptionKeyFromModel(sub)
+		if hasOwnership && key == "" {
+			return nil, fmt.Errorf("subscription %d has no stable backup key", sub.ID)
+		}
+		if existingID, exists := seenSubscriptionKeys[key]; hasOwnership && exists && existingID != sub.ID {
+			return nil, fmt.Errorf("subscription backup key collision %q for IDs %d and %d", key, existingID, sub.ID)
+		}
+		seenSubscriptionKeys[key] = sub.ID
 		subscriptionByID[sub.ID] = sub
+		subscriptionKeyByID[sub.ID] = key
 	}
 
 	pkg := &Package{
@@ -206,7 +321,7 @@ func (s *Service) Export(includeSensitive bool) (*Package, error) {
 	pkg.Tags = tags
 
 	for _, sub := range subscriptions {
-		record := SubscriptionRecord{Subscription: sub}
+		record := SubscriptionRecord{Subscription: sub, Feeds: feedsBySubscription[sub.ID]}
 		if sub.GroupID != nil {
 			record.GroupName = groupNames[*sub.GroupID]
 		}
@@ -216,8 +331,69 @@ func (s *Service) Export(includeSensitive bool) (*Package, error) {
 		record.Group = nil
 		record.RSSSource = nil
 		record.Downloads = nil
+		record.Subscription.Feeds = nil
 		pkg.Subscriptions = append(pkg.Subscriptions, record)
 	}
+
+	episodeRecordByID := make(map[uint]EpisodeRecord, len(episodes))
+	for _, ledger := range episodes {
+		subscriptionKey, ok := subscriptionKeyByID[ledger.SubscriptionID]
+		if !ok {
+			return nil, fmt.Errorf("episode %d references missing subscription %d", ledger.ID, ledger.SubscriptionID)
+		}
+		record := EpisodeRecord{
+			SubscriptionKey:   subscriptionKey,
+			Episode:           ledger.Episode,
+			Status:            ledger.Status,
+			ActiveTorrentHash: ledger.ActiveTorrentHash,
+			ActiveTorrentURL:  ledger.ActiveTorrentURL,
+			ActiveTitle:       ledger.ActiveTitle,
+			StatusSource:      ledger.StatusSource,
+			DownloadedAt:      ledger.DownloadedAt,
+		}
+		normalizeEpisodeRecord(&record)
+		pkg.Episodes = append(pkg.Episodes, record)
+		episodeRecordByID[ledger.ID] = record
+	}
+
+	for _, candidate := range candidates {
+		ledgerRecord, ok := episodeRecordByID[candidate.SubscriptionEpisodeID]
+		if !ok {
+			return nil, fmt.Errorf("candidate %d references missing episode %d", candidate.ID, candidate.SubscriptionEpisodeID)
+		}
+		record := CandidateRecord{
+			SubscriptionKey: ledgerRecord.SubscriptionKey,
+			Episode:         ledgerRecord.Episode,
+			TorrentHash:     candidate.TorrentHash,
+			TorrentURL:      candidate.TorrentURL,
+			Title:           candidate.Title,
+			Fansub:          candidate.Fansub,
+			Language:        candidate.Language,
+			PubTime:         candidate.PubTime,
+			SourceRSSURL:    candidate.SourceRSSURL,
+			Status:          candidate.Status,
+			FailureReason:   candidate.FailureReason,
+			runtimeStage:    candidate.ReplacementStage,
+		}
+		normalizeCandidateRecord(&record)
+		pkg.EpisodeCandidates = append(pkg.EpisodeCandidates, record)
+	}
+	sort.Slice(pkg.Episodes, func(i, j int) bool {
+		if pkg.Episodes[i].SubscriptionKey == pkg.Episodes[j].SubscriptionKey {
+			return pkg.Episodes[i].Episode < pkg.Episodes[j].Episode
+		}
+		return pkg.Episodes[i].SubscriptionKey < pkg.Episodes[j].SubscriptionKey
+	})
+	sort.Slice(pkg.EpisodeCandidates, func(i, j int) bool {
+		left, right := pkg.EpisodeCandidates[i], pkg.EpisodeCandidates[j]
+		if left.SubscriptionKey != right.SubscriptionKey {
+			return left.SubscriptionKey < right.SubscriptionKey
+		}
+		if left.Episode != right.Episode {
+			return left.Episode < right.Episode
+		}
+		return candidateResourceKey(left) < candidateResourceKey(right)
+	})
 
 	for _, relation := range relations {
 		sub, ok := subscriptionByID[relation.SubscriptionID]
@@ -257,8 +433,13 @@ func (s *Service) Export(includeSensitive bool) (*Package, error) {
 		Groups:               len(pkg.Groups),
 		Tags:                 len(pkg.Tags),
 		Subscriptions:        len(pkg.Subscriptions),
+		Episodes:             len(pkg.Episodes),
+		EpisodeCandidates:    len(pkg.EpisodeCandidates),
 		SubscriptionTags:     len(pkg.SubscriptionTags),
 		NotificationSettings: len(pkg.NotificationSettings),
+	}
+	if err := validatePackage(pkg); err != nil {
+		return nil, fmt.Errorf("cannot export invalid episode ownership state: %w", err)
 	}
 
 	return pkg, nil
@@ -269,7 +450,8 @@ func (s *Service) Preview(data json.RawMessage, sourceFormat, strategy string) (
 	if err != nil {
 		return nil, err
 	}
-	state, err := s.loadCurrentState(s.db)
+	hasOwnership := packageHasOwnership(pkg)
+	state, err := s.loadCurrentState(s.db, hasOwnership, hasOwnership)
 	if err != nil {
 		return nil, err
 	}
@@ -285,7 +467,8 @@ func (s *Service) Import(data json.RawMessage, sourceFormat, strategy string) (*
 
 	var plan *ImportPlan
 	err = s.db.Transaction(func(tx *gorm.DB) error {
-		state, err := s.loadCurrentState(tx)
+		hasOwnership := packageHasOwnership(pkg)
+		state, err := s.loadCurrentState(tx, hasOwnership, hasOwnership)
 		if err != nil {
 			return err
 		}
@@ -299,6 +482,9 @@ func (s *Service) Import(data json.RawMessage, sourceFormat, strategy string) (*
 }
 
 func ParsePackage(data json.RawMessage, sourceFormat string) (*Package, string, error) {
+	if len(data) > MaxPackageBytes {
+		return nil, "", newPackageLimitError("raw_bytes", len(data), MaxPackageBytes)
+	}
 	sourceFormat = strings.TrimSpace(strings.ToLower(sourceFormat))
 	if sourceFormat == "" {
 		sourceFormat = SourceAuto
@@ -309,6 +495,9 @@ func ParsePackage(data json.RawMessage, sourceFormat string) (*Package, string, 
 		if err == nil {
 			return pkg, SourceAutoRSS, nil
 		}
+		if errors.Is(err, ErrPackageTooLarge) {
+			return nil, "", err
+		}
 		if sourceFormat == SourceAutoRSS {
 			return nil, "", err
 		}
@@ -318,6 +507,9 @@ func ParsePackage(data json.RawMessage, sourceFormat string) (*Package, string, 
 		pkg, err := parseAutoBangumiPackage(data)
 		if err == nil {
 			return pkg, SourceAutoBangumi, nil
+		}
+		if errors.Is(err, ErrPackageTooLarge) {
+			return nil, "", err
 		}
 		if sourceFormat == SourceAutoBangumi {
 			return nil, "", err
@@ -336,8 +528,9 @@ func parseAutoRSSPackage(data json.RawMessage) (*Package, error) {
 	if pkg.App != "" && pkg.App != "auto-rss" {
 		return nil, fmt.Errorf("not an auto-rss backup package: app=%s", pkg.App)
 	}
-	if len(pkg.Subscriptions) == 0 && len(pkg.Configs) == 0 && len(pkg.RSSSources) == 0 &&
-		len(pkg.Groups) == 0 && len(pkg.Tags) == 0 && len(pkg.NotificationSettings) == 0 {
+	if len(pkg.Subscriptions) == 0 && len(pkg.Episodes) == 0 && len(pkg.EpisodeCandidates) == 0 &&
+		len(pkg.Configs) == 0 && len(pkg.RSSSources) == 0 && len(pkg.Groups) == 0 &&
+		len(pkg.Tags) == 0 && len(pkg.NotificationSettings) == 0 {
 		var legacy struct {
 			Data struct {
 				Subscriptions []model.Subscription `json:"subscriptions"`
@@ -359,10 +552,19 @@ func parseAutoRSSPackage(data json.RawMessage) (*Package, error) {
 		}
 	}
 	if pkg.SchemaVersion == "" {
-		pkg.SchemaVersion = SchemaVersion
+		pkg.SchemaVersion = legacySchemaVersion
+	}
+	if pkg.SchemaVersion != legacySchemaVersion && pkg.SchemaVersion != ledgerSchemaVersion && pkg.SchemaVersion != SchemaVersion {
+		return nil, fmt.Errorf("unsupported auto-rss backup schema version %q", pkg.SchemaVersion)
+	}
+	for i := range pkg.Subscriptions {
+		ensureSubscriptionRecordFeeds(&pkg.Subscriptions[i])
 	}
 	if pkg.App == "" {
 		pkg.App = "auto-rss"
+	}
+	if err := validatePackage(&pkg); err != nil {
+		return nil, err
 	}
 	pkg.recount()
 	return &pkg, nil
@@ -444,6 +646,9 @@ func parseAutoBangumiPackage(data json.RawMessage) (*Package, error) {
 
 	if len(pkg.Subscriptions) == 0 {
 		return nil, errors.New("auto-bangumi data contains no importable RSS subscriptions")
+	}
+	if err := validatePackage(pkg); err != nil {
+		return nil, err
 	}
 	pkg.recount()
 	return pkg, nil
@@ -565,6 +770,19 @@ func buildPlan(pkg *Package, state *currentState, sourceFormat, strategy string)
 			continue
 		}
 		plan.add("subscription_tag", key, relation.Subscription, "merge", "tag relation will be ensured when both records exist", false, false)
+	}
+
+	for _, record := range pkg.Episodes {
+		key := episodeRecordKey(record.SubscriptionKey, record.Episode)
+		_, exists := state.episodes[key]
+		plan.addExistingAware("episode", key, fmt.Sprintf("episode %d", record.Episode), exists, strategy, false)
+	}
+
+	for _, record := range pkg.EpisodeCandidates {
+		episodeKey := episodeRecordKey(record.SubscriptionKey, record.Episode)
+		key := candidateStateKey(episodeKey, candidateResourceKey(record))
+		_, exists := state.candidates[key]
+		plan.addExistingAware("episode_candidate", key, record.Title, exists, strategy, false)
 	}
 
 	return plan
@@ -770,6 +988,9 @@ func applyPackage(tx *gorm.DB, pkg *Package, state *currentState, strategy strin
 			if err := tx.Create(&sub).Error; err != nil {
 				return err
 			}
+			if err := restoreSubscriptionFeeds(tx, record, sub.ID, StrategyOverwrite); err != nil {
+				return err
+			}
 			state.subscriptions[key] = sub
 			continue
 		}
@@ -777,6 +998,9 @@ func applyPackage(tx *gorm.DB, pkg *Package, state *currentState, strategy strin
 			sub.ID = existing.ID
 			sub.CreatedAt = existing.CreatedAt
 			if err := tx.Save(&sub).Error; err != nil {
+				return err
+			}
+			if err := restoreSubscriptionFeeds(tx, record, sub.ID, StrategyOverwrite); err != nil {
 				return err
 			}
 			state.subscriptions[key] = sub
@@ -787,6 +1011,82 @@ func applyPackage(tx *gorm.DB, pkg *Package, state *currentState, strategy strin
 				}
 				state.subscriptions[key] = existing
 			}
+			if err := restoreSubscriptionFeeds(tx, record, existing.ID, StrategyMerge); err != nil {
+				return err
+			}
+		}
+	}
+
+	for _, record := range pkg.Episodes {
+		subscriptionKey := normalizedKey(record.SubscriptionKey)
+		sub := state.subscriptions[subscriptionKey]
+		key := episodeRecordKey(subscriptionKey, record.Episode)
+		existing, exists := state.episodes[key]
+		if !exists || strategy == StrategyOverwrite {
+			normalizeEpisodeRecord(&record)
+		}
+		next := model.SubscriptionEpisode{
+			SubscriptionID:    sub.ID,
+			Episode:           record.Episode,
+			Status:            record.Status,
+			ActiveDownloadID:  nil,
+			ActiveTorrentHash: record.ActiveTorrentHash,
+			ActiveTorrentURL:  record.ActiveTorrentURL,
+			ActiveTitle:       record.ActiveTitle,
+			StatusSource:      record.StatusSource,
+			DownloadedAt:      record.DownloadedAt,
+		}
+		if !exists {
+			if err := tx.Create(&next).Error; err != nil {
+				return err
+			}
+			state.episodes[key] = next
+			continue
+		}
+		if strategy == StrategyOverwrite {
+			next.ID = existing.ID
+			next.CreatedAt = existing.CreatedAt
+			if err := tx.Save(&next).Error; err != nil {
+				return err
+			}
+			state.episodes[key] = next
+		}
+	}
+
+	for _, record := range pkg.EpisodeCandidates {
+		normalizeCandidateRecord(&record)
+		episodeKey := episodeRecordKey(record.SubscriptionKey, record.Episode)
+		ledger := state.episodes[episodeKey]
+		resourceKey := candidateResourceKey(record)
+		key := candidateStateKey(episodeKey, resourceKey)
+		existing, exists := state.candidates[key]
+		next := model.EpisodeResourceCandidate{
+			SubscriptionEpisodeID: ledger.ID,
+			ResourceKey:           resourceKey,
+			TorrentHash:           record.TorrentHash,
+			TorrentURL:            record.TorrentURL,
+			Title:                 record.Title,
+			Fansub:                record.Fansub,
+			Language:              record.Language,
+			PubTime:               record.PubTime,
+			SourceRSSURL:          record.SourceRSSURL,
+			Status:                record.Status,
+			FailureReason:         record.FailureReason,
+		}
+		if !exists {
+			if err := tx.Create(&next).Error; err != nil {
+				return err
+			}
+			state.candidates[key] = next
+			continue
+		}
+		if strategy == StrategyOverwrite {
+			next.ID = existing.ID
+			next.CreatedAt = existing.CreatedAt
+			if err := tx.Save(&next).Error; err != nil {
+				return err
+			}
+			state.candidates[key] = next
 		}
 	}
 
@@ -825,6 +1125,7 @@ func prepareSubscription(record SubscriptionRecord, state *currentState) model.S
 	sub.Group = nil
 	sub.RSSSource = nil
 	sub.Downloads = nil
+	sub.Feeds = nil
 
 	if record.GroupName != "" {
 		if group, ok := state.groups[normalizedKey(record.GroupName)]; ok {
@@ -848,6 +1149,84 @@ func prepareSubscription(record SubscriptionRecord, state *currentState) model.S
 		sub.SourceType = "manual"
 	}
 	return sub
+}
+
+func sanitizeFeedForBackup(feed model.SubscriptionFeed) model.SubscriptionFeed {
+	feed.ID = 0
+	feed.SubscriptionID = 0
+	feed.RSSURLNormalized = ""
+	feed.LastRSSPubTime = nil
+	feed.BaselinePending = false
+	feed.LastCheckTime = nil
+	feed.LastSuccessAt = nil
+	feed.LastError = ""
+	feed.CreatedAt = time.Time{}
+	feed.UpdatedAt = time.Time{}
+	return feed
+}
+
+func ensureSubscriptionRecordFeeds(record *SubscriptionRecord) {
+	if len(record.Feeds) > 0 || strings.TrimSpace(record.RssURL) == "" {
+		return
+	}
+	record.Feeds = []model.SubscriptionFeed{{
+		Name:          "Default",
+		Fansub:        record.Fansub,
+		RSSURL:        record.RssURL,
+		EpisodeOffset: record.EpisodeOffset,
+		Enabled:       true,
+	}}
+}
+
+func restoreSubscriptionFeeds(tx *gorm.DB, record SubscriptionRecord, subscriptionID uint, strategy string) error {
+	feeds := append([]model.SubscriptionFeed(nil), record.Feeds...)
+	repo := repository.NewSubscriptionFeedRepository(tx)
+	if strategy == StrategyOverwrite {
+		existing, err := repo.ListBySubscription(subscriptionID)
+		if err != nil {
+			return err
+		}
+		for _, feed := range existing {
+			if err := repo.DeleteInTx(tx, feed.ID); err != nil {
+				return err
+			}
+		}
+	}
+	if len(feeds) == 0 {
+		return nil
+	}
+	existingByURL := make(map[string]struct{})
+	if strategy == StrategyMerge {
+		existing, err := repo.ListBySubscription(subscriptionID)
+		if err != nil {
+			return err
+		}
+		for _, feed := range existing {
+			existingByURL[feed.RSSURLNormalized] = struct{}{}
+		}
+	}
+	for _, feed := range feeds {
+		normalizedURL := utils.NormalizeFeedURL(feed.RSSURL)
+		if normalizedURL == "" {
+			return fmt.Errorf("subscription %d has invalid feed URL %q", subscriptionID, feed.RSSURL)
+		}
+		if _, exists := existingByURL[normalizedURL]; exists {
+			continue
+		}
+		feed = sanitizeFeedForBackup(feed)
+		feed.SubscriptionID = subscriptionID
+		feed.RSSURL = strings.TrimSpace(feed.RSSURL)
+		feed.RSSURLNormalized = normalizedURL
+		if strings.TrimSpace(feed.Name) == "" {
+			feed.Name = "Default"
+		}
+		feed.BaselinePending = true
+		if err := repo.CreateInTx(tx, &feed); err != nil {
+			return err
+		}
+		existingByURL[normalizedURL] = struct{}{}
+	}
+	return nil
 }
 
 func mergeSubscription(dst *model.Subscription, src model.Subscription) bool {
@@ -918,13 +1297,15 @@ func mergeSubscription(dst *model.Subscription, src model.Subscription) bool {
 	return changed
 }
 
-func (s *Service) loadCurrentState(db *gorm.DB) (*currentState, error) {
+func (s *Service) loadCurrentState(db *gorm.DB, includeOwnership, requireUnique bool) (*currentState, error) {
 	state := &currentState{
 		configs:       map[string]model.Config{},
 		rssSources:    map[string]model.RSSSource{},
 		groups:        map[string]model.SubscriptionGroup{},
 		tags:          map[string]model.SubscriptionTag{},
 		subscriptions: map[string]model.Subscription{},
+		episodes:      map[string]model.SubscriptionEpisode{},
+		candidates:    map[string]model.EpisodeResourceCandidate{},
 		settings:      map[string]model.NotificationSetting{},
 	}
 
@@ -964,8 +1345,59 @@ func (s *Service) loadCurrentState(db *gorm.DB) (*currentState, error) {
 	if err := db.Find(&subscriptions).Error; err != nil {
 		return nil, err
 	}
+	subscriptionKeyByID := make(map[uint]string, len(subscriptions))
 	for _, sub := range subscriptions {
-		state.subscriptions[subscriptionKeyFromModel(sub)] = sub
+		key := subscriptionKeyFromModel(sub)
+		if requireUnique && key == "" {
+			return nil, fmt.Errorf("subscription %d has no stable backup key", sub.ID)
+		}
+		if existing, exists := state.subscriptions[key]; requireUnique && exists && existing.ID != sub.ID {
+			return nil, fmt.Errorf("subscription backup key collision %q", key)
+		}
+		state.subscriptions[key] = sub
+		subscriptionKeyByID[sub.ID] = key
+	}
+	if includeOwnership {
+		var episodes []model.SubscriptionEpisode
+		if err := db.Find(&episodes).Error; err != nil {
+			return nil, err
+		}
+		episodeKeyByID := make(map[uint]string, len(episodes))
+		for _, ledger := range episodes {
+			subscriptionKey, ok := subscriptionKeyByID[ledger.SubscriptionID]
+			if !ok {
+				return nil, fmt.Errorf("episode %d references missing subscription %d", ledger.ID, ledger.SubscriptionID)
+			}
+			key := episodeRecordKey(subscriptionKey, ledger.Episode)
+			if existing, exists := state.episodes[key]; exists && existing.ID != ledger.ID {
+				return nil, fmt.Errorf("episode backup key collision %q", key)
+			}
+			state.episodes[key] = ledger
+			episodeKeyByID[ledger.ID] = key
+		}
+
+		var candidates []model.EpisodeResourceCandidate
+		if err := db.Find(&candidates).Error; err != nil {
+			return nil, err
+		}
+		for _, candidate := range candidates {
+			episodeKey, ok := episodeKeyByID[candidate.SubscriptionEpisodeID]
+			if !ok {
+				return nil, fmt.Errorf("candidate %d references missing episode %d", candidate.ID, candidate.SubscriptionEpisodeID)
+			}
+			resourceKey := episode.ResourceKey(model.EpisodeResource{
+				Hash: candidate.TorrentHash,
+				URL:  candidate.TorrentURL,
+			})
+			if resourceKey == "" {
+				return nil, fmt.Errorf("candidate %d has no stable resource identity", candidate.ID)
+			}
+			key := candidateStateKey(episodeKey, resourceKey)
+			if existing, exists := state.candidates[key]; exists && existing.ID != candidate.ID {
+				return nil, fmt.Errorf("candidate backup key collision %q", key)
+			}
+			state.candidates[key] = candidate
+		}
 	}
 
 	var settings []model.NotificationSetting
@@ -986,6 +1418,8 @@ func (pkg *Package) recount() {
 		Groups:               len(pkg.Groups),
 		Tags:                 len(pkg.Tags),
 		Subscriptions:        len(pkg.Subscriptions),
+		Episodes:             len(pkg.Episodes),
+		EpisodeCandidates:    len(pkg.EpisodeCandidates),
 		SubscriptionTags:     len(pkg.SubscriptionTags),
 		NotificationSettings: len(pkg.NotificationSettings),
 	}
@@ -1093,6 +1527,267 @@ func subscriptionKey(rssURL, name string, season int) string {
 		return ""
 	}
 	return fmt.Sprintf("%s|season:%d", base, season)
+}
+
+func episodeRecordKey(subscriptionKey string, episodeNumber int) string {
+	return fmt.Sprintf("%s|episode:%d", normalizedKey(subscriptionKey), episodeNumber)
+}
+
+func candidateResourceKey(record CandidateRecord) string {
+	return episode.ResourceKey(model.EpisodeResource{
+		Hash: record.TorrentHash,
+		URL:  record.TorrentURL,
+	})
+}
+
+func candidateStateKey(episodeKey, resourceKey string) string {
+	return episodeKey + "|resource:" + resourceKey
+}
+
+func packageHasOwnership(pkg *Package) bool {
+	return len(pkg.Episodes) > 0 || len(pkg.EpisodeCandidates) > 0
+}
+
+type packageItemCounts struct {
+	Configs              int
+	RSSSources           int
+	Groups               int
+	Tags                 int
+	Subscriptions        int
+	Episodes             int
+	Candidates           int
+	SubscriptionTags     int
+	NotificationSettings int
+}
+
+func packageCounts(pkg *Package) packageItemCounts {
+	return packageItemCounts{
+		Configs:              len(pkg.Configs),
+		RSSSources:           len(pkg.RSSSources),
+		Groups:               len(pkg.Groups),
+		Tags:                 len(pkg.Tags),
+		Subscriptions:        len(pkg.Subscriptions),
+		Episodes:             len(pkg.Episodes),
+		Candidates:           len(pkg.EpisodeCandidates),
+		SubscriptionTags:     len(pkg.SubscriptionTags),
+		NotificationSettings: len(pkg.NotificationSettings),
+	}
+}
+
+func (counts packageItemCounts) total() int {
+	return counts.Configs + counts.RSSSources + counts.Groups + counts.Tags + counts.Subscriptions +
+		counts.Episodes + counts.Candidates + counts.SubscriptionTags + counts.NotificationSettings
+}
+
+func validatePackageItemCounts(counts packageItemCounts) error {
+	for _, limit := range []struct {
+		field  string
+		actual int
+		max    int
+	}{
+		{field: "subscriptions", actual: counts.Subscriptions, max: MaxSubscriptionsPerPackage},
+		{field: "episodes", actual: counts.Episodes, max: MaxEpisodesPerPackage},
+		{field: "episode_candidates", actual: counts.Candidates, max: MaxCandidatesPerPackage},
+		{field: "total_items", actual: counts.total(), max: MaxPackageItems},
+	} {
+		if limit.actual > limit.max {
+			return newPackageLimitError(limit.field, limit.actual, limit.max)
+		}
+	}
+	return nil
+}
+
+func validateStableStringBytes(field, value string, limit int) error {
+	if len(value) > limit {
+		return newPackageLimitError(field, len(value), limit)
+	}
+	return nil
+}
+
+func validateOwnershipStringLimits(pkg *Package) error {
+	for i, record := range pkg.Episodes {
+		for _, field := range []struct {
+			name  string
+			value string
+			max   int
+		}{
+			{name: "subscription_key", value: record.SubscriptionKey, max: MaxSubscriptionKeyBytes},
+			{name: "active_torrent_hash", value: record.ActiveTorrentHash, max: MaxTorrentHashBytes},
+			{name: "active_torrent_url", value: record.ActiveTorrentURL, max: MaxURLBytes},
+			{name: "active_title", value: record.ActiveTitle, max: MaxTitleBytes},
+			{name: "status", value: record.Status, max: MaxStatusBytes},
+			{name: "status_source", value: record.StatusSource, max: MaxStatusBytes},
+		} {
+			if err := validateStableStringBytes(fmt.Sprintf("episodes[%d].%s", i, field.name), field.value, field.max); err != nil {
+				return err
+			}
+		}
+	}
+	for i, record := range pkg.EpisodeCandidates {
+		for _, field := range []struct {
+			name  string
+			value string
+			max   int
+		}{
+			{name: "subscription_key", value: record.SubscriptionKey, max: MaxSubscriptionKeyBytes},
+			{name: "torrent_hash", value: record.TorrentHash, max: MaxTorrentHashBytes},
+			{name: "torrent_url", value: record.TorrentURL, max: MaxURLBytes},
+			{name: "title", value: record.Title, max: MaxTitleBytes},
+			{name: "fansub", value: record.Fansub, max: MaxFansubBytes},
+			{name: "language", value: record.Language, max: MaxLanguageBytes},
+			{name: "source_rss_url", value: record.SourceRSSURL, max: MaxURLBytes},
+			{name: "status", value: record.Status, max: MaxStatusBytes},
+			{name: "failure_reason", value: record.FailureReason, max: MaxFailureReasonBytes},
+			{name: "replacement_stage", value: record.runtimeStage, max: MaxStatusBytes},
+		} {
+			if err := validateStableStringBytes(fmt.Sprintf("episode_candidates[%d].%s", i, field.name), field.value, field.max); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func newPackageLimitError(field string, actual, limit int) error {
+	return &PackageLimitError{Field: field, Actual: actual, Limit: limit}
+}
+
+func validatePackage(pkg *Package) error {
+	// Raw JSON is capped first. Count and field limits remain defense in depth for
+	// exports, direct validation, and future non-JSON inputs; they do not promise
+	// that a 200k-candidate JSON package fits within MaxPackageBytes.
+	if err := validatePackageItemCounts(packageCounts(pkg)); err != nil {
+		return err
+	}
+	if err := validateOwnershipStringLimits(pkg); err != nil {
+		return err
+	}
+	hasOwnership := packageHasOwnership(pkg)
+	subscriptionKeys := make(map[string]struct{}, len(pkg.Subscriptions))
+	for i, record := range pkg.Subscriptions {
+		key := subscriptionKeyFromRecord(record)
+		if hasOwnership && key == "" {
+			return fmt.Errorf("subscriptions[%d]: missing stable subscription key", i)
+		}
+		if _, exists := subscriptionKeys[key]; hasOwnership && exists {
+			return fmt.Errorf("subscriptions[%d]: subscription key collision %q", i, key)
+		}
+		subscriptionKeys[key] = struct{}{}
+	}
+
+	episodeKeys := make(map[string]struct{}, len(pkg.Episodes))
+	for i, record := range pkg.Episodes {
+		subscriptionKey := normalizedKey(record.SubscriptionKey)
+		if _, exists := subscriptionKeys[subscriptionKey]; !exists {
+			return fmt.Errorf("episodes[%d]: missing subscription %q", i, record.SubscriptionKey)
+		}
+		if record.Episode <= 0 || record.Episode > model.MaxSubscriptionEpisodes {
+			return fmt.Errorf("episodes[%d]: invalid episode %d", i, record.Episode)
+		}
+		if !validEpisodeStatus(record.Status) {
+			return fmt.Errorf("episodes[%d]: invalid status %q", i, record.Status)
+		}
+		if !validEpisodeStatusSource(record.StatusSource) {
+			return fmt.Errorf("episodes[%d]: invalid status_source %q", i, record.StatusSource)
+		}
+		key := episodeRecordKey(subscriptionKey, record.Episode)
+		if _, exists := episodeKeys[key]; exists {
+			return fmt.Errorf("episodes[%d]: episode key collision %q", i, key)
+		}
+		episodeKeys[key] = struct{}{}
+		pkg.Episodes[i].SubscriptionKey = subscriptionKey
+	}
+
+	candidateKeys := make(map[string]struct{}, len(pkg.EpisodeCandidates))
+	for i, record := range pkg.EpisodeCandidates {
+		subscriptionKey := normalizedKey(record.SubscriptionKey)
+		episodeKey := episodeRecordKey(subscriptionKey, record.Episode)
+		if _, exists := episodeKeys[episodeKey]; !exists {
+			return fmt.Errorf("episode_candidates[%d]: missing episode %q", i, episodeKey)
+		}
+		if !validCandidateStatus(record.Status) {
+			return fmt.Errorf("episode_candidates[%d]: invalid status %q", i, record.Status)
+		}
+		resourceKey := candidateResourceKey(record)
+		if resourceKey == "" {
+			return fmt.Errorf("episode_candidates[%d]: missing resource identity", i)
+		}
+		key := candidateStateKey(episodeKey, resourceKey)
+		if _, exists := candidateKeys[key]; exists {
+			return fmt.Errorf("episode_candidates[%d]: candidate key collision %q", i, key)
+		}
+		candidateKeys[key] = struct{}{}
+		pkg.EpisodeCandidates[i].SubscriptionKey = subscriptionKey
+	}
+
+	return nil
+}
+
+func validEpisodeStatus(status string) bool {
+	switch status {
+	case model.EpisodeStatusMissing,
+		model.EpisodeStatusDownloading,
+		model.EpisodeStatusDownloaded,
+		model.EpisodeStatusMarkedDownloaded,
+		model.EpisodeStatusIgnored:
+		return true
+	default:
+		return false
+	}
+}
+
+func validEpisodeStatusSource(source string) bool {
+	switch source {
+	case model.EpisodeStatusSourceAutomatic,
+		model.EpisodeStatusSourceUser,
+		model.EpisodeStatusSourceMigration:
+		return true
+	default:
+		return false
+	}
+}
+
+func validCandidateStatus(status string) bool {
+	switch status {
+	case model.CandidateStatusPending,
+		model.CandidateStatusKeptExisting,
+		model.CandidateStatusReplacing,
+		model.CandidateStatusAccepted,
+		model.CandidateStatusAcceptedCleanupFailed,
+		model.CandidateStatusFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeEpisodeRecord(record *EpisodeRecord) {
+	if record.Status != model.EpisodeStatusDownloading {
+		return
+	}
+	record.Status = model.EpisodeStatusMissing
+	record.ActiveTorrentHash = ""
+	record.ActiveTorrentURL = ""
+	record.ActiveTitle = ""
+	record.DownloadedAt = nil
+}
+
+func normalizeCandidateRecord(record *CandidateRecord) {
+	if record.Status != model.CandidateStatusReplacing &&
+		record.Status != model.CandidateStatusAcceptedCleanupFailed &&
+		record.runtimeStage == "" {
+		return
+	}
+	record.Status = model.CandidateStatusFailed
+	const reason = "restored_without_runtime_task"
+	if !strings.Contains(record.FailureReason, reason) {
+		if strings.TrimSpace(record.FailureReason) == "" {
+			record.FailureReason = reason
+		} else {
+			record.FailureReason = strings.TrimSpace(record.FailureReason) + "; " + reason
+		}
+	}
+	record.runtimeStage = ""
 }
 
 func firstNonEmpty(values map[string]any, keys ...string) string {

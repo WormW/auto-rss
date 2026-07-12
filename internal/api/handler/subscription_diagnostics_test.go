@@ -6,16 +6,95 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/downloader"
+	episodeservice "github.com/WormW/auto-rss/internal/service/episode"
+	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+func TestSubscriptionDiagnosticsReportsFeedHealthAndFreshness(t *testing.T) {
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthy" {
+			w.Header().Set("Content-Type", "application/rss+xml")
+			_, _ = w.Write([]byte(validRSSFeed("Healthy Feed")))
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(gateway.Close)
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(
+		&model.Subscription{}, &model.SubscriptionFeed{}, &model.Download{}, &model.SubscriptionEpisode{}, &model.EpisodeResourceCandidate{}, &model.Config{},
+	))
+	subRepo := repository.NewSubscriptionRepository(db)
+	feedRepo := repository.NewSubscriptionFeedRepository(db)
+	downloadRepo := repository.NewDownloadRepository(db)
+	sub := model.Subscription{Name: "Multi Feed", Enabled: true, RssURL: "https://legacy.invalid/rss"}
+	require.NoError(t, subRepo.Create(&sub))
+	lastSuccess := time.Now().Add(-time.Hour)
+	lastPost := time.Now().Add(-2 * time.Hour)
+	for _, feed := range []model.SubscriptionFeed{
+		{SubscriptionID: sub.ID, Name: "Dead", RSSURL: gateway.URL + "/dead", RSSURLNormalized: gateway.URL + "/dead", Enabled: true},
+		{SubscriptionID: sub.ID, Name: "Healthy", RSSURL: gateway.URL + "/healthy", RSSURLNormalized: gateway.URL + "/healthy", Enabled: true, LastSuccessAt: &lastSuccess, LastRSSPubTime: &lastPost},
+	} {
+		feed := feed
+		require.NoError(t, feedRepo.Create(&feed))
+	}
+
+	handler := NewSubscriptionDiagnosticsHandler(subRepo, feedRepo, downloadRepo, repository.NewConfigRepository(db), nil, t.TempDir())
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/subscriptions/:id/diagnostics", handler.Get)
+	router.POST("/subscriptions/:id/diagnostics/checks/:key", handler.Check)
+
+	initial := performSubscriptionDiagnosticsRequest(router, http.MethodGet, "/subscriptions/1/diagnostics")
+	require.Equal(t, http.StatusOK, initial.Code, initial.Body.String())
+	var initialResponse struct {
+		Data SubscriptionDiagnosticsResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(initial.Body.Bytes(), &initialResponse))
+	require.Len(t, initialResponse.Data.Feeds, 2)
+	assert.Equal(t, rss.HealthStatusUnknown, initialResponse.Data.Feeds[0].Status)
+
+	reachability := performSubscriptionDiagnosticsRequest(router, http.MethodPost, "/subscriptions/1/diagnostics/checks/rss_reachability")
+	require.Equal(t, http.StatusOK, reachability.Code, reachability.Body.String())
+	reachabilityResult := decodeSubscriptionDiagnosticCheck(t, reachability)
+	assert.Equal(t, SubscriptionDiagnosticWarning, reachabilityResult.Check.Status)
+	assert.Contains(t, reachabilityResult.Check.Detail, "Dead")
+	require.Len(t, reachabilityResult.Feeds, 2)
+
+	freshness := performSubscriptionDiagnosticsRequest(router, http.MethodPost, "/subscriptions/1/diagnostics/checks/rss_freshness")
+	require.Equal(t, http.StatusOK, freshness.Code, freshness.Body.String())
+	freshnessResult := decodeSubscriptionDiagnosticCheck(t, freshness)
+	assert.Equal(t, SubscriptionDiagnosticHealthy, freshnessResult.Check.Status)
+	assert.Contains(t, freshnessResult.Check.Detail, "feed 水位线")
+}
+
+func TestBuildRSSReachabilityCheckReportsErrorWhenAllFeedsFail(t *testing.T) {
+	handler := &SubscriptionDiagnosticsHandler{}
+	check := handler.buildRSSReachabilityCheck(&rss.HealthCheckResult{
+		Status: rss.HealthStatusDead,
+		Feeds: []rss.FeedHealthCheckResult{
+			{Name: "A", Status: rss.HealthStatusDead, ErrorMessage: "timeout"},
+			{Name: "B", Status: rss.HealthStatusUnhealthy, ErrorMessage: "parse failed"},
+		},
+	})
+
+	assert.Equal(t, SubscriptionDiagnosticError, check.Status)
+	assert.True(t, strings.Contains(check.Detail, "A") && strings.Contains(check.Detail, "B"))
+}
 
 func TestSubscriptionDiagnosticsHandler_GetInitialState(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -29,7 +108,7 @@ func TestSubscriptionDiagnosticsHandler_GetInitialState(t *testing.T) {
 	}
 	require.NoError(t, subRepo.Create(&sub))
 
-	handler := NewSubscriptionDiagnosticsHandler(subRepo, nil, nil, nil, "/path-that-must-not-be-statted")
+	handler := NewSubscriptionDiagnosticsHandler(subRepo, nil, nil, nil, nil, "/path-that-must-not-be-statted")
 	r := gin.New()
 	r.GET("/subscriptions/:id/diagnostics", handler.Get)
 	w := performSubscriptionDiagnosticsRequest(r, http.MethodGet, "/subscriptions/1/diagnostics")
@@ -72,7 +151,7 @@ func TestSubscriptionDiagnosticsHandler_Check(t *testing.T) {
 		sub := model.Subscription{Name: "Check Anime", Enabled: true, Status: "active"}
 		require.NoError(t, subRepo.Create(&sub))
 
-		handler := NewSubscriptionDiagnosticsHandler(subRepo, nil, nil, nil, t.TempDir())
+		handler := NewSubscriptionDiagnosticsHandler(subRepo, nil, nil, nil, nil, t.TempDir())
 		r := gin.New()
 		r.POST("/subscriptions/:id/diagnostics/checks/:key", handler.Check)
 
@@ -91,7 +170,7 @@ func TestSubscriptionDiagnosticsHandler_Check(t *testing.T) {
 		sub := model.Subscription{Name: "Incomplete Anime", Enabled: true, RenameEnabled: false}
 		require.NoError(t, subRepo.Create(&sub))
 
-		handler := NewSubscriptionDiagnosticsHandler(subRepo, downloadRepo, nil, nil, t.TempDir())
+		handler := NewSubscriptionDiagnosticsHandler(subRepo, nil, downloadRepo, nil, nil, t.TempDir())
 		r := gin.New()
 		r.POST("/subscriptions/:id/diagnostics/checks/:key", handler.Check)
 
@@ -114,7 +193,7 @@ func TestSubscriptionDiagnosticsHandler_Check(t *testing.T) {
 		}
 		require.NoError(t, subRepo.Create(&sub))
 
-		handler := NewSubscriptionDiagnosticsHandler(subRepo, nil, nil, nil, t.TempDir())
+		handler := NewSubscriptionDiagnosticsHandler(subRepo, nil, nil, nil, nil, t.TempDir())
 		r := gin.New()
 		r.POST("/subscriptions/:id/diagnostics/checks/:key", handler.Check)
 		w := performSubscriptionDiagnosticsRequest(r, http.MethodPost, "/subscriptions/1/diagnostics/checks/episode_progress")
@@ -144,7 +223,7 @@ func TestSubscriptionDiagnosticsHandler_Check(t *testing.T) {
 			torrents: []*downloader.TorrentInfo{{Hash: "another-hash"}},
 		}
 
-		handler := NewSubscriptionDiagnosticsHandler(subRepo, downloadRepo, nil, qb, t.TempDir())
+		handler := NewSubscriptionDiagnosticsHandler(subRepo, nil, downloadRepo, nil, qb, t.TempDir())
 		r := gin.New()
 		r.POST("/subscriptions/:id/diagnostics/checks/:key", handler.Check)
 		w := performSubscriptionDiagnosticsRequest(r, http.MethodPost, "/subscriptions/1/diagnostics/checks/qbittorrent")
@@ -165,7 +244,7 @@ func TestSubscriptionDiagnosticsHandler_Check(t *testing.T) {
 		sub := model.Subscription{Name: "Downloads Anime", Enabled: true}
 		require.NoError(t, subRepo.Create(&sub))
 
-		handler := NewSubscriptionDiagnosticsHandler(subRepo, downloadRepo, nil, nil, t.TempDir())
+		handler := NewSubscriptionDiagnosticsHandler(subRepo, nil, downloadRepo, nil, nil, t.TempDir())
 		r := gin.New()
 		r.POST("/subscriptions/:id/diagnostics/checks/:key", handler.Check)
 		w := performSubscriptionDiagnosticsRequest(r, http.MethodPost, "/subscriptions/1/diagnostics/checks/downloads")
@@ -188,7 +267,7 @@ func TestSubscriptionDiagnosticsHandler_Check(t *testing.T) {
 		require.NoError(t, subRepo.Create(&sub))
 		require.NoError(t, configRepo.Set("system_proxy", proxy.URL))
 
-		handler := NewSubscriptionDiagnosticsHandler(subRepo, nil, configRepo, nil, t.TempDir())
+		handler := NewSubscriptionDiagnosticsHandler(subRepo, nil, nil, configRepo, nil, t.TempDir())
 		r := gin.New()
 		r.POST("/subscriptions/:id/diagnostics/checks/:key", handler.Check)
 		w := performSubscriptionDiagnosticsRequest(r, http.MethodPost, "/subscriptions/1/diagnostics/checks/rss_reachability")
@@ -205,7 +284,9 @@ func TestSubscriptionDiagnosticsHandler_RetryFailedResetsRetryableDownloads(t *t
 
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.Subscription{}, &model.Download{}, &model.Config{}))
+	require.NoError(t, db.AutoMigrate(
+		&model.Subscription{}, &model.SubscriptionFeed{}, &model.Download{}, &model.SubscriptionEpisode{}, &model.EpisodeResourceCandidate{}, &model.Config{},
+	))
 
 	subRepo := repository.NewSubscriptionRepository(db)
 	downloadRepo := repository.NewDownloadRepository(db)
@@ -225,6 +306,13 @@ func TestSubscriptionDiagnosticsHandler_RetryFailedResetsRetryableDownloads(t *t
 		LastError:      "timeout",
 	}
 	require.NoError(t, downloadRepo.Create(&failed))
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID: sub.ID,
+		Episode:        1,
+		Status:         model.EpisodeStatusMissing,
+		StatusSource:   model.EpisodeStatusSourceAutomatic,
+	}
+	require.NoError(t, db.Create(&ledger).Error)
 	require.NoError(t, downloadRepo.Create(&model.Download{
 		SubscriptionID: sub.ID,
 		Title:          "Retry Anime 02",
@@ -233,7 +321,9 @@ func TestSubscriptionDiagnosticsHandler_RetryFailedResetsRetryableDownloads(t *t
 		Status:         model.DownloadStatusFailed,
 	}))
 
-	handler := NewSubscriptionDiagnosticsHandler(subRepo, downloadRepo, nil, nil, t.TempDir())
+	episodeRepo := repository.NewEpisodeRepository(db)
+	qb := &mockQBittorrentClient{}
+	handler := NewSubscriptionDiagnosticsHandler(subRepo, repository.NewSubscriptionFeedRepository(db), downloadRepo, nil, qb, t.TempDir(), episodeservice.NewService(episodeRepo))
 	r := gin.New()
 	r.POST("/subscriptions/:id/diagnostics/retry-failed", handler.RetryFailed)
 
@@ -251,74 +341,83 @@ func TestSubscriptionDiagnosticsHandler_RetryFailedResetsRetryableDownloads(t *t
 	require.Equal(t, 1, resp.Data.Retried)
 	require.Equal(t, 1, resp.Data.Skipped)
 	require.Equal(t, 0, resp.Data.Failed)
+	require.Len(t, resp.Data.Results, 2)
+	var retryResult *SubscriptionRetryResult
+	for i := range resp.Data.Results {
+		if resp.Data.Results[i].ID == failed.ID {
+			retryResult = &resp.Data.Results[i]
+			break
+		}
+	}
+	require.NotNil(t, retryResult)
+	require.Equal(t, model.DownloadStatusRetryCleanup, retryResult.Status)
+	require.Equal(t, "已排队清理旧下载，清理完成后将自动重试", retryResult.Message)
 
 	updated, err := downloadRepo.GetByID(failed.ID)
 	require.NoError(t, err)
-	require.Equal(t, model.DownloadStatusPending, updated.Status)
+	require.Equal(t, model.DownloadStatusRetryCleanup, updated.Status)
 	require.Equal(t, 0, updated.RetryCount)
-	require.Empty(t, updated.TorrentHash)
+	require.Equal(t, "old-hash", updated.TorrentHash)
 	require.Empty(t, updated.LastError)
 	require.Equal(t, "user_retry", updated.RetryReason)
+	require.False(t, qb.deleteWithPayloadCalled)
+	require.False(t, qb.addCalled, "DownloadMonitor must own the first qBittorrent Add")
+	after, err := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
+	require.NoError(t, err)
+	require.Equal(t, model.EpisodeStatusDownloading, after.Status)
+	require.NotNil(t, after.ActiveDownloadID)
+	require.Equal(t, failed.ID, *after.ActiveDownloadID)
 }
 
-func TestSubscriptionDiagnosticsHandler_RetryFailedPreservesPayload(t *testing.T) {
-	t.Run("removes the old task without deleting payload", func(t *testing.T) {
-		_, subRepo, downloadRepo, _ := setupSubscriptionDiagnosticsTest(t)
-		sub := model.Subscription{Name: "Retry Anime", Enabled: true}
-		require.NoError(t, subRepo.Create(&sub))
-		download := model.Download{
-			SubscriptionID: sub.ID,
-			Title:          "Retry Anime 01",
-			TorrentURL:     "magnet:?xt=urn:btih:retry",
-			TorrentHash:    "old-hash",
-			Status:         model.DownloadStatusStalled,
-		}
-		require.NoError(t, downloadRepo.Create(&download))
-		qb := &subscriptionDiagnosticsQBClient{addHash: "new-hash"}
+func TestSubscriptionDiagnosticsRetryConflictDoesNotDeletePayload(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(
+		&model.Subscription{}, &model.SubscriptionFeed{}, &model.Download{}, &model.SubscriptionEpisode{}, &model.EpisodeResourceCandidate{},
+	))
+	sub := model.Subscription{Name: "Diagnostics Conflict", Season: 1}
+	require.NoError(t, db.Create(&sub).Error)
+	oldDownload := model.Download{
+		SubscriptionID: sub.ID, Title: "old", Episode: 1,
+		TorrentURL: "magnet:old", TorrentHash: "old-hash", Status: model.DownloadStatusFailed,
+		RetryCount: 3, MaxRetries: 3,
+	}
+	require.NoError(t, db.Create(&oldDownload).Error)
+	otherDownload := model.Download{
+		SubscriptionID: sub.ID, Title: "other", Episode: 1,
+		TorrentURL: "magnet:other", TorrentHash: "other-hash", Status: model.DownloadStatusDownloading,
+	}
+	require.NoError(t, db.Create(&otherDownload).Error)
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID: sub.ID, Episode: 1, Status: model.EpisodeStatusDownloading,
+		StatusSource: model.EpisodeStatusSourceAutomatic, ActiveDownloadID: &otherDownload.ID,
+		ActiveTorrentHash: otherDownload.TorrentHash,
+	}
+	require.NoError(t, db.Create(&ledger).Error)
+	downloadRepo := repository.NewDownloadRepository(db)
+	episodeRepo := repository.NewEpisodeRepository(db)
+	qb := &mockQBittorrentClient{}
+	handler := NewSubscriptionDiagnosticsHandler(
+		repository.NewSubscriptionRepository(db),
+		repository.NewSubscriptionFeedRepository(db),
+		downloadRepo,
+		nil,
+		qb,
+		t.TempDir(),
+		episodeservice.NewService(episodeRepo),
+	)
 
-		handler := NewSubscriptionDiagnosticsHandler(subRepo, downloadRepo, nil, qb, t.TempDir())
-		w := retryFailedSubscriptionDiagnostics(t, handler)
-		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-		require.Equal(t, 1, qb.removeCalls)
-		require.Equal(t, 0, qb.deletePayloadCalls)
-		require.Equal(t, 1, qb.addCalls)
-	})
-
-	t.Run("does not mutate or re-add when removing the old task fails", func(t *testing.T) {
-		_, subRepo, downloadRepo, _ := setupSubscriptionDiagnosticsTest(t)
-		sub := model.Subscription{Name: "Retry Anime", Enabled: true}
-		require.NoError(t, subRepo.Create(&sub))
-		download := model.Download{
-			SubscriptionID: sub.ID,
-			Title:          "Retry Anime 01",
-			TorrentURL:     "magnet:?xt=urn:btih:retry",
-			TorrentHash:    "old-hash",
-			Status:         model.DownloadStatusStalled,
-			RetryCount:     2,
-			LastError:      "stalled",
-		}
-		require.NoError(t, downloadRepo.Create(&download))
-		qb := &subscriptionDiagnosticsQBClient{removeErr: errors.New("remove failed")}
-
-		handler := NewSubscriptionDiagnosticsHandler(subRepo, downloadRepo, nil, qb, t.TempDir())
-		w := retryFailedSubscriptionDiagnostics(t, handler)
-		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-
-		var resp struct {
-			Data SubscriptionRetryFailedResponse `json:"data"`
-		}
-		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-		require.Equal(t, 1, resp.Data.Failed)
-		require.Equal(t, 1, qb.removeCalls)
-		require.Equal(t, 0, qb.addCalls)
-
-		updated, err := downloadRepo.GetByID(download.ID)
-		require.NoError(t, err)
-		require.Equal(t, model.DownloadStatusStalled, updated.Status)
-		require.Equal(t, "old-hash", updated.TorrentHash)
-		require.Equal(t, 2, updated.RetryCount)
-		require.Equal(t, "stalled", updated.LastError)
-	})
+	err = handler.retryDownload(&sub, &oldDownload)
+	require.Error(t, err)
+	require.False(t, qb.deleteWithPayloadCalled)
+	persisted, reloadErr := downloadRepo.GetByID(oldDownload.ID)
+	require.NoError(t, reloadErr)
+	require.Equal(t, model.DownloadStatusFailed, persisted.Status)
+	require.Equal(t, "old-hash", persisted.TorrentHash)
+	after, reloadErr := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
+	require.NoError(t, reloadErr)
+	require.NotNil(t, after.ActiveDownloadID)
+	require.Equal(t, otherDownload.ID, *after.ActiveDownloadID)
 }
 
 func setupSubscriptionDiagnosticsTest(t *testing.T) (*gorm.DB, repository.SubscriptionRepository, repository.DownloadRepository, repository.ConfigRepository) {
@@ -382,6 +481,9 @@ func (q *subscriptionDiagnosticsQBClient) AddTorrent(string, string, string) (st
 	}
 	return q.addHash, nil
 }
+func (q *subscriptionDiagnosticsQBClient) AddTorrentExclusive(url, savePath, category, _ string) (string, error) {
+	return q.AddTorrent(url, savePath, category)
+}
 func (q *subscriptionDiagnosticsQBClient) AddTorrentFile(string, []byte, string, string) (string, error) {
 	return "", nil
 }
@@ -398,6 +500,8 @@ func (q *subscriptionDiagnosticsQBClient) SetLocation(string, string) error { re
 func (q *subscriptionDiagnosticsQBClient) RenameTorrentFile(string, string, string) error {
 	return nil
 }
+func (q *subscriptionDiagnosticsQBClient) PauseTorrent(string) error  { return nil }
+func (q *subscriptionDiagnosticsQBClient) ResumeTorrent(string) error { return nil }
 func (q *subscriptionDiagnosticsQBClient) RemoveTorrentTask(string) error {
 	q.removeCalls++
 	return q.removeErr

@@ -32,11 +32,13 @@ const (
 
 type SubscriptionDiagnosticsHandler struct {
 	subscriptionRepo repository.SubscriptionRepository
+	feedRepo         rss.SubscriptionFeedReader
 	downloadRepo     repository.DownloadRepository
 	configRepo       repository.ConfigRepository
 	qbClient         downloader.QBittorrentClient
 	downloadPath     string
 	rssHealthChecker *rss.RSSHealthChecker
+	requeueSvc       DownloadRequeueService
 }
 
 type SubscriptionDiagnosticCheck struct {
@@ -143,6 +145,7 @@ type SubscriptionDiagnosticsResponse struct {
 	Name           string                          `json:"name"`
 	Enabled        bool                            `json:"enabled"`
 	CheckedAt      time.Time                       `json:"checked_at"`
+	Feeds          []rss.FeedHealthCheckResult     `json:"feeds"`
 	Summary        SubscriptionDiagnosticSummary   `json:"summary"`
 	Checks         []SubscriptionDiagnosticCheck   `json:"checks"`
 	Downloads      SubscriptionDownloadDiagnostics `json:"downloads"`
@@ -153,6 +156,7 @@ type SubscriptionDiagnosticsResponse struct {
 
 type SubscriptionDiagnosticCheckResponse struct {
 	Check     SubscriptionDiagnosticCheck           `json:"check"`
+	Feeds     []rss.FeedHealthCheckResult           `json:"feeds,omitempty"`
 	Downloads *SubscriptionDownloadDiagnosticsPatch `json:"downloads,omitempty"`
 	Files     *SubscriptionFileDiagnosticsPatch     `json:"files,omitempty"`
 	Disk      *SubscriptionDiskDiagnostics          `json:"disk,omitempty"`
@@ -177,24 +181,44 @@ type SubscriptionRetryResult struct {
 
 func NewSubscriptionDiagnosticsHandler(
 	subscriptionRepo repository.SubscriptionRepository,
+	feedRepo rss.SubscriptionFeedReader,
 	downloadRepo repository.DownloadRepository,
 	configRepo repository.ConfigRepository,
 	qbClient downloader.QBittorrentClient,
 	downloadPath string,
+	requeueSvc ...DownloadRequeueService,
 ) *SubscriptionDiagnosticsHandler {
+	var requeue DownloadRequeueService
+	if len(requeueSvc) > 0 {
+		requeue = requeueSvc[0]
+	}
 	return &SubscriptionDiagnosticsHandler{
 		subscriptionRepo: subscriptionRepo,
+		feedRepo:         feedRepo,
 		downloadRepo:     downloadRepo,
 		configRepo:       configRepo,
 		qbClient:         qbClient,
 		downloadPath:     downloadPath,
-		rssHealthChecker: rss.NewHealthChecker(subscriptionRepo),
+		rssHealthChecker: rss.NewHealthChecker(subscriptionRepo, feedRepo),
+		requeueSvc:       requeue,
 	}
 }
 
 func (h *SubscriptionDiagnosticsHandler) Get(c *gin.Context) {
 	subscription, ok := h.loadSubscription(c)
 	if !ok {
+		return
+	}
+
+	enabledFeeds, err := h.loadEnabledFeeds(subscription)
+	if err != nil {
+		logger.Error("Failed to list feeds for subscription diagnostics",
+			"subscription_id", subscription.ID,
+			"error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "获取订阅源失败",
+		})
 		return
 	}
 
@@ -209,6 +233,7 @@ func (h *SubscriptionDiagnosticsHandler) Get(c *gin.Context) {
 			Name:           subscription.Name,
 			Enabled:        subscription.Enabled,
 			CheckedAt:      time.Now(),
+			Feeds:          feedHealthSnapshots(enabledFeeds),
 			Summary:        summary,
 			Checks:         checks,
 			Downloads: SubscriptionDownloadDiagnostics{
@@ -217,7 +242,7 @@ func (h *SubscriptionDiagnosticsHandler) Get(c *gin.Context) {
 			Files: SubscriptionFileDiagnostics{
 				MissingEpisodes: []int{},
 			},
-			Actions: h.buildActions(subscription, SubscriptionDownloadDiagnostics{}, false),
+			Actions: h.buildActions(subscription, SubscriptionDownloadDiagnostics{}, false, len(enabledFeeds) > 0),
 		},
 	})
 }
@@ -230,14 +255,30 @@ func (h *SubscriptionDiagnosticsHandler) Check(c *gin.Context) {
 
 	key := c.Param("key")
 	result := SubscriptionDiagnosticCheckResponse{}
+	enabledFeeds, err := h.loadEnabledFeeds(subscription)
+	if err != nil {
+		logger.Error("Failed to list feeds for subscription diagnostic check",
+			"subscription_id", subscription.ID,
+			"error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "获取订阅源失败",
+		})
+		return
+	}
 
 	switch key {
 	case "subscription_enabled":
 		result.Check = h.buildEnabledCheck(subscription)
 	case "rss_reachability":
-		result.Check = h.runRSSReachabilityCheck(c.Request.Context(), subscription)
+		healthResult, check := h.runRSSReachabilityCheck(c.Request.Context(), subscription, enabledFeeds)
+		result.Check = check
+		if healthResult != nil {
+			result.Feeds = healthResult.Feeds
+		}
 	case "rss_freshness":
-		result.Check = h.buildRSSFreshnessCheck(subscription)
+		result.Check = h.buildRSSFreshnessCheck(enabledFeeds)
+		result.Feeds = feedHealthSnapshots(enabledFeeds)
 	case "episode_progress":
 		pending := computeMissingEpisodes(subscription)
 		result.Check = h.buildEpisodeProgressCheck(pending)
@@ -250,7 +291,7 @@ func (h *SubscriptionDiagnosticsHandler) Check(c *gin.Context) {
 		summary, check := h.buildDownloadDiagnostics(downloads)
 		result.Check = check
 		result.Downloads = downloadDiagnosticsPatch(summary)
-		result.Actions = h.buildActions(subscription, summary, true)
+		result.Actions = h.buildActions(subscription, summary, true, len(enabledFeeds) > 0)
 	case "qbittorrent":
 		downloads, ok := h.loadDownloads(c, subscription.ID)
 		if !ok {
@@ -268,7 +309,7 @@ func (h *SubscriptionDiagnosticsHandler) Check(c *gin.Context) {
 		files, check := h.buildFileDiagnostics(subscription, downloads, expectedPath)
 		result.Check = check
 		result.Files = fileDiagnosticsPatch(files)
-		result.Actions = h.buildActions(subscription, downloadSummaryForActions(downloads), true)
+		result.Actions = h.buildActions(subscription, downloadSummaryForActions(downloads), true, len(enabledFeeds) > 0)
 	case "organizer":
 		downloads, ok := h.loadDownloads(c, subscription.ID)
 		if !ok {
@@ -277,7 +318,7 @@ func (h *SubscriptionDiagnosticsHandler) Check(c *gin.Context) {
 		files, check := h.buildOrganizerDiagnostics(subscription, downloads)
 		result.Check = check
 		result.Files = organizerDiagnosticsPatch(files)
-		result.Actions = h.buildActions(subscription, downloadSummaryForActions(downloads), true)
+		result.Actions = h.buildActions(subscription, downloadSummaryForActions(downloads), true, len(enabledFeeds) > 0)
 	case "disk":
 		diskInfo, check := h.buildDiskDiagnostics(h.resolveBaseDownloadPath())
 		result.Check = check
@@ -348,13 +389,8 @@ func (h *SubscriptionDiagnosticsHandler) RetryFailed(c *gin.Context) {
 
 		response.Retried++
 		result.Success = true
-		if h.qbClient != nil {
-			result.Status = model.DownloadStatusDownloading
-			result.Message = "已重新添加到 qBittorrent"
-		} else {
-			result.Status = model.DownloadStatusPending
-			result.Message = "已重置为待下载，等待后台调度"
-		}
+		result.Status = model.DownloadStatusRetryCleanup
+		result.Message = "已排队清理旧下载，清理完成后将自动重试"
 		response.Results = append(response.Results, result)
 	}
 
@@ -410,6 +446,51 @@ func (h *SubscriptionDiagnosticsHandler) loadDownloads(c *gin.Context, subscript
 	return downloads, true
 }
 
+func (h *SubscriptionDiagnosticsHandler) loadEnabledFeeds(subscription *model.Subscription) ([]model.SubscriptionFeed, error) {
+	if h.feedRepo == nil {
+		if strings.TrimSpace(subscription.RssURL) == "" {
+			return []model.SubscriptionFeed{}, nil
+		}
+		return []model.SubscriptionFeed{{
+			SubscriptionID: subscription.ID,
+			Name:           subscription.Name,
+			Fansub:         subscription.Fansub,
+			RSSURL:         subscription.RssURL,
+			EpisodeOffset:  subscription.EpisodeOffset,
+			Enabled:        true,
+		}}, nil
+	}
+
+	feeds, err := h.feedRepo.ListBySubscription(subscription.ID)
+	if err != nil {
+		return nil, err
+	}
+	enabled := make([]model.SubscriptionFeed, 0, len(feeds))
+	for i := range feeds {
+		if feeds[i].Enabled {
+			enabled = append(enabled, feeds[i])
+		}
+	}
+	return enabled, nil
+}
+
+func feedHealthSnapshots(feeds []model.SubscriptionFeed) []rss.FeedHealthCheckResult {
+	results := make([]rss.FeedHealthCheckResult, 0, len(feeds))
+	for i := range feeds {
+		results = append(results, rss.FeedHealthCheckResult{
+			SubscriptionFeedID: feeds[i].ID,
+			Name:               feeds[i].Name,
+			Fansub:             feeds[i].Fansub,
+			RSSURL:             feeds[i].RSSURL,
+			Status:             rss.HealthStatusUnknown,
+			LastPostDate:       feeds[i].LastRSSPubTime,
+			LastSuccessAt:      feeds[i].LastSuccessAt,
+			LastError:          feeds[i].LastError,
+		})
+	}
+	return results
+}
+
 func (h *SubscriptionDiagnosticsHandler) buildEnabledCheck(subscription *model.Subscription) SubscriptionDiagnosticCheck {
 	if !subscription.Enabled || subscription.Status == "paused" {
 		return SubscriptionDiagnosticCheck{
@@ -430,7 +511,11 @@ func (h *SubscriptionDiagnosticsHandler) buildEnabledCheck(subscription *model.S
 	}
 }
 
-func (h *SubscriptionDiagnosticsHandler) runRSSReachabilityCheck(ctx context.Context, subscription *model.Subscription) SubscriptionDiagnosticCheck {
+func (h *SubscriptionDiagnosticsHandler) runRSSReachabilityCheck(
+	ctx context.Context,
+	subscription *model.Subscription,
+	enabledFeeds []model.SubscriptionFeed,
+) (*rss.HealthCheckResult, SubscriptionDiagnosticCheck) {
 	proxyURL := ""
 	if h.configRepo != nil {
 		if config, err := h.configRepo.Get("system_proxy"); err == nil && config != nil {
@@ -438,7 +523,7 @@ func (h *SubscriptionDiagnosticsHandler) runRSSReachabilityCheck(ctx context.Con
 		}
 	}
 	if err := h.rssHealthChecker.SetProxy(proxyURL); err != nil {
-		return SubscriptionDiagnosticCheck{
+		return nil, SubscriptionDiagnosticCheck{
 			Key:     "rss_reachability",
 			Label:   "RSS 可达性",
 			Status:  SubscriptionDiagnosticError,
@@ -449,51 +534,56 @@ func (h *SubscriptionDiagnosticsHandler) runRSSReachabilityCheck(ctx context.Con
 
 	checkCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
-	return h.buildRSSReachabilityCheck(checkCtx, subscription)
+	healthResult := h.rssHealthChecker.CheckSubscriptionFeeds(checkCtx, subscription, enabledFeeds)
+	return healthResult, h.buildRSSReachabilityCheck(healthResult)
 }
 
-func (h *SubscriptionDiagnosticsHandler) buildRSSReachabilityCheck(ctx context.Context, subscription *model.Subscription) SubscriptionDiagnosticCheck {
-	if strings.TrimSpace(subscription.RssURL) == "" {
-		detail := "这个订阅没有 RSS 地址，无法从 RSS 执行增量检查。"
-		if strings.TrimSpace(subscription.CollectionTorrent) != "" {
-			detail = "这个订阅没有 RSS 地址，目前依赖合集种子或手动文件维护。"
-		}
+func (h *SubscriptionDiagnosticsHandler) buildRSSReachabilityCheck(result *rss.HealthCheckResult) SubscriptionDiagnosticCheck {
+	if len(result.Feeds) == 0 {
 		return SubscriptionDiagnosticCheck{
 			Key:     "rss_reachability",
 			Label:   "RSS 可达性",
 			Status:  SubscriptionDiagnosticUnknown,
-			Summary: "未配置 RSS",
-			Detail:  detail,
+			Summary: "未配置启用的订阅源",
+			Detail:  "这个订阅没有启用的 RSS feed，无法执行增量检查。",
 		}
 	}
 
-	result := h.rssHealthChecker.CheckSubscription(ctx, subscription)
 	check := SubscriptionDiagnosticCheck{
 		Key:   "rss_reachability",
 		Label: "RSS 可达性",
 	}
-
-	switch result.Status {
-	case rss.HealthStatusHealthy:
-		check.Status = SubscriptionDiagnosticHealthy
-		check.Summary = fmt.Sprintf("RSS 可访问，响应 %d ms", result.ResponseTime)
-		if result.LastPostDate != nil {
-			check.Detail = fmt.Sprintf("最新条目发布时间：%s", result.LastPostDate.Format("2006-01-02 15:04"))
-		} else {
-			check.Detail = "RSS 可访问，但条目没有可用发布时间。"
+	healthyCount := 0
+	failedDetails := make([]string, 0)
+	for _, feed := range result.Feeds {
+		if feed.Status == rss.HealthStatusHealthy {
+			healthyCount++
+			continue
 		}
-	case rss.HealthStatusUnhealthy:
+		detail := feed.ErrorMessage
+		if strings.TrimSpace(detail) == "" {
+			detail = string(feed.Status)
+		}
+		failedDetails = append(failedDetails, fmt.Sprintf("%s: %s", feed.Name, detail))
+	}
+
+	switch {
+	case healthyCount == len(result.Feeds):
+		check.Status = SubscriptionDiagnosticHealthy
+		check.Summary = fmt.Sprintf("%d 个订阅源均可访问", healthyCount)
+		check.Detail = "所有启用的 RSS feed 均可访问并成功解析。"
+	case healthyCount > 0:
 		check.Status = SubscriptionDiagnosticWarning
-		check.Summary = "RSS 可访问但解析异常"
-		check.Detail = result.ErrorMessage
-	case rss.HealthStatusDead:
-		check.Status = SubscriptionDiagnosticError
-		check.Summary = "RSS 无法访问"
-		check.Detail = result.ErrorMessage
-	default:
+		check.Summary = fmt.Sprintf("%d/%d 个订阅源可用", healthyCount, len(result.Feeds))
+		check.Detail = strings.Join(failedDetails, "；")
+	case result.Status == rss.HealthStatusUnknown:
 		check.Status = SubscriptionDiagnosticUnknown
-		check.Summary = "RSS 状态未知"
-		check.Detail = result.ErrorMessage
+		check.Summary = "订阅源状态未知"
+		check.Detail = strings.Join(failedDetails, "；")
+	default:
+		check.Status = SubscriptionDiagnosticError
+		check.Summary = "全部订阅源检查失败"
+		check.Detail = strings.Join(failedDetails, "；")
 	}
 
 	if strings.TrimSpace(check.Detail) == "" {
@@ -502,8 +592,28 @@ func (h *SubscriptionDiagnosticsHandler) buildRSSReachabilityCheck(ctx context.C
 	return check
 }
 
-func (h *SubscriptionDiagnosticsHandler) buildRSSFreshnessCheck(subscription *model.Subscription) SubscriptionDiagnosticCheck {
-	if subscription.LastCheckTime == nil {
+func (h *SubscriptionDiagnosticsHandler) buildRSSFreshnessCheck(feeds []model.SubscriptionFeed) SubscriptionDiagnosticCheck {
+	if len(feeds) == 0 {
+		return SubscriptionDiagnosticCheck{
+			Key:     "rss_freshness",
+			Label:   "最近检查",
+			Status:  SubscriptionDiagnosticUnknown,
+			Summary: "没有启用的订阅源",
+			Detail:  "启用 feed 后会记录成功检查时间和发布时间水位线。",
+		}
+	}
+	var latestSuccess, latestPub *time.Time
+	for i := range feeds {
+		if feeds[i].LastSuccessAt != nil && (latestSuccess == nil || feeds[i].LastSuccessAt.After(*latestSuccess)) {
+			value := *feeds[i].LastSuccessAt
+			latestSuccess = &value
+		}
+		if feeds[i].LastRSSPubTime != nil && (latestPub == nil || feeds[i].LastRSSPubTime.After(*latestPub)) {
+			value := *feeds[i].LastRSSPubTime
+			latestPub = &value
+		}
+	}
+	if latestSuccess == nil {
 		return SubscriptionDiagnosticCheck{
 			Key:     "rss_freshness",
 			Label:   "最近检查",
@@ -513,7 +623,7 @@ func (h *SubscriptionDiagnosticsHandler) buildRSSFreshnessCheck(subscription *mo
 		}
 	}
 
-	age := time.Since(*subscription.LastCheckTime)
+	age := time.Since(*latestSuccess)
 	check := SubscriptionDiagnosticCheck{
 		Key:   "rss_freshness",
 		Label: "最近检查",
@@ -529,8 +639,8 @@ func (h *SubscriptionDiagnosticsHandler) buildRSSFreshnessCheck(subscription *mo
 		check.Summary = fmt.Sprintf("%s 前检查", formatDiagnosticDuration(age))
 	}
 
-	if subscription.LastRSSPubTime != nil {
-		check.Detail = fmt.Sprintf("RSS 水位线：%s", subscription.LastRSSPubTime.Format("2006-01-02 15:04"))
+	if latestPub != nil {
+		check.Detail = fmt.Sprintf("最新 feed 水位线：%s", latestPub.Format("2006-01-02 15:04"))
 	} else {
 		check.Detail = "尚未记录 RSS 条目的发布时间水位线。"
 	}
@@ -859,7 +969,12 @@ func (h *SubscriptionDiagnosticsHandler) buildDiskDiagnostics(path string) (Subs
 	return info, check
 }
 
-func (h *SubscriptionDiagnosticsHandler) buildActions(subscription *model.Subscription, downloads SubscriptionDownloadDiagnostics, downloadsChecked bool) []SubscriptionDiagnosticAction {
+func (h *SubscriptionDiagnosticsHandler) buildActions(
+	subscription *model.Subscription,
+	downloads SubscriptionDownloadDiagnostics,
+	downloadsChecked bool,
+	hasEnabledFeeds bool,
+) []SubscriptionDiagnosticAction {
 	base := fmt.Sprintf("/api/v1/subscriptions/%d", subscription.ID)
 	retryEnabled := downloadsChecked && downloads.Retryable > 0
 	retryReason := "请先检查下载任务"
@@ -882,8 +997,8 @@ func (h *SubscriptionDiagnosticsHandler) buildActions(subscription *model.Subscr
 			Label:    "刷新 RSS",
 			Method:   http.MethodPost,
 			Endpoint: base + "/collect-episodes",
-			Enabled:  strings.TrimSpace(subscription.RssURL) != "",
-			Reason:   disabledReason(strings.TrimSpace(subscription.RssURL) != "", "未配置 RSS 地址"),
+			Enabled:  hasEnabledFeeds,
+			Reason:   disabledReason(hasEnabledFeeds, "未配置启用的订阅源"),
 		},
 		{
 			Key:      "retry_failed",
@@ -927,48 +1042,17 @@ func (h *SubscriptionDiagnosticsHandler) buildActions(subscription *model.Subscr
 }
 
 func (h *SubscriptionDiagnosticsHandler) retryDownload(subscription *model.Subscription, download *model.Download) error {
-	if download.TorrentHash != "" && h.qbClient != nil {
-		logger.Info("Removing old qBittorrent task before subscription retry",
-			"download_id", download.ID,
-			"hash", download.TorrentHash,
-			"configured_download_path", h.resolveBaseDownloadPath())
-		if err := h.qbClient.RemoveTorrentTask(download.TorrentHash); err != nil {
-			logger.Warn("Failed to remove old torrent task before subscription retry",
-				"download_id", download.ID,
-				"hash", download.TorrentHash,
-				"error", err)
-			return fmt.Errorf("移除旧下载任务失败: %w", err)
-		}
+	var err error
+	if h.requeueSvc != nil {
+		err = h.requeueSvc.RequeueDownload(download, subscription)
+	} else if download.Episode > 0 {
+		err = errEpisodeRetryLifecycleUnavailable
+	} else {
+		resetDownloadForManualRetry(download)
+		err = h.downloadRepo.Update(download)
 	}
-
-	download.RetryCount = 0
-	download.RetryReason = "user_retry"
-	download.NextRetryAt = nil
-	download.LastError = ""
-	download.Status = model.DownloadStatusPending
-	download.TorrentHash = ""
-
-	if err := h.downloadRepo.Update(download); err != nil {
-		return fmt.Errorf("重置下载任务失败: %w", err)
-	}
-
-	if h.qbClient == nil {
-		return nil
-	}
-
-	downloadPath := utils.GenerateDownloadPath(h.resolveBaseDownloadPath(), subscription.Name)
-	torrentHash, err := h.qbClient.AddTorrent(download.TorrentURL, downloadPath, "")
 	if err != nil {
-		download.Status = model.DownloadStatusFailed
-		download.LastError = err.Error()
-		_ = h.downloadRepo.Update(download)
-		return fmt.Errorf("重新添加种子失败: %w", err)
-	}
-
-	download.Status = model.DownloadStatusDownloading
-	download.TorrentHash = torrentHash
-	if err := h.downloadRepo.Update(download); err != nil {
-		return fmt.Errorf("更新下载任务状态失败: %w", err)
+		return fmt.Errorf("重置下载任务失败: %w", err)
 	}
 	return nil
 }

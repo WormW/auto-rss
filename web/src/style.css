@@ -34,11 +34,15 @@ body {
 
 /* Enhanced Page transitions */
 .fade-enter-active {
-  transition: all 0.3s var(--transition-timing);
+  transition-property: opacity, transform;
+  transition-duration: 0.3s;
+  transition-timing-function: var(--transition-timing);
 }
 
 .fade-leave-active {
-  transition: all 0.2s var(--transition-timing);
+  transition-property: opacity, transform;
+  transition-duration: 0.2s;
+  transition-timing-function: var(--transition-timing);
 }
 
 .fade-enter-from {
@@ -67,7 +71,7 @@ body {
   border-radius: 10px;
   border: 2px solid transparent;
   background-clip: content-box;
-  transition: all 0.3s ease;
+  transition: opacity 0.3s ease;
 }
 
 ::-webkit-scrollbar-thumb:hover {
@@ -94,12 +98,27 @@ body {
 
 /* Smooth animations for all interactive elements */
 button, a, input, textarea, select {
-  transition: all 0.2s var(--transition-timing);
+  transition-property: color, background-color, border-color, box-shadow, opacity, transform;
+  transition-duration: 0.2s;
+  transition-timing-function: var(--transition-timing);
 }
 
 /* Card hover effects */
 .n-card {
-  transition: all 0.3s var(--transition-timing);
+  transition-property: transform, box-shadow, border-color;
+  transition-duration: 0.3s;
+  transition-timing-function: var(--transition-timing);
+}
+
+.episode-manager-trigger.n-button {
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  min-height: 40px;
+}
+
+.episode-manager-trigger.n-button:active {
+  transform: scale(0.96);
 }
 
 /* Glassmorphism utility class */
@@ -286,5 +305,20 @@ button, a, input, textarea, select {
 
   .n-layout-content {
     min-height: calc(100vh - 48px) !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .episode-manager-trigger.n-button:active {
+    transform: none;
   }
 }

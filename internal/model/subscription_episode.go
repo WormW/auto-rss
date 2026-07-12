@@ -39,15 +39,23 @@ type SubscriptionEpisode struct {
 	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
+func (SubscriptionEpisode) TableName() string {
+	return "subscription_episodes"
+}
+
 type EpisodeResource struct {
-	Hash  string
-	URL   string
-	Title string
+	Hash  string `json:"hash"`
+	URL   string `json:"url"`
+	Title string `json:"title"`
 }
 
 type EpisodeResourceCandidate struct {
 	ID                    uint       `json:"id" gorm:"primaryKey"`
 	SubscriptionEpisodeID uint       `json:"subscription_episode_id" gorm:"uniqueIndex:idx_episode_candidate_resource,priority:1;index;not null"`
+	SubscriptionFeedID    *uint      `json:"subscription_feed_id" gorm:"index;constraint:OnDelete:SET NULL"`
+	SourceFeedName        string     `json:"source_feed_name" gorm:"size:100"`
+	SourceFansub          string     `json:"source_fansub" gorm:"size:100"`
+	SourceEpisodeOffset   int        `json:"source_episode_offset"`
 	ResourceKey           string     `json:"resource_key" gorm:"uniqueIndex:idx_episode_candidate_resource,priority:2;size:512"`
 	TorrentHash           string     `json:"torrent_hash" gorm:"size:128"`
 	TorrentURL            string     `json:"torrent_url" gorm:"type:text"`
@@ -64,12 +72,10 @@ type EpisodeResourceCandidate struct {
 	FinalPath             string     `json:"final_path" gorm:"type:text"`
 	ReplacementStage      string     `json:"replacement_stage" gorm:"size:40;index"`
 	ReplacementDownloadID *uint      `json:"replacement_download_id" gorm:"index"`
+	OldDownloadID         *uint      `json:"old_download_id" gorm:"index"`
+	OldTorrentHash        string     `json:"old_torrent_hash" gorm:"size:128"`
 	CreatedAt             time.Time  `json:"created_at"`
 	UpdatedAt             time.Time  `json:"updated_at"`
-}
-
-func (SubscriptionEpisode) TableName() string {
-	return "subscription_episodes"
 }
 
 func (EpisodeResourceCandidate) TableName() string {

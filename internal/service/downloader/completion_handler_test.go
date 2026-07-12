@@ -6,9 +6,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/repository"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -56,6 +58,10 @@ func (m *mockSubscriptionRepo) UpdateInTx(tx *gorm.DB, subscription *model.Subsc
 	return nil
 }
 
+func (m *mockSubscriptionRepo) CreateInTx(_ *gorm.DB, subscription *model.Subscription) error {
+	return m.Create(subscription)
+}
+
 // MockQBittorrentClient for testing
 type mockQBClient struct {
 	getTorrentInfoFunc  func(hash string) (*TorrentInfo, error)
@@ -66,6 +72,9 @@ type mockQBClient struct {
 
 func (m *mockQBClient) AddTorrent(url, savePath, category string) (string, error) {
 	return "", nil
+}
+func (m *mockQBClient) AddTorrentExclusive(url, savePath, category, expectedHash string) (string, error) {
+	return m.AddTorrent(url, savePath, category)
 }
 
 func (m *mockQBClient) AddTorrentFile(filename string, content []byte, savePath, category string) (string, error) {
@@ -155,6 +164,161 @@ func (m *mockQBClient) SetCategory(hash string, category string) error {
 // TransferInfo for mock
 type TransferInfo struct{}
 
+type mockEpisodeCompletionService struct {
+	completedInTx bool
+	completeErr   error
+	failedIDs     []uint
+}
+
+func (m *mockEpisodeCompletionService) MarkDownloadCompleted(*model.Download, *model.Subscription, time.Time) error {
+	return m.completeErr
+}
+
+func (m *mockEpisodeCompletionService) MarkDownloadCompletedInTx(_ *gorm.DB, _ *model.Download, _ *model.Subscription, _ time.Time) error {
+	m.completedInTx = true
+	return m.completeErr
+}
+
+func (m *mockEpisodeCompletionService) MarkDownloadFailed(downloadID uint) error {
+	m.failedIDs = append(m.failedIDs, downloadID)
+	return nil
+}
+
+func (m *mockEpisodeCompletionService) PersistDownloadFailure(download *model.Download, releaseEpisode bool) error {
+	if releaseEpisode {
+		m.failedIDs = append(m.failedIDs, download.ID)
+	}
+	return nil
+}
+
+func (m *mockEpisodeCompletionService) DetachDownload(uint) error { return nil }
+
+func TestCompletionHandlerMarksEpisodeCompletedInsideDownloadTransaction(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/completion.db"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open DB: %v", err)
+	}
+	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}); err != nil {
+		t.Fatalf("migrate DB: %v", err)
+	}
+	subscription := &model.Subscription{Name: "Transactional Show"}
+	if err := db.Create(subscription).Error; err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+	subscription.RenameEnabled = false
+	download := &model.Download{
+		SubscriptionID: subscription.ID,
+		Title:          "Transactional Show - 01",
+		Episode:        1,
+		TorrentURL:     "https://example.test/1.torrent",
+		TorrentHash:    "completion-transaction",
+		Status:         model.DownloadStatusDownloading,
+	}
+	if err := db.Create(download).Error; err != nil {
+		t.Fatalf("create download: %v", err)
+	}
+	episodes := &mockEpisodeCompletionService{}
+	handler := NewCompletionHandler(
+		&mockSubscriptionRepo{},
+		repository.NewDownloadRepository(db),
+		nil,
+		NewRenameService(""),
+		&mockQBClient{},
+		db,
+		episodes,
+	)
+
+	if err := handler.HandleComplete(download, &TorrentInfo{Hash: download.TorrentHash, SavePath: "/downloads/show"}, subscription); err != nil {
+		t.Fatalf("HandleComplete: %v", err)
+	}
+	if !episodes.completedInTx {
+		t.Fatal("episode completion was not called inside the download transaction")
+	}
+	var persisted model.Download
+	if err := db.First(&persisted, download.ID).Error; err != nil {
+		t.Fatalf("reload download: %v", err)
+	}
+	if persisted.Status != model.DownloadStatusCompleted {
+		t.Fatalf("persisted status = %q, want %q", persisted.Status, model.DownloadStatusCompleted)
+	}
+}
+
+func TestCompletionHandlerRollsBackDownloadWhenEpisodeCompletionFails(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/completion-rollback.db"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open DB: %v", err)
+	}
+	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}); err != nil {
+		t.Fatalf("migrate DB: %v", err)
+	}
+	subscription := &model.Subscription{Name: "Rollback Show"}
+	if err := db.Create(subscription).Error; err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+	subscription.RenameEnabled = false
+	download := &model.Download{
+		SubscriptionID: subscription.ID, Title: "Rollback Show - 01", Episode: 1,
+		TorrentURL: "https://example.test/rollback", TorrentHash: "completion-rollback",
+		Status: model.DownloadStatusDownloading,
+	}
+	if err := db.Create(download).Error; err != nil {
+		t.Fatalf("create download: %v", err)
+	}
+	episodes := &mockEpisodeCompletionService{completeErr: errors.New("ledger write failed")}
+	notify := &mockNotificationService{}
+	handler := NewCompletionHandler(&mockSubscriptionRepo{}, repository.NewDownloadRepository(db), notify, NewRenameService(""), &mockQBClient{}, db, episodes)
+
+	err = handler.HandleComplete(download, &TorrentInfo{Hash: download.TorrentHash, SavePath: "/downloads/rollback"}, subscription)
+	if err == nil {
+		t.Fatal("HandleComplete should return the ledger error")
+	}
+	if download.Status != model.DownloadStatusDownloading || download.DownloadedAt != nil {
+		t.Fatalf("in-memory download was not restored: %#v", download)
+	}
+	var persisted model.Download
+	if err := db.First(&persisted, download.ID).Error; err != nil {
+		t.Fatalf("reload download: %v", err)
+	}
+	if persisted.Status != model.DownloadStatusDownloading || persisted.DownloadedAt != nil {
+		t.Fatalf("persisted download escaped rollback: %#v", persisted)
+	}
+	if len(notify.sentPayloads) != 0 {
+		t.Fatalf("notifications = %d, want 0 after rollback", len(notify.sentPayloads))
+	}
+}
+
+func TestCompletionHandlerCollectionDoesNotCreateEpisodeCompletion(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/collection-completion.db"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open DB: %v", err)
+	}
+	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}); err != nil {
+		t.Fatalf("migrate DB: %v", err)
+	}
+	subscription := &model.Subscription{Name: "Collection Show"}
+	if err := db.Create(subscription).Error; err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+	subscription.RenameEnabled = false
+	download := &model.Download{
+		SubscriptionID: subscription.ID, Title: "Collection Show", Episode: 0,
+		TorrentURL: "https://example.test/collection", TorrentHash: "collection-completion",
+		Status: model.DownloadStatusDownloading,
+	}
+	if err := db.Create(download).Error; err != nil {
+		t.Fatalf("create download: %v", err)
+	}
+	episodes := &mockEpisodeCompletionService{completeErr: errors.New("must not be called")}
+	handler := NewCompletionHandler(&mockSubscriptionRepo{}, repository.NewDownloadRepository(db), nil, NewRenameService(""), &mockQBClient{}, db, episodes)
+
+	if err := handler.HandleComplete(download, &TorrentInfo{Hash: download.TorrentHash, SavePath: "/downloads/collection"}, subscription); err != nil {
+		t.Fatalf("HandleComplete: %v", err)
+	}
+	if episodes.completedInTx {
+		t.Fatal("collection completion must not create or update a single-episode ledger")
+	}
+}
+
 func TestCompletionHandler_HandleComplete_SendsNotification(t *testing.T) {
 	mockNotify := &mockNotificationService{}
 	var savedDownload *model.Download
@@ -169,7 +333,7 @@ func TestCompletionHandler_HandleComplete_SendsNotification(t *testing.T) {
 	renamerSvc := NewRenameService("")
 
 	// Pass nil for DB - the handler will skip DB operations in test mode
-	handler := NewCompletionHandler(mockSubRepo, mockDownloadRepo, mockNotify, renamerSvc, mockQB, nil)
+	handler := NewCompletionHandler(mockSubRepo, mockDownloadRepo, mockNotify, renamerSvc, mockQB, nil, nil)
 
 	download := &model.Download{
 		ID:             1,
@@ -230,7 +394,7 @@ func TestCompletionHandler_HandleComplete_UpdatesSubscriptionStats(t *testing.T)
 	renamerSvc := NewRenameService("")
 
 	// Pass nil for DB - the handler will skip DB operations in test mode
-	handler := NewCompletionHandler(mockSubRepo, mockDownloadRepo, mockNotify, renamerSvc, mockQB, nil)
+	handler := NewCompletionHandler(mockSubRepo, mockDownloadRepo, mockNotify, renamerSvc, mockQB, nil, nil)
 
 	download := &model.Download{
 		ID:             1,
@@ -283,7 +447,7 @@ func TestCompletionHandler_HandleComplete_WithRenameEnabled(t *testing.T) {
 	renamerSvc := NewRenameService("")
 
 	// Pass nil for DB - the handler will skip DB operations in test mode
-	handler := NewCompletionHandler(mockSubRepo, mockDownloadRepo, mockNotify, renamerSvc, mockQB, nil)
+	handler := NewCompletionHandler(mockSubRepo, mockDownloadRepo, mockNotify, renamerSvc, mockQB, nil, nil)
 
 	download := &model.Download{
 		ID:             1,
@@ -338,7 +502,7 @@ func TestCompletionHandler_HandleComplete_CollectionRename(t *testing.T) {
 	renamerSvc := NewRenameService("")
 
 	// Pass nil for DB - the handler will skip DB operations in test mode
-	handler := NewCompletionHandler(mockSubRepo, mockDownloadRepo, mockNotify, renamerSvc, mockQB, nil)
+	handler := NewCompletionHandler(mockSubRepo, mockDownloadRepo, mockNotify, renamerSvc, mockQB, nil, nil)
 
 	download := &model.Download{
 		ID:             1,
@@ -384,7 +548,7 @@ func TestCompletionHandler_HandleComplete_RenameErrorDoesNotCreateNFO(t *testing
 		},
 	}
 	renamerSvc := NewRenameService("")
-	handler := NewCompletionHandler(mockSubRepo, mockDownloadRepo, mockNotify, renamerSvc, mockQB, nil)
+	handler := NewCompletionHandler(mockSubRepo, mockDownloadRepo, mockNotify, renamerSvc, mockQB, nil, nil)
 
 	download := &model.Download{
 		ID:             1,
@@ -404,8 +568,8 @@ func TestCompletionHandler_HandleComplete_RenameErrorDoesNotCreateNFO(t *testing
 		BangumiID:     12345,
 	}
 
-	if err := handler.HandleComplete(download, torrent, subscription); err != nil {
-		t.Fatalf("HandleComplete() error = %v", err)
+	if err := handler.HandleComplete(download, torrent, subscription); err == nil {
+		t.Fatal("HandleComplete() should return the rename error")
 	}
 
 	nfoPath := filepath.Join(mediaRoot, "Test Anime", tvShowNFOFileName)
@@ -421,7 +585,7 @@ func TestCompletionHandler_HandleComplete_NoNotificationService(t *testing.T) {
 	renamerSvc := NewRenameService("")
 
 	// Pass nil for notification service and DB
-	handler := NewCompletionHandler(mockSubRepo, mockDownloadRepo, nil, renamerSvc, mockQB, nil)
+	handler := NewCompletionHandler(mockSubRepo, mockDownloadRepo, nil, renamerSvc, mockQB, nil, nil)
 
 	download := &model.Download{
 		ID:             1,
@@ -448,7 +612,7 @@ func TestCompletionHandler_HandleComplete_NoNotificationService(t *testing.T) {
 	// Should complete without panic even with nil notification service
 }
 
-func TestCompletionHandler_HandleComplete_RenameError(t *testing.T) {
+func TestCompletionHandler_HandleComplete_RenameErrorKeepsDownloadActive(t *testing.T) {
 	mockNotify := &mockNotificationService{}
 	mockDownloadRepo := &mockDownloadRepo{}
 	mockSubRepo := &mockSubscriptionRepo{}
@@ -460,7 +624,7 @@ func TestCompletionHandler_HandleComplete_RenameError(t *testing.T) {
 	renamerSvc := NewRenameService("")
 
 	// Pass nil for DB - the handler will skip DB operations in test mode
-	handler := NewCompletionHandler(mockSubRepo, mockDownloadRepo, mockNotify, renamerSvc, mockQB, nil)
+	handler := NewCompletionHandler(mockSubRepo, mockDownloadRepo, mockNotify, renamerSvc, mockQB, nil, nil)
 
 	download := &model.Download{
 		ID:             1,
@@ -479,15 +643,18 @@ func TestCompletionHandler_HandleComplete_RenameError(t *testing.T) {
 		RenameEnabled: true,
 	}
 
-	// Should not return error even if rename fails
 	err := handler.HandleComplete(download, torrent, subscription)
-	if err != nil {
-		t.Fatalf("HandleComplete() should not fail when rename fails, got error = %v", err)
+	if err == nil {
+		t.Fatal("HandleComplete() should return the single-episode rename error")
 	}
-
-	// Download should still be marked as complete
-	if download.DownloadedAt == nil {
-		t.Error("Expected DownloadedAt to be set even when rename fails")
+	if download.Status != model.DownloadStatusDownloading {
+		t.Fatalf("download status = %q, want %q", download.Status, model.DownloadStatusDownloading)
+	}
+	if download.DownloadedAt != nil {
+		t.Fatal("DownloadedAt should remain unset after rename failure")
+	}
+	if len(mockNotify.sentPayloads) != 0 {
+		t.Fatalf("completion notification count = %d, want 0", len(mockNotify.sentPayloads))
 	}
 }
 
@@ -499,7 +666,7 @@ func TestCompletionHandler_sendCompletionNotification(t *testing.T) {
 	renamerSvc := NewRenameService("")
 
 	// Pass nil for DB - the handler will skip DB operations in test mode
-	handler := NewCompletionHandler(mockSubRepo, mockDownloadRepo, mockNotify, renamerSvc, mockQB, nil)
+	handler := NewCompletionHandler(mockSubRepo, mockDownloadRepo, mockNotify, renamerSvc, mockQB, nil, nil)
 
 	// Test single episode notification
 	download := &model.Download{

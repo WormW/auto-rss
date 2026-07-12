@@ -26,6 +26,9 @@ func (m *mockQBClient) AddTorrent(url, savePath, category string) (string, error
 	}
 	return "hash123", nil
 }
+func (m *mockQBClient) AddTorrentExclusive(url, savePath, category, expectedHash string) (string, error) {
+	return m.AddTorrent(url, savePath, category)
+}
 func (m *mockQBClient) AddTorrentFile(filename string, content []byte, savePath, category string) (string, error) {
 	if m.addTorrentFileFunc != nil {
 		return m.addTorrentFileFunc(filename, content, savePath, category)
@@ -42,6 +45,8 @@ func (m *mockQBClient) GetTorrentsByCategory(category string) ([]*downloader.Tor
 func (m *mockQBClient) SetCategory(hash, category string) error               { return nil }
 func (m *mockQBClient) SetLocation(hash, location string) error               { return nil }
 func (m *mockQBClient) RenameTorrentFile(hash, oldPath, newPath string) error { return nil }
+func (m *mockQBClient) PauseTorrent(hash string) error                        { return nil }
+func (m *mockQBClient) ResumeTorrent(hash string) error                       { return nil }
 func (m *mockQBClient) RemoveTorrentTask(hash string) error                   { return nil }
 func (m *mockQBClient) DeleteTorrentWithPayload(hash string) error            { return nil }
 func (m *mockQBClient) GetTorrentFiles(hash string) ([]downloader.TorrentFile, error) {

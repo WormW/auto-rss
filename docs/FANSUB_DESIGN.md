@@ -1,8 +1,22 @@
 # 字幕组功能设计文档
 
-> **功能定位**: 字幕组信息提取、存储与匹配 (预留扩展)
+> **当前功能定位**: 字幕组名称是订阅 feed 的来源元数据；`subscriptions.subgroup_id` 是旧版 Mikan 兼容字段，不再代表整个订阅唯一的字幕组。
 > **版本**: v0.1.0 (基础) → v0.3.0 (完整)
 > **创建日期**: 2025-10-19
+
+当前多 feed 行为、基线、水位线、先到先得和兼容策略以[多 feed 订阅设计](superpowers/specs/2026-07-11-multi-feed-subscription-design.md)为准。本文其余 v0.1.0/v0.3.0 内容保留为 `subgroup_id` 搜索与缓存的历史规划，不应据此把字幕组或集数偏移重新建模为订阅级唯一配置。
+
+## 当前数据归属
+
+| 信息 | 当前归属 | 用途 |
+|------|----------|------|
+| `subscription_feeds.fansub` | feed | 用户配置的来源字幕组；一个订阅可有多个 |
+| 下载 `fansub` | 下载快照 | 保存实际资源解析出的字幕组 |
+| 候选 `source_fansub`、`source_feed_name` | 候选快照 | feed 删除后仍可解释资源来源 |
+| `subscriptions.fansub` | 兼容投影 | 仅供旧单 feed API 和旧客户端读取 |
+| `subscriptions.subgroup_id` | 旧 Mikan 兼容字段 | 可保留站点 subgroup ID，但不控制其他 feeds |
+
+新增或编辑来源时，字幕组名称与 RSS URL、集数偏移一起写入 feed。筛选、健康诊断和候选比较均应展示 feed 级来源；不能因为订阅兼容字段只保存第一条 feed，就假设整个订阅只有一个字幕组。
 
 ---
 

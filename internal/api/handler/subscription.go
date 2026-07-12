@@ -3,13 +3,13 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
-	"html"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -20,10 +20,12 @@ import (
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/downloader"
+	"github.com/WormW/auto-rss/internal/service/episode"
 	"github.com/WormW/auto-rss/internal/service/mikan"
 	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/WormW/auto-rss/internal/service/scheduler"
 	"github.com/WormW/auto-rss/internal/service/subscription"
+	"github.com/WormW/auto-rss/internal/service/subscriptionfeed"
 	"github.com/WormW/auto-rss/internal/service/task"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -33,6 +35,8 @@ import (
 type SubscriptionHandler struct {
 	repo           repository.SubscriptionRepository
 	downloadRepo   repository.DownloadRepository
+	episodeRepo    repository.EpisodeRepository
+	episodeService *episode.Service
 	configRepo     repository.ConfigRepository
 	bangumiService *bangumi.BangumiService
 	imageService   *bangumi.ImageService
@@ -44,7 +48,18 @@ type SubscriptionHandler struct {
 	bangumiEnricher      bangumi.Enricher
 	batchImporter        subscription.BatchImporter
 	collectionDownloader subscription.CollectionDownloader
+	feedRepo             repository.SubscriptionFeedRepository
+	feedService          *subscriptionfeed.Service
+	creator              subscription.Creator
+	collector            scheduler.SubscriptionCollector
 }
+
+type subscriptionWriteRequest struct {
+	model.Subscription
+	Feeds []subscriptionfeed.Input `json:"feeds"`
+}
+
+var errAmbiguousSubscriptionFeeds = errors.New("subscription feed update is ambiguous")
 
 type SubscriptionPreviewRequest struct {
 	ID                 uint   `json:"id"`
@@ -74,6 +89,7 @@ type SubscriptionPreviewItem struct {
 	TorrentHash        string `json:"torrent_hash"`
 	Action             string `json:"action"`
 	Reason             string `json:"reason"`
+	CandidateID        uint   `json:"candidate_id"`
 	ExistingDownloadID uint   `json:"existing_download_id,omitempty"`
 	DownloadPath       string `json:"download_path"`
 	RenamePreview      string `json:"rename_preview"`
@@ -101,6 +117,7 @@ func NewSubscriptionHandler(
 	configRepo repository.ConfigRepository,
 	qbClient downloader.QBittorrentClient,
 	downloadPath string,
+	episodeRepos ...repository.EpisodeRepository,
 ) *SubscriptionHandler {
 	// Create internal services
 	bgService := bangumi.NewBangumiService()
@@ -113,9 +130,20 @@ func NewSubscriptionHandler(
 	batchImporter := subscription.NewBatchImporter(mikanService, enricher, repo, configRepo)
 	collectionDownloader := subscription.NewCollectionDownloader(qbClient, downloadRepo, configRepo, downloadPath)
 
+	var episodeRepo repository.EpisodeRepository
+	var episodeService *episode.Service
+	if len(episodeRepos) > 0 {
+		episodeRepo = episodeRepos[0]
+		if episodeRepo != nil {
+			episodeService = episode.NewService(episodeRepo)
+		}
+	}
+
 	return &SubscriptionHandler{
 		repo:                 repo,
 		downloadRepo:         downloadRepo,
+		episodeRepo:          episodeRepo,
+		episodeService:       episodeService,
 		configRepo:           configRepo,
 		bangumiService:       bgService,
 		imageService:         imgService,
@@ -127,6 +155,35 @@ func NewSubscriptionHandler(
 		batchImporter:        batchImporter,
 		collectionDownloader: collectionDownloader,
 	}
+}
+
+func NewSubscriptionHandlerWithFeeds(
+	repo repository.SubscriptionRepository,
+	downloadRepo repository.DownloadRepository,
+	configRepo repository.ConfigRepository,
+	qbClient downloader.QBittorrentClient,
+	downloadPath string,
+	episodeRepo repository.EpisodeRepository,
+	feedRepo repository.SubscriptionFeedRepository,
+	feedService *subscriptionfeed.Service,
+	creator subscription.Creator,
+	collectors ...scheduler.SubscriptionCollector,
+) *SubscriptionHandler {
+	handler := NewSubscriptionHandler(repo, downloadRepo, configRepo, qbClient, downloadPath, episodeRepo)
+	handler.feedRepo = feedRepo
+	handler.feedService = feedService
+	handler.creator = creator
+	if len(collectors) > 0 {
+		handler.collector = collectors[0]
+	}
+	handler.batchImporter = subscription.NewBatchImporter(
+		handler.mikanService,
+		handler.bangumiEnricher,
+		repo,
+		configRepo,
+		creator,
+	)
+	return handler
 }
 
 func (h *SubscriptionHandler) resolveDownloadPath(subscriptionName string) string {
@@ -285,6 +342,7 @@ func normalizeSubscriptionSource(subscription *model.Subscription) {
 	if subscription.RssURL == "" && subscription.CollectionTorrent == "" {
 		subscription.SourceType = "calendar"
 		subscription.RSSSourceID = nil
+		subscription.RSSBaselinePending = false
 		subscription.SmartFetchOverride = "never"
 		subscription.SmartFetchEnabled = nil
 		return
@@ -295,8 +353,101 @@ func normalizeSubscriptionSource(subscription *model.Subscription) {
 	}
 }
 
+func (h *SubscriptionHandler) proxyLegacyFeedUpdate(
+	ctx context.Context,
+	subscription *model.Subscription,
+	updates map[string]interface{},
+) (bool, error) {
+	if h.feedRepo == nil || h.feedService == nil {
+		return false, nil
+	}
+	_, rssUpdated := updates["rss_url"]
+	_, fansubUpdated := updates["fansub"]
+	_, offsetUpdated := updates["episode_offset"]
+	if !rssUpdated && !fansubUpdated && !offsetUpdated {
+		return false, nil
+	}
+
+	feeds, err := h.feedRepo.ListBySubscription(subscription.ID)
+	if err != nil {
+		return false, err
+	}
+	if len(feeds) != 1 {
+		return false, errAmbiguousSubscriptionFeeds
+	}
+	feed := feeds[0]
+	input := subscriptionfeed.Input{
+		Name:          feed.Name,
+		Fansub:        feed.Fansub,
+		RSSURL:        feed.RSSURL,
+		EpisodeOffset: feed.EpisodeOffset,
+		Enabled:       feed.Enabled,
+	}
+	if value, exists := updates["rss_url"]; exists {
+		rssURL, ok := value.(string)
+		if !ok {
+			return false, subscriptionfeed.ErrInvalidURL
+		}
+		input.RSSURL = rssURL
+	}
+	if value, exists := updates["fansub"]; exists {
+		fansub, ok := value.(string)
+		if !ok {
+			return false, errors.New("fansub must be a string")
+		}
+		input.Fansub = fansub
+	}
+	if value, exists := updates["episode_offset"]; exists {
+		offset, ok := value.(float64)
+		if !ok || math.Trunc(offset) != offset || offset < 0 || offset > float64(int(^uint(0)>>1)) {
+			return false, subscriptionfeed.ErrNegativeOffset
+		}
+		input.EpisodeOffset = int(offset)
+	}
+
+	updated, err := h.feedService.Update(ctx, feed.ID, input)
+	if err != nil {
+		return false, err
+	}
+	subscription.RssURL = updated.RSSURL
+	subscription.Fansub = updated.Fansub
+	subscription.EpisodeOffset = updated.EpisodeOffset
+	return true, nil
+}
+
+func validSubscriptionEpisodeTotal(total int) bool {
+	return total >= 0 && total <= model.MaxSubscriptionEpisodes
+}
+
+func parseSubscriptionEpisodeTotal(value any) (int, bool) {
+	total, ok := value.(float64)
+	if !ok || math.Trunc(total) != total || total < 0 || total > model.MaxSubscriptionEpisodes {
+		return 0, false
+	}
+	return int(total), true
+}
+
+func episodeDecisionClosesItem(action, reason string) bool {
+	switch action {
+	case episode.DecisionDownload, episode.DecisionCandidate, episode.DecisionIgnored:
+		return true
+	case episode.DecisionSkip:
+		return reason == "resource_already_known" || reason == "unsupported_episode_status"
+	default:
+		return false
+	}
+}
+
 // Preview 预览订阅规则会匹配到的 RSS 条目
 func (h *SubscriptionHandler) Preview(c *gin.Context) {
+	if h.episodeService == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Episode service is unavailable",
+		})
+		return
+	}
+
 	var req SubscriptionPreviewRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -358,25 +509,11 @@ func (h *SubscriptionHandler) Preview(c *gin.Context) {
 
 	downloadPath := h.resolveDownloadPath(sub.Name)
 	renameService := downloader.NewRenameService(h.resolveRenameTemplate())
-	existingByEpisode := map[int]model.Download{}
-	existingHashes := map[string]model.Download{}
-	if h.downloadRepo != nil && sub.ID > 0 {
-		if downloads, err := h.downloadRepo.ListBySubscriptionID(sub.ID); err == nil {
-			for _, download := range downloads {
-				if download.Episode > 0 {
-					existingByEpisode[download.Episode] = download
-				}
-				if download.TorrentHash != "" {
-					existingHashes[strings.ToLower(download.TorrentHash)] = download
-				}
-			}
-		}
-	}
 
 	previewItems := make([]SubscriptionPreviewItem, 0, minInt(len(items), limit))
 	processedEpisodes := map[int]bool{}
 	totalDownload := 0
-	totalReplace := 0
+	totalManualReview := 0
 	totalSkipped := 0
 	totalDuplicate := 0
 	latestEpisode := 0
@@ -387,8 +524,9 @@ func (h *SubscriptionHandler) Preview(c *gin.Context) {
 		}
 
 		action := "download"
-		reason := "将创建下载任务"
-		var existingID uint
+		reason := "episode_missing"
+		var candidateID uint
+		decisionClosesEpisode := false
 
 		relativeEpisode := item.Episode
 		if sub.EpisodeOffset > 0 {
@@ -408,43 +546,72 @@ func (h *SubscriptionHandler) Preview(c *gin.Context) {
 				reason = filterReason
 			}
 		}
-		if action == "download" && item.TorrentURL == "" {
+		if action == "download" && strings.TrimSpace(item.TorrentURL) == "" && strings.TrimSpace(item.TorrentHash) != "" {
 			action = "skip"
-			reason = "缺少种子链接"
+			reason = "torrent_url_missing"
 		}
-		if action == "download" && item.TorrentHash != "" {
-			hashKey := strings.ToLower(item.TorrentHash)
-			if existing, ok := existingHashes[hashKey]; ok {
-				action = "duplicate"
-				reason = "种子哈希已存在"
-				existingID = existing.ID
-			} else if h.downloadRepo != nil {
-				if existing, err := h.downloadRepo.GetByHash(item.TorrentHash); err == nil && existing != nil {
-					action = "duplicate"
-					reason = "种子哈希已存在"
-					existingID = existing.ID
-				}
-			}
-		}
-		if action == "download" && item.Episode > 0 {
+		if action == "download" {
 			if processedEpisodes[item.Episode] {
 				action = "skip"
 				reason = "同一集已有更靠前的 RSS 条目"
-			} else if existing, ok := existingByEpisode[item.Episode]; ok {
-				action = "replace"
-				reason = "会替换同集旧任务"
-				existingID = existing.ID
+			} else {
+				decision, decisionErr := h.episodeService.PreviewRSSItem(sub, episode.RSSResource{
+					OriginalEpisode: item.Episode,
+					RelativeEpisode: relativeEpisode,
+					Resource: model.EpisodeResource{
+						Hash:  item.TorrentHash,
+						URL:   item.TorrentURL,
+						Title: item.Title,
+					},
+					Fansub:       item.Fansub,
+					Language:     string(item.Language),
+					PubTime:      item.PubTime,
+					SourceRSSURL: sub.RssURL,
+				})
+				if decisionErr != nil {
+					logger.Error("Failed to preview RSS item against episode ledger",
+						"subscription_id", sub.ID,
+						"episode", item.Episode,
+						"error", decisionErr)
+					c.JSON(http.StatusInternalServerError, gin.H{
+						"code":    500,
+						"message": "Failed to evaluate RSS item",
+					})
+					return
+				}
+				switch decision.Action {
+				case episode.DecisionDownload:
+					action = "download"
+					reason = decision.Reason
+				case episode.DecisionCandidate:
+					action = "manual_review"
+					reason = "episode_already_owned_different_resource"
+					candidateID = decision.CandidateID
+				case episode.DecisionIgnored:
+					action = "skip"
+					reason = "ignored"
+				case episode.DecisionSkip:
+					action = "skip"
+					if decision.Reason == "resource_already_known" {
+						action = "duplicate"
+					}
+					reason = decision.Reason
+				default:
+					action = "skip"
+					reason = decision.Reason
+				}
+				decisionClosesEpisode = episodeDecisionClosesItem(decision.Action, decision.Reason)
 			}
 		}
-		if action == "download" || action == "replace" {
+		if decisionClosesEpisode {
 			processedEpisodes[item.Episode] = true
 		}
 
 		switch action {
 		case "download":
 			totalDownload++
-		case "replace":
-			totalReplace++
+		case "manual_review":
+			totalManualReview++
 		case "duplicate":
 			totalDuplicate++
 		default:
@@ -475,20 +642,20 @@ func (h *SubscriptionHandler) Preview(c *gin.Context) {
 		})
 
 		previewItems = append(previewItems, SubscriptionPreviewItem{
-			Title:              item.Title,
-			Episode:            item.Episode,
-			RelativeEpisode:    relativeEpisode,
-			Fansub:             item.Fansub,
-			Language:           string(item.Language),
-			LanguageKeyword:    item.LangKeyword,
-			PubDate:            item.PubDate,
-			TorrentURL:         item.TorrentURL,
-			TorrentHash:        item.TorrentHash,
-			Action:             action,
-			Reason:             reason,
-			ExistingDownloadID: existingID,
-			DownloadPath:       downloadPath,
-			RenamePreview:      renamePreview,
+			Title:           item.Title,
+			Episode:         item.Episode,
+			RelativeEpisode: relativeEpisode,
+			Fansub:          item.Fansub,
+			Language:        string(item.Language),
+			LanguageKeyword: item.LangKeyword,
+			PubDate:         item.PubDate,
+			TorrentURL:      item.TorrentURL,
+			TorrentHash:     item.TorrentHash,
+			Action:          action,
+			Reason:          reason,
+			CandidateID:     candidateID,
+			DownloadPath:    downloadPath,
+			RenamePreview:   renamePreview,
 		})
 	}
 
@@ -497,17 +664,19 @@ func (h *SubscriptionHandler) Preview(c *gin.Context) {
 		"message": "Success",
 		"data": gin.H{
 			"summary": gin.H{
-				"total_items":       len(items),
-				"previewed_items":   len(previewItems),
-				"download_items":    totalDownload,
-				"replace_items":     totalReplace,
-				"skipped_items":     totalSkipped,
-				"duplicate_items":   totalDuplicate,
-				"latest_episode":    latestEpisode,
-				"download_path":     downloadPath,
-				"subscription_name": sub.Name,
-				"season":            sub.Season,
-				"limited":           len(items) > limit,
+				"total_items":         len(items),
+				"previewed_items":     len(previewItems),
+				"download_items":      totalDownload,
+				"replace_items":       0,
+				"manual_review_items": totalManualReview,
+				"candidate_items":     totalManualReview,
+				"skipped_items":       totalSkipped,
+				"duplicate_items":     totalDuplicate,
+				"latest_episode":      latestEpisode,
+				"download_path":       downloadPath,
+				"subscription_name":   sub.Name,
+				"season":              sub.Season,
+				"limited":             len(items) > limit,
 			},
 			"items": previewItems,
 		},
@@ -516,8 +685,8 @@ func (h *SubscriptionHandler) Preview(c *gin.Context) {
 
 // Create 创建订阅
 func (h *SubscriptionHandler) Create(c *gin.Context) {
-	var subscription model.Subscription
-	if err := c.ShouldBindJSON(&subscription); err != nil {
+	var request subscriptionWriteRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
 		logger.Warn("Invalid subscription create request",
 			"error", err.Error(),
 			"client_ip", c.ClientIP())
@@ -527,13 +696,39 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		})
 		return
 	}
+	subscription := request.Subscription
+	if !validSubscriptionEpisodeTotal(subscription.TotalEpisodes) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": fmt.Sprintf("total_episodes must be between 0 and %d", model.MaxSubscriptionEpisodes),
+		})
+		return
+	}
 
 	logger.Info("Creating new subscription",
 		"name", subscription.Name,
 		"rss_url", subscription.RssURL,
 		"client_ip", c.ClientIP())
 
-	normalizeSubscriptionSource(&subscription)
+	feedInputs := append([]subscriptionfeed.Input(nil), request.Feeds...)
+	if len(feedInputs) == 0 && strings.TrimSpace(subscription.RssURL) != "" && h.creator != nil {
+		feedInputs = []subscriptionfeed.Input{{
+			Name:          subscription.Fansub,
+			Fansub:        subscription.Fansub,
+			RSSURL:        subscription.RssURL,
+			EpisodeOffset: max(subscription.EpisodeOffset, 0),
+			Enabled:       true,
+		}}
+	}
+	if len(feedInputs) > 0 {
+		subscription.CollectionTorrent = strings.TrimSpace(subscription.CollectionTorrent)
+		if strings.TrimSpace(subscription.SourceType) == "" || subscription.SourceType == "calendar" {
+			subscription.SourceType = "manual"
+		}
+	} else {
+		normalizeSubscriptionSource(&subscription)
+		subscription.RSSBaselinePending = subscription.RssURL != ""
+	}
 
 	// 自动获取Bangumi数据
 	h.enrichWithBangumi(&subscription)
@@ -542,7 +737,7 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 	// Keep Subscription.Name as the series title; Season carries the season number.
 	subscription.Name, subscription.Season = utils.NormalizeMediaTitleAndSeason(subscription.Name, subscription.Season)
 
-	if subscription.RssURL != "" {
+	if h.creator == nil && subscription.RssURL != "" {
 		existing, err := h.repo.GetByRSSURLAndSeason(subscription.RssURL, subscription.Season)
 		if err == nil {
 			c.JSON(http.StatusConflict, gin.H{
@@ -565,10 +760,30 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		}
 	}
 
-	if err := h.repo.Create(&subscription); err != nil {
+	var createErr error
+	if h.creator != nil {
+		createErr = h.creator.Create(c.Request.Context(), &subscription, feedInputs)
+	} else if h.episodeRepo != nil {
+		createErr = h.episodeRepo.RunInTransaction(func(tx *gorm.DB) error {
+			if err := h.repo.CreateInTx(tx, &subscription); err != nil {
+				return err
+			}
+			if subscription.TotalEpisodes > 0 {
+				return h.episodeRepo.EnsureRangeInTx(tx, subscription.ID, subscription.TotalEpisodes)
+			}
+			return nil
+		})
+	} else {
+		createErr = h.repo.Create(&subscription)
+	}
+	if createErr != nil {
+		if h.creator != nil {
+			feedError(c, createErr)
+			return
+		}
 		logger.Error("Failed to create subscription",
 			"name", subscription.Name,
-			"error", err.Error())
+			"error", createErr.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
 			"message": "Failed to create subscription",
@@ -583,7 +798,9 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		"has_cover", subscription.BangumiCoverLocal != "")
 
 	// 如果提供了合集种子地址，自动触发下载
-	go h.downloadCollectionTorrent(&subscription)
+	if subscription.CollectionTorrent != "" {
+		go h.downloadCollectionTorrent(&subscription)
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
@@ -620,6 +837,8 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 
 	originalName := existing.Name
 	originalSeason := existing.Season
+	originalRSSURL := strings.TrimSpace(existing.RssURL)
+	originalTotalEpisodes := existing.TotalEpisodes
 
 	var updates map[string]interface{}
 	if err := c.ShouldBindJSON(&updates); err != nil {
@@ -633,6 +852,32 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 		})
 		return
 	}
+	requestedTotalEpisodes := existing.TotalEpisodes
+	totalEpisodesUpdated := false
+	if value, exists := updates["total_episodes"]; exists {
+		var valid bool
+		requestedTotalEpisodes, valid = parseSubscriptionEpisodeTotal(value)
+		if !valid {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"code":    400,
+				"message": fmt.Sprintf("total_episodes must be an integer between 0 and %d", model.MaxSubscriptionEpisodes),
+			})
+			return
+		}
+		totalEpisodesUpdated = true
+	}
+	legacyFeedUpdated, legacyFeedErr := h.proxyLegacyFeedUpdate(c.Request.Context(), existing, updates)
+	if legacyFeedErr != nil {
+		if errors.Is(legacyFeedErr, errAmbiguousSubscriptionFeeds) {
+			c.JSON(http.StatusConflict, gin.H{
+				"code":    409,
+				"message": "subscription has multiple feeds; use feed API",
+			})
+		} else {
+			feedError(c, legacyFeedErr)
+		}
+		return
+	}
 
 	logger.Info("Updating subscription",
 		"id", id,
@@ -643,10 +888,12 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 	if name, ok := updates["name"].(string); ok {
 		existing.Name = name
 	}
-	if rssURL, ok := updates["rss_url"].(string); ok {
-		existing.RssURL = rssURL
+	rssURLUpdated := false
+	if rssURL, ok := updates["rss_url"].(string); ok && !legacyFeedUpdated {
+		rssURLUpdated = true
+		existing.RssURL = strings.TrimSpace(rssURL)
 	}
-	if fansub, ok := updates["fansub"].(string); ok {
+	if fansub, ok := updates["fansub"].(string); ok && !legacyFeedUpdated {
 		existing.Fansub = fansub
 	}
 	if language, ok := updates["language"].(string); ok {
@@ -661,10 +908,10 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 	if bangumiID, ok := updates["bangumi_id"].(float64); ok {
 		existing.BangumiID = int(bangumiID)
 	}
-	if totalEps, ok := updates["total_episodes"].(float64); ok {
-		existing.TotalEpisodes = int(totalEps)
+	if totalEpisodesUpdated {
+		existing.TotalEpisodes = requestedTotalEpisodes
 	}
-	if epOffset, ok := updates["episode_offset"].(float64); ok {
+	if epOffset, ok := updates["episode_offset"].(float64); ok && !legacyFeedUpdated {
 		existing.EpisodeOffset = int(epOffset)
 	}
 	if filterRules, ok := updates["filter_rules"].(string); ok {
@@ -714,6 +961,9 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 	}
 
 	normalizeSubscriptionSource(existing)
+	if !legacyFeedUpdated && rssURLUpdated && existing.RssURL != originalRSSURL {
+		existing.RSSBaselinePending = existing.RssURL != ""
+	}
 	shouldDownloadCollection = shouldDownloadCollection && !existing.IsCalendarOnly()
 
 	if existing.BangumiCoverLocal == "" {
@@ -723,16 +973,33 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 		h.enrichWithBangumi(existing)
 	}
 
-	if err := h.repo.Update(existing); err != nil {
+	var updateErr error
+	if h.episodeRepo != nil {
+		updateErr = h.episodeRepo.RunInTransaction(func(tx *gorm.DB) error {
+			if err := h.repo.UpdateInTx(tx, existing); err != nil {
+				return err
+			}
+			if existing.TotalEpisodes > originalTotalEpisodes {
+				return h.episodeRepo.EnsureRangeInTx(tx, existing.ID, existing.TotalEpisodes)
+			}
+			return nil
+		})
+	} else {
+		updateErr = h.repo.Update(existing)
+	}
+	if updateErr != nil {
 		logger.Error("Failed to update subscription",
 			"id", id,
 			"name", existing.Name,
-			"error", err.Error())
+			"error", updateErr.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
 			"message": "Failed to update subscription",
 		})
 		return
+	}
+	if legacyFeedUpdated && h.episodeService != nil {
+		_ = h.episodeService.RefreshSubscriptionProgress(existing.ID)
 	}
 
 	logger.Info("Subscription updated successfully",
@@ -1045,13 +1312,34 @@ func (h *SubscriptionHandler) ListSmartFetchStatus(c *gin.Context) {
 		return
 	}
 
-	filter := scheduler.NewSmartFetchFilter(h.downloadRepo)
+	filter := scheduler.NewSmartFetchFilter(h.downloadRepo, h.episodeRepo)
 	filter.LoadConfigFromDB(h.configRepo)
+	pendingFeeds := make(map[uint]bool)
+	if h.feedRepo != nil {
+		subscriptionIDs := make([]uint, 0, len(subscriptionsWithStats))
+		for i := range subscriptionsWithStats {
+			subscriptionIDs = append(subscriptionIDs, subscriptionsWithStats[i].ID)
+		}
+		feeds, err := h.feedRepo.ListEnabledBySubscriptionIDs(subscriptionIDs)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"code":    500,
+				"message": "Failed to get subscription feeds",
+			})
+			return
+		}
+		for _, feed := range feeds {
+			if feed.BaselinePending {
+				pendingFeeds[feed.SubscriptionID] = true
+			}
+		}
+	}
 	now := time.Now()
 	items := make([]SubscriptionSmartFetchStatus, 0, len(subscriptionsWithStats))
 
 	for i := range subscriptionsWithStats {
-		status, _ := filter.EvaluateSubscription(&subscriptionsWithStats[i].Subscription)
+		subscription := &subscriptionsWithStats[i].Subscription
+		status, _ := filter.EvaluateSubscription(subscription, pendingFeeds[subscription.ID])
 		items = append(items, smartFetchStatusResponse(status, now))
 	}
 
@@ -1154,6 +1442,13 @@ func (h *SubscriptionHandler) CollectEpisodes(c *gin.Context) {
 		})
 		return
 	}
+	if h.collector == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Subscription feed collector is unavailable",
+		})
+		return
+	}
 
 	manager := task.GetManager()
 	taskName := fmt.Sprintf("采集: %s", subscription.Name)
@@ -1182,382 +1477,24 @@ func (h *SubscriptionHandler) CollectEpisodes(c *gin.Context) {
 // doCollectEpisodes 执行采集任务的核心逻辑
 func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Task, subscription *model.Subscription) error {
 	manager := task.GetManager()
-	id := subscription.ID
 
 	if subscription.IsCalendarOnly() {
-		manager.SetResult(gin.H{
-			"collected":       0,
-			"deleted":         0,
-			"total_rss_items": 0,
-			"skipped_reason":  "calendar_only",
-		})
+		manager.SetResult(scheduler.CollectSummary{})
 		return nil
 	}
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
+	if h.collector == nil {
+		return errors.New("subscription feed collector is required for manual collection")
 	}
-
-	manager.UpdateProgress(5, "设置代理...")
-	h.setProxy()
-
-	select {
-	case <-ctx.Done():
+	if err := ctx.Err(); err != nil {
 		return ctx.Err()
-	default:
 	}
-
-	manager.UpdateProgress(10, "获取RSS订阅...")
-	items, err := h.rssParser.FetchAndParse(subscription.RssURL)
+	manager.UpdateProgress(10, "采集订阅源...")
+	summary, err := h.collector.CollectSubscription(ctx, subscription.ID)
 	if err != nil {
-		logger.Error("Failed to fetch RSS feed",
-			"subscription_id", id,
-			"rss_url", subscription.RssURL,
-			"error", err.Error())
-		return fmt.Errorf("获取RSS失败: %s", err.Error())
+		return fmt.Errorf("manual episode collection failed: %w", err)
 	}
-
-	logger.Info("RSS feed fetched successfully",
-		"subscription_id", id,
-		"items_count", len(items))
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-
-	manager.UpdateProgress(20, "获取已有下载记录...")
-	existingDownloads, err := h.downloadRepo.ListBySubscriptionID(id)
-	if err != nil {
-		logger.Error("Failed to get existing downloads",
-			"subscription_id", id,
-			"error", err.Error())
-		return fmt.Errorf("获取下载记录失败: %s", err.Error())
-	}
-
-	episodeMap := make(map[int]*model.Download)
-	hashSet := make(map[string]bool)
-
-	for i := range existingDownloads {
-		download := &existingDownloads[i]
-		hashSet[download.TorrentHash] = true
-		episodeMap[download.Episode] = download
-	}
-
-	var newDownloads []model.Download
-	var deletedCount int
-
-	processedEpisodes := make(map[int]bool)
-	maxPubTime := subscription.LastRSSPubTime
-
-	manager.UpdateProgress(25, "分析RSS条目...")
-
-	totalItems := len(items)
-	processedItems := 0
-
-	for _, item := range items {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		processedItems++
-		progress := 25 + (processedItems * 60 / totalItems)
-		manager.UpdateProgress(progress, fmt.Sprintf("处理第 %d/%d 个条目...", processedItems, totalItems))
-
-		if !item.PubTime.IsZero() {
-			if maxPubTime == nil || item.PubTime.After(*maxPubTime) {
-				pubCopy := item.PubTime
-				maxPubTime = &pubCopy
-			}
-			if subscription.LastRSSPubTime != nil && !item.PubTime.After(*subscription.LastRSSPubTime) {
-				continue
-			}
-		}
-
-		if matched, reason := matchesSubscriptionFilters(subscription, item.Title); !matched {
-			logger.Debug("Skipping RSS item based on subscription filters",
-				"subscription_id", id,
-				"title", item.Title,
-				"reason", reason)
-			continue
-		}
-
-		offset := subscription.EpisodeOffset
-		relativeEpisode := item.Episode
-		if offset > 0 {
-			relativeEpisode = item.Episode - offset
-			if relativeEpisode <= 0 {
-				logger.Debug("Skipping episode before offset",
-					"episode", item.Episode,
-					"offset", offset,
-					"relative_episode", relativeEpisode,
-					"title", item.Title)
-				continue
-			}
-		}
-
-		if subscription.TotalEpisodes > 0 && relativeEpisode > subscription.TotalEpisodes {
-			logger.Debug("Skipping episode beyond total",
-				"episode", item.Episode,
-				"relative_episode", relativeEpisode,
-				"total_episodes", subscription.TotalEpisodes,
-				"title", item.Title)
-			continue
-		}
-
-		if hashSet[item.TorrentHash] {
-			continue
-		}
-
-		minSizeBytes := scheduler.MinTorrentSizeBytes(h.configRepo)
-		if scheduler.ShouldSkipSmallTorrent(&item, minSizeBytes) {
-			logger.Info("Skipping small torrent from manual collection",
-				"subscription", subscription.Name,
-				"subscription_id", id,
-				"episode", item.Episode,
-				"title", item.Title,
-				"torrent_url", item.TorrentURL,
-				"reason", scheduler.SmallTorrentSkipMessage(&item, minSizeBytes),
-				"size_bytes", item.SizeBytes,
-				"min_size_bytes", minSizeBytes,
-				"trigger_context", "manual_collect")
-			continue
-		}
-
-		existingDownload, exists := episodeMap[item.Episode]
-
-		if exists && !processedEpisodes[item.Episode] {
-			logger.Info("Found newer version of episode, replacing old task",
-				"subscription", subscription.Name,
-				"subscription_id", id,
-				"episode", item.Episode,
-				"old_download_id", existingDownload.ID,
-				"old_title", existingDownload.Title,
-				"old_hash", existingDownload.TorrentHash,
-				"new_title", item.Title,
-				"new_hash", item.TorrentHash,
-				"trigger_context", "manual_collect")
-
-			if err := h.downloadRepo.Delete(existingDownload.ID); err != nil {
-				logger.Error("Failed to delete old download task",
-					"download_id", existingDownload.ID,
-					"error", err.Error())
-				continue
-			}
-			deletedCount++
-		} else if processedEpisodes[item.Episode] {
-			logger.Debug("Skipping older version in RSS feed",
-				"episode", item.Episode,
-				"title", item.Title)
-			continue
-		}
-
-		processedEpisodes[item.Episode] = true
-
-		download := model.Download{
-			SubscriptionID: id,
-			Title:          item.Title,
-			Episode:        item.Episode,
-			Fansub:         item.Fansub,
-			TorrentURL:     item.TorrentURL,
-			TorrentHash:    item.TorrentHash,
-			Status:         "pending",
-		}
-
-		if err := h.downloadRepo.Create(&download); err != nil {
-			logger.Error("Failed to create download task",
-				"subscription_id", id,
-				"episode", item.Episode,
-				"title", item.Title,
-				"error", err.Error())
-			continue
-		}
-
-		if h.qbClient != nil {
-			savePath := h.downloadPath
-			downloadPath := utils.GenerateDownloadPath(savePath, subscription.Name)
-
-			var torrentHash string
-			var err error
-
-			if strings.HasSuffix(strings.ToLower(item.TorrentURL), ".torrent") ||
-				strings.Contains(item.TorrentURL, "/Download/") {
-				if h.configRepo != nil {
-					if proxyConfig, err := h.configRepo.Get("system_proxy"); err == nil && proxyConfig != nil && proxyConfig.Value != "" {
-						h.qbClient.SetProxy(proxyConfig.Value)
-					}
-				}
-
-				fileContent, downloadErr := h.qbClient.DownloadTorrentFile(item.TorrentURL)
-				if downloadErr != nil {
-					logger.Error("Failed to download torrent file",
-						"subscription_id", id,
-						"episode", item.Episode,
-						"torrent_url", item.TorrentURL,
-						"error", downloadErr.Error())
-					download.Status = "failed"
-					h.downloadRepo.Update(&download)
-					continue
-				}
-
-				torrentHash, err = h.qbClient.AddTorrentFile(
-					"torrent.torrent",
-					fileContent,
-					downloadPath,
-					downloader.AutoRssCategory,
-				)
-			} else {
-				torrentHash, err = h.qbClient.AddTorrent(
-					item.TorrentURL,
-					downloadPath,
-					downloader.AutoRssCategory,
-				)
-			}
-
-			if err != nil {
-				logger.Error("Failed to add torrent to qBittorrent",
-					"subscription_id", id,
-					"episode", item.Episode,
-					"title", item.Title,
-					"torrent_url", item.TorrentURL,
-					"download_path", downloadPath,
-					"error", err.Error())
-				download.Status = "failed"
-				h.downloadRepo.Update(&download)
-				continue
-			}
-
-			if torrentHash != "" && torrentHash != download.TorrentHash {
-				existingByHash, _ := h.downloadRepo.GetByHash(torrentHash)
-				if existingByHash != nil && existingByHash.ID != download.ID {
-					logger.Warn("Torrent hash already exists in another download record",
-						"download_id", download.ID,
-						"existing_download_id", existingByHash.ID,
-						"hash", torrentHash)
-					h.downloadRepo.Delete(download.ID)
-					continue
-				}
-				download.TorrentHash = torrentHash
-			}
-			download.Status = "downloading"
-			if err := h.downloadRepo.Update(&download); err != nil {
-				logger.Error("Failed to update download status",
-					"download_id", download.ID,
-					"error", err.Error())
-			}
-
-			logger.Info("Torrent added to qBittorrent successfully",
-				"subscription_id", id,
-				"subscription_name", subscription.Name,
-				"episode", item.Episode,
-				"title", item.Title,
-				"hash", torrentHash,
-				"download_path", downloadPath,
-				"category", downloader.AutoRssCategory)
-		}
-
-		newDownloads = append(newDownloads, download)
-		logger.Info("Download task created",
-			"subscription_id", id,
-			"episode", item.Episode,
-			"title", item.Title)
-	}
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-
-	manager.UpdateProgress(90, "更新集数信息...")
-
-	maxEpisodeInRSS := 0
-	for _, item := range items {
-		if item.Episode > maxEpisodeInRSS {
-			maxEpisodeInRSS = item.Episode
-		}
-	}
-
-	maxEpisodeFromBangumi := 0
-	if subscription.BangumiID > 0 {
-		latestEp, err := h.bangumiService.GetLatestEpisode(subscription.BangumiID)
-		if err != nil {
-			logger.Warn("Failed to get latest episode from Bangumi",
-				"subscription_id", id,
-				"bangumi_id", subscription.BangumiID,
-				"error", err.Error())
-		} else if latestEp > 0 {
-			maxEpisodeFromBangumi = latestEp
-			logger.Info("Got latest episode from Bangumi",
-				"subscription_id", id,
-				"latest_episode", latestEp)
-		}
-	}
-
-	latestEpisode := maxEpisodeInRSS
-	if maxEpisodeFromBangumi > latestEpisode {
-		latestEpisode = maxEpisodeFromBangumi
-	}
-
-	maxCollectedEpisode := 0
-	for _, download := range existingDownloads {
-		if download.Episode > maxCollectedEpisode && download.Status != "failed" {
-			maxCollectedEpisode = download.Episode
-		}
-	}
-	for _, download := range newDownloads {
-		if download.Episode > maxCollectedEpisode {
-			maxCollectedEpisode = download.Episode
-		}
-	}
-
-	if latestEpisode > 0 || maxCollectedEpisode > 0 {
-		subscription.LatestEpisode = latestEpisode
-		subscription.CurrentEpisode = maxCollectedEpisode
-		if err := h.repo.Update(subscription); err != nil {
-			logger.Error("Failed to update subscription episode info",
-				"subscription_id", id,
-				"latest_episode", latestEpisode,
-				"current_episode", maxCollectedEpisode,
-				"error", err.Error())
-		} else {
-			logger.Info("Updated subscription episode info",
-				"subscription_id", id,
-				"latest_episode", latestEpisode,
-				"current_episode", maxCollectedEpisode,
-				"rss_episodes", maxEpisodeInRSS,
-				"bangumi_episodes", maxEpisodeFromBangumi)
-		}
-	}
-
-	if maxPubTime != nil {
-		pubCopy := *maxPubTime
-		subscription.LastRSSPubTime = &pubCopy
-		if err := h.repo.Update(subscription); err != nil {
-			logger.Warn("Failed to persist last RSS pub time", "subscription_id", id, "error", err.Error())
-		}
-	}
-
-	logger.Info("Episode collection completed",
-		"subscription_id", id,
-		"new_downloads", len(newDownloads),
-		"deleted_old_tasks", deletedCount,
-		"total_rss_items", len(items),
-		"latest_episode", latestEpisode,
-		"current_episode", maxCollectedEpisode,
-		"last_rss_pub_time", subscription.LastRSSPubTime)
-
-	manager.SetResult(gin.H{
-		"collected":       len(newDownloads),
-		"deleted":         deletedCount,
-		"total_rss_items": len(items),
-	})
-
+	manager.UpdateProgress(100, "采集完成")
+	manager.SetResult(summary)
 	return nil
 }
 
@@ -2276,6 +2213,63 @@ func (h *SubscriptionHandler) GetStatistics(c *gin.Context) {
 
 // ==================== 导入/导出 API ====================
 
+const subscriptionExportVersion = "2.0"
+
+type subscriptionExportRecord struct {
+	repository.SubscriptionWithStats
+	Feeds []model.SubscriptionFeed `json:"feeds"`
+}
+
+type subscriptionImportRecord struct {
+	model.Subscription
+	Feeds []model.SubscriptionFeed `json:"feeds"`
+}
+
+type subscriptionExportEnvelope struct {
+	Version       string                     `json:"version"`
+	Subscriptions []subscriptionImportRecord `json:"subscriptions"`
+}
+
+type subscriptionExportAPIEnvelope struct {
+	Data subscriptionExportEnvelope `json:"data"`
+}
+
+type subscriptionOPML struct {
+	XMLName xml.Name             `xml:"opml"`
+	Version string               `xml:"version,attr"`
+	Head    subscriptionOPMLHead `xml:"head"`
+	Body    subscriptionOPMLBody `xml:"body"`
+}
+
+type subscriptionOPMLHead struct {
+	Title string `xml:"title"`
+}
+
+type subscriptionOPMLBody struct {
+	Outlines []subscriptionOPMLOutline `xml:"outline"`
+}
+
+type subscriptionOPMLOutline struct {
+	Type                string                    `xml:"type,attr,omitempty"`
+	Text                string                    `xml:"text,attr,omitempty"`
+	Title               string                    `xml:"title,attr,omitempty"`
+	XMLURL              string                    `xml:"xmlUrl,attr,omitempty"`
+	AutoRSSSubscription string                    `xml:"autoRssSubscription,attr,omitempty"`
+	AutoRSSSeason       string                    `xml:"autoRssSeason,attr,omitempty"`
+	AutoRSSFeed         string                    `xml:"autoRssFeed,attr,omitempty"`
+	AutoRSSFansub       string                    `xml:"autoRssFansub,attr,omitempty"`
+	AutoRSSOffset       string                    `xml:"autoRssOffset,attr,omitempty"`
+	AutoRSSEnabled      string                    `xml:"autoRssEnabled,attr,omitempty"`
+	Children            []subscriptionOPMLOutline `xml:"outline"`
+}
+
+type subscriptionImportGroup struct {
+	sub       model.Subscription
+	feeds     []subscriptionfeed.Input
+	parseErr  error
+	resultKey string
+}
+
 // ExportSubscriptions 导出订阅（支持 JSON 和 OPML 格式）
 func (h *SubscriptionHandler) ExportSubscriptions(c *gin.Context) {
 	format := c.DefaultQuery("format", "json")
@@ -2290,20 +2284,38 @@ func (h *SubscriptionHandler) ExportSubscriptions(c *gin.Context) {
 		return
 	}
 
+	records, err := h.buildSubscriptionExportRecords(subscriptions)
+	if err != nil {
+		logger.Error("Failed to get subscription feeds for export", "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Failed to export subscriptions",
+		})
+		return
+	}
+
 	switch format {
 	case "opml":
-		opml := h.generateOPML(subscriptions)
+		opmlData, marshalErr := generateSubscriptionOPML(records)
+		if marshalErr != nil {
+			logger.Error("Failed to encode subscription OPML", "error", marshalErr.Error())
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"code":    500,
+				"message": "Failed to export subscriptions",
+			})
+			return
+		}
 		c.Header("Content-Type", "application/xml")
 		c.Header("Content-Disposition", "attachment; filename=subscriptions.opml")
-		c.String(http.StatusOK, opml)
+		c.Data(http.StatusOK, "application/xml", opmlData)
 	case "json":
 		c.JSON(http.StatusOK, gin.H{
 			"code":    0,
 			"message": "Success",
 			"data": gin.H{
 				"export_time":   time.Now().Format(time.RFC3339),
-				"version":       "1.0",
-				"subscriptions": subscriptions,
+				"version":       subscriptionExportVersion,
+				"subscriptions": records,
 			},
 		})
 	default:
@@ -2314,25 +2326,97 @@ func (h *SubscriptionHandler) ExportSubscriptions(c *gin.Context) {
 	}
 }
 
-// generateOPML 生成 OPML 格式
-func (h *SubscriptionHandler) generateOPML(subscriptions []repository.SubscriptionWithStats) string {
-	var buf strings.Builder
-	buf.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
-	buf.WriteString(`<opml version="2.0">` + "\n")
-	buf.WriteString("  <head>\n")
-	buf.WriteString(fmt.Sprintf("    <title>Auto-RSS Subscriptions - %s</title>\n", time.Now().Format("2006-01-02")))
-	buf.WriteString("  </head>\n")
-	buf.WriteString("  <body>\n")
-
+func (h *SubscriptionHandler) buildSubscriptionExportRecords(
+	subscriptions []repository.SubscriptionWithStats,
+) ([]subscriptionExportRecord, error) {
+	ids := make([]uint, 0, len(subscriptions))
 	for _, sub := range subscriptions {
-		title := html.EscapeString(sub.Name)
-		rssURL := html.EscapeString(sub.RssURL)
-		buf.WriteString(fmt.Sprintf(`    <outline type="rss" text="%s" title="%s" xmlUrl="%s" />`+"\n", title, title, rssURL))
+		ids = append(ids, sub.ID)
 	}
 
-	buf.WriteString("  </body>\n")
-	buf.WriteString("</opml>")
-	return buf.String()
+	feedsBySubscription := make(map[uint][]model.SubscriptionFeed, len(subscriptions))
+	if h.feedRepo != nil {
+		feeds, err := h.feedRepo.ListBySubscriptionIDs(ids)
+		if err != nil {
+			return nil, err
+		}
+		for _, feed := range feeds {
+			feedsBySubscription[feed.SubscriptionID] = append(
+				feedsBySubscription[feed.SubscriptionID],
+				sanitizeSubscriptionFeedForExport(feed),
+			)
+		}
+	}
+
+	records := make([]subscriptionExportRecord, 0, len(subscriptions))
+	for _, sub := range subscriptions {
+		feeds := feedsBySubscription[sub.ID]
+		if len(feeds) == 0 && strings.TrimSpace(sub.RssURL) != "" {
+			feeds = []model.SubscriptionFeed{sanitizeSubscriptionFeedForExport(model.SubscriptionFeed{
+				Name:          sub.Fansub,
+				Fansub:        sub.Fansub,
+				RSSURL:        sub.RssURL,
+				EpisodeOffset: sub.EpisodeOffset,
+				Enabled:       sub.Enabled,
+			})}
+		}
+		records = append(records, subscriptionExportRecord{
+			SubscriptionWithStats: sub,
+			Feeds:                 feeds,
+		})
+	}
+	return records, nil
+}
+
+func sanitizeSubscriptionFeedForExport(feed model.SubscriptionFeed) model.SubscriptionFeed {
+	feed.ID = 0
+	feed.SubscriptionID = 0
+	feed.RSSURLNormalized = ""
+	feed.LastRSSPubTime = nil
+	feed.BaselinePending = false
+	feed.LastCheckTime = nil
+	feed.LastSuccessAt = nil
+	feed.LastError = ""
+	feed.CreatedAt = time.Time{}
+	feed.UpdatedAt = time.Time{}
+	return feed
+}
+
+func generateSubscriptionOPML(records []subscriptionExportRecord) ([]byte, error) {
+	doc := subscriptionOPML{
+		Version: "2.0",
+		Head: subscriptionOPMLHead{
+			Title: fmt.Sprintf("Auto-RSS Subscriptions - %s", time.Now().Format("2006-01-02")),
+		},
+	}
+	for _, record := range records {
+		for _, feed := range record.Feeds {
+			feedName := strings.TrimSpace(feed.Name)
+			if feedName == "" {
+				feedName = strings.TrimSpace(feed.Fansub)
+			}
+			if feedName == "" {
+				feedName = "Feed"
+			}
+			doc.Body.Outlines = append(doc.Body.Outlines, subscriptionOPMLOutline{
+				Type:                "rss",
+				Text:                fmt.Sprintf("%s - %s", record.Name, feedName),
+				Title:               record.Name,
+				XMLURL:              feed.RSSURL,
+				AutoRSSSubscription: record.Name,
+				AutoRSSSeason:       strconv.Itoa(max(record.Season, 1)),
+				AutoRSSFeed:         feedName,
+				AutoRSSFansub:       feed.Fansub,
+				AutoRSSOffset:       strconv.Itoa(feed.EpisodeOffset),
+				AutoRSSEnabled:      strconv.FormatBool(feed.Enabled),
+			})
+		}
+	}
+	encoded, err := xml.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(xml.Header), encoded...), nil
 }
 
 // ImportSubscriptionsRequest 导入订阅请求
@@ -2363,9 +2447,9 @@ func (h *SubscriptionHandler) ImportSubscriptions(c *gin.Context) {
 
 	switch req.Format {
 	case "json":
-		results, importErr = h.importFromJSON(req.Data, req.GroupID)
+		results, importErr = h.importFromJSON(c.Request.Context(), req.Data, req.GroupID)
 	case "opml":
-		results, importErr = h.importFromOPML(req.Data, req.GroupID)
+		results, importErr = h.importFromOPML(c.Request.Context(), req.Data, req.GroupID)
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    400,
@@ -2416,104 +2500,241 @@ func (h *SubscriptionHandler) ImportSubscriptions(c *gin.Context) {
 }
 
 // importFromJSON 从 JSON 导入
-func (h *SubscriptionHandler) importFromJSON(data string, groupID *uint) ([]subscription.ImportResult, error) {
-	var exportData struct {
-		Subscriptions []model.Subscription `json:"subscriptions"`
+func (h *SubscriptionHandler) importFromJSON(
+	ctx context.Context,
+	data string,
+	groupID *uint,
+) ([]subscription.ImportResult, error) {
+	records, version, err := decodeSubscriptionJSON(data)
+	if err != nil {
+		return nil, err
+	}
+	if version != "" && version != "1.0" && version != subscriptionExportVersion {
+		return nil, fmt.Errorf("unsupported subscription export version %q", version)
 	}
 
-	if err := json.Unmarshal([]byte(data), &exportData); err != nil {
-		// 尝试直接解析为订阅数组
-		var subs []model.Subscription
-		if err := json.Unmarshal([]byte(data), &subs); err != nil {
-			return nil, fmt.Errorf("invalid JSON format: %w", err)
-		}
-		exportData.Subscriptions = subs
+	groups := make([]subscriptionImportGroup, 0, len(records))
+	for _, record := range records {
+		sub := resetImportedSubscription(record.Subscription, groupID)
+		feeds := feedInputsFromImportRecord(record)
+		groups = append(groups, subscriptionImportGroup{
+			sub:       sub,
+			feeds:     feeds,
+			resultKey: sub.Name,
+		})
 	}
-
-	results := make([]subscription.ImportResult, 0, len(exportData.Subscriptions))
-
-	for _, sub := range exportData.Subscriptions {
-		result := subscription.ImportResult{Title: sub.Name, Success: false}
-
-		// 检查是否已存在
-		if sub.RssURL != "" {
-			existing, err := h.repo.GetByRSSURLAndSeason(sub.RssURL, sub.Season)
-			if err == nil && existing != nil {
-				result.Skipped = true
-				result.Success = true
-				result.Message = "Already exists"
-				results = append(results, result)
-				continue
-			}
-		}
-
-		// 重置 ID 和时间戳
-		sub.ID = 0
-		sub.CreatedAt = time.Time{}
-		sub.UpdatedAt = time.Time{}
-		sub.GroupID = groupID
-
-		// 丰富 Bangumi 数据
-		h.enrichWithBangumi(&sub)
-
-		if err := h.repo.Create(&sub); err != nil {
-			result.Message = "Create failed: " + err.Error()
-			results = append(results, result)
-			continue
-		}
-
-		result.Success = true
-		result.Message = "Imported successfully"
-		result.Subscription = &sub
-		results = append(results, result)
-	}
-
-	return results, nil
+	return h.createImportedSubscriptionGroups(ctx, groups), nil
 }
 
 // importFromOPML 从 OPML 导入
-func (h *SubscriptionHandler) importFromOPML(data string, groupID *uint) ([]subscription.ImportResult, error) {
-	// 简单的 OPML 解析（提取 outline 元素）
-	outlineRegex := regexp.MustCompile(`<outline[^>]*text="([^"]*)"[^>]*xmlUrl="([^"]*)"[^>]*/>`)
-	matches := outlineRegex.FindAllStringSubmatch(data, -1)
+func (h *SubscriptionHandler) importFromOPML(
+	ctx context.Context,
+	data string,
+	groupID *uint,
+) ([]subscription.ImportResult, error) {
+	var doc subscriptionOPML
+	if err := xml.Unmarshal([]byte(data), &doc); err != nil {
+		return nil, fmt.Errorf("invalid OPML format: %w", err)
+	}
+	outlines := flattenSubscriptionOPMLOutlines(doc.Body.Outlines)
+	groups := groupSubscriptionOPMLOutlines(outlines, groupID)
+	return h.createImportedSubscriptionGroups(ctx, groups), nil
+}
 
-	results := make([]subscription.ImportResult, 0, len(matches))
+func decodeSubscriptionJSON(data string) ([]subscriptionImportRecord, string, error) {
+	trimmed := strings.TrimSpace(data)
+	if strings.HasPrefix(trimmed, "[") {
+		var records []subscriptionImportRecord
+		if err := json.Unmarshal([]byte(trimmed), &records); err != nil {
+			return nil, "", fmt.Errorf("invalid JSON format: %w", err)
+		}
+		return records, "", nil
+	}
 
-	for _, match := range matches {
-		if len(match) < 3 {
+	var direct subscriptionExportEnvelope
+	if err := json.Unmarshal([]byte(trimmed), &direct); err != nil {
+		return nil, "", fmt.Errorf("invalid JSON format: %w", err)
+	}
+	if direct.Subscriptions != nil {
+		return direct.Subscriptions, direct.Version, nil
+	}
+
+	var apiResponse subscriptionExportAPIEnvelope
+	if err := json.Unmarshal([]byte(trimmed), &apiResponse); err != nil {
+		return nil, "", fmt.Errorf("invalid JSON format: %w", err)
+	}
+	if apiResponse.Data.Subscriptions == nil {
+		return nil, "", errors.New("invalid JSON format: subscriptions are required")
+	}
+	return apiResponse.Data.Subscriptions, apiResponse.Data.Version, nil
+}
+
+func feedInputsFromImportRecord(record subscriptionImportRecord) []subscriptionfeed.Input {
+	if len(record.Feeds) == 0 {
+		if strings.TrimSpace(record.RssURL) == "" {
+			return nil
+		}
+		return []subscriptionfeed.Input{{
+			Name:          record.Fansub,
+			Fansub:        record.Fansub,
+			RSSURL:        record.RssURL,
+			EpisodeOffset: record.EpisodeOffset,
+			Enabled:       true,
+		}}
+	}
+
+	feeds := make([]subscriptionfeed.Input, 0, len(record.Feeds))
+	for _, feed := range record.Feeds {
+		feeds = append(feeds, subscriptionfeed.Input{
+			Name:          feed.Name,
+			Fansub:        feed.Fansub,
+			RSSURL:        feed.RSSURL,
+			EpisodeOffset: feed.EpisodeOffset,
+			Enabled:       feed.Enabled,
+		})
+	}
+	return feeds
+}
+
+func resetImportedSubscription(sub model.Subscription, groupID *uint) model.Subscription {
+	sub.ID = 0
+	sub.LastCheckTime = nil
+	sub.LastDownloadAt = nil
+	sub.LastRSSPubTime = nil
+	sub.RSSBaselinePending = false
+	sub.CompletedAt = nil
+	sub.CurrentEpisode = 0
+	sub.LatestEpisode = 0
+	sub.GroupID = groupID
+	sub.Group = nil
+	sub.RSSSourceID = nil
+	sub.RSSSource = nil
+	sub.Downloads = nil
+	sub.Feeds = nil
+	sub.CreatedAt = time.Time{}
+	sub.UpdatedAt = time.Time{}
+	return sub
+}
+
+func flattenSubscriptionOPMLOutlines(outlines []subscriptionOPMLOutline) []subscriptionOPMLOutline {
+	var flattened []subscriptionOPMLOutline
+	for _, outline := range outlines {
+		if strings.TrimSpace(outline.XMLURL) != "" {
+			flattened = append(flattened, outline)
+		}
+		flattened = append(flattened, flattenSubscriptionOPMLOutlines(outline.Children)...)
+	}
+	return flattened
+}
+
+func groupSubscriptionOPMLOutlines(
+	outlines []subscriptionOPMLOutline,
+	groupID *uint,
+) []subscriptionImportGroup {
+	groups := make([]subscriptionImportGroup, 0, len(outlines))
+	groupIndexes := make(map[string]int)
+	for index, outline := range outlines {
+		name := strings.TrimSpace(outline.AutoRSSSubscription)
+		season := 1
+		key := fmt.Sprintf("legacy:%d", index)
+		if name == "" {
+			name = firstNonEmpty(strings.TrimSpace(outline.Title), strings.TrimSpace(outline.Text))
+		} else {
+			seasonText := strings.TrimSpace(outline.AutoRSSSeason)
+			if seasonText != "" {
+				parsed, err := strconv.Atoi(seasonText)
+				if err != nil || parsed <= 0 {
+					groups = append(groups, invalidOPMLImportGroup(name, fmt.Errorf("invalid season %q", seasonText)))
+					continue
+				}
+				season = parsed
+			}
+			key = fmt.Sprintf("extended:%s:%d", name, season)
+		}
+
+		groupIndex, exists := groupIndexes[key]
+		if !exists {
+			groupIndex = len(groups)
+			groupIndexes[key] = groupIndex
+			groups = append(groups, subscriptionImportGroup{
+				sub: model.Subscription{
+					Name:    name,
+					Season:  season,
+					Status:  "active",
+					Enabled: true,
+					GroupID: groupID,
+				},
+				resultKey: name,
+			})
+		}
+
+		offset := 0
+		if offsetText := strings.TrimSpace(outline.AutoRSSOffset); offsetText != "" {
+			parsed, err := strconv.Atoi(offsetText)
+			if err != nil || parsed < 0 {
+				groups[groupIndex].parseErr = fmt.Errorf("invalid episode offset %q", offsetText)
+				continue
+			}
+			offset = parsed
+		}
+		enabled := true
+		if enabledText := strings.TrimSpace(outline.AutoRSSEnabled); enabledText != "" {
+			parsed, err := strconv.ParseBool(enabledText)
+			if err != nil {
+				groups[groupIndex].parseErr = fmt.Errorf("invalid enabled value %q", enabledText)
+				continue
+			}
+			enabled = parsed
+		}
+		feedName := firstNonEmpty(strings.TrimSpace(outline.AutoRSSFeed), strings.TrimSpace(outline.Text), strings.TrimSpace(outline.Title))
+		groups[groupIndex].feeds = append(groups[groupIndex].feeds, subscriptionfeed.Input{
+			Name:          feedName,
+			Fansub:        strings.TrimSpace(outline.AutoRSSFansub),
+			RSSURL:        strings.TrimSpace(outline.XMLURL),
+			EpisodeOffset: offset,
+			Enabled:       enabled,
+		})
+	}
+	return groups
+}
+
+func invalidOPMLImportGroup(name string, err error) subscriptionImportGroup {
+	return subscriptionImportGroup{
+		sub:       model.Subscription{Name: name},
+		parseErr:  err,
+		resultKey: name,
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (h *SubscriptionHandler) createImportedSubscriptionGroups(
+	ctx context.Context,
+	groups []subscriptionImportGroup,
+) []subscription.ImportResult {
+	results := make([]subscription.ImportResult, 0, len(groups))
+	for _, group := range groups {
+		result := subscription.ImportResult{Title: group.resultKey}
+		if group.parseErr != nil {
+			result.Message = group.parseErr.Error()
+			results = append(results, result)
+			continue
+		}
+		if h.creator == nil {
+			result.Message = "Create failed: subscription creator is not configured"
+			results = append(results, result)
 			continue
 		}
 
-		name := match[1]
-		rssURL := match[2]
-
-		result := subscription.ImportResult{Title: name, Success: false}
-
-		// 检查是否已存在
-		if rssURL != "" {
-			existing, err := h.repo.GetByRSSURLAndSeason(rssURL, 1)
-			if err == nil && existing != nil {
-				result.Skipped = true
-				result.Success = true
-				result.Message = "Already exists"
-				results = append(results, result)
-				continue
-			}
-		}
-
-		sub := model.Subscription{
-			Name:    name,
-			RssURL:  rssURL,
-			Season:  1,
-			Status:  "active",
-			Enabled: true,
-			GroupID: groupID,
-		}
-
-		// 丰富 Bangumi 数据
-		h.enrichWithBangumi(&sub)
-
-		if err := h.repo.Create(&sub); err != nil {
+		h.enrichWithBangumi(&group.sub)
+		if err := h.creator.Create(ctx, &group.sub, group.feeds); err != nil {
 			result.Message = "Create failed: " + err.Error()
 			results = append(results, result)
 			continue
@@ -2521,9 +2742,8 @@ func (h *SubscriptionHandler) importFromOPML(data string, groupID *uint) ([]subs
 
 		result.Success = true
 		result.Message = "Imported successfully"
-		result.Subscription = &sub
+		result.Subscription = &group.sub
 		results = append(results, result)
 	}
-
-	return results, nil
+	return results
 }

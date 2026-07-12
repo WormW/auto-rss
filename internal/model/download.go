@@ -4,18 +4,21 @@ import "time"
 
 // Download status constants
 const (
-	DownloadStatusPending     = "pending"
-	DownloadStatusDownloading = "downloading"
-	DownloadStatusStalled     = "stalled"
-	DownloadStatusCompleted   = "completed"
-	DownloadStatusFailed      = "failed"
-	DownloadStatusOrganizing  = "organizing"
+	DownloadStatusPending                = "pending"
+	DownloadStatusRetryCleanup           = "retry_cleanup"
+	DownloadStatusRetryCleanupProcessing = "retry_cleanup_processing"
+	DownloadStatusDownloading            = "downloading"
+	DownloadStatusStalled                = "stalled"
+	DownloadStatusCompleted              = "completed"
+	DownloadStatusFailed                 = "failed"
+	DownloadStatusOrganizing             = "organizing"
 )
 
 // Download 下载任务模型
 type Download struct {
 	ID                        uint       `json:"id" gorm:"primaryKey"`
 	SubscriptionID            uint       `json:"subscription_id" gorm:"index:idx_sub_status,priority:1"`
+	SubscriptionFeedID        *uint      `json:"subscription_feed_id" gorm:"index;constraint:OnDelete:SET NULL"`
 	Title                     string     `json:"title" gorm:"not null"`
 	Episode                   int        `json:"episode"`
 	Fansub                    string     `json:"fansub" gorm:"index"`                                      // 字幕组名称
@@ -28,9 +31,10 @@ type Download struct {
 	MediaLibraryRefreshStatus string     `json:"media_library_refresh_status" gorm:"type:varchar(20);default:'pending'"`
 	MediaLibraryRefreshError  string     `json:"media_library_refresh_error" gorm:"type:text"`
 	MediaLibraryRefreshedAt   *time.Time `json:"media_library_refreshed_at"`
+	Status                    string     `json:"status" gorm:"default:pending;index:idx_sub_status,priority:2"` // pending, downloading, stalled, completed, failed
 	Purpose                   string     `json:"purpose" gorm:"size:20;default:normal;index"`
 	ReplacementCandidateID    *uint      `json:"replacement_candidate_id" gorm:"index"`
-	Status                    string     `json:"status" gorm:"default:pending;index:idx_sub_status,priority:2"` // pending, downloading, stalled, completed, failed
+	ReplacementTorrentOwned   bool       `json:"replacement_torrent_owned" gorm:"default:false;index"`
 	QbTaskID                  string     `json:"qb_task_id"`
 	ErrorMessage              string     `json:"error_message" gorm:"type:text"`
 	DownloadedAt              *time.Time `json:"downloaded_at"`

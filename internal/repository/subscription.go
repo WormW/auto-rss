@@ -1,7 +1,9 @@
 package repository
 
 import (
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
 	"gorm.io/gorm"
@@ -11,6 +13,7 @@ import (
 type SubscriptionWithStats struct {
 	model.Subscription
 	DownloadingCount int64 `json:"downloading_count" gorm:"column:downloading_count"`
+	FeedCount        int64 `json:"feed_count" gorm:"column:feed_count"`
 }
 
 // SubscriptionStatistics 订阅统计信息
@@ -33,7 +36,11 @@ type GroupStatistic struct {
 // SubscriptionRepository 订阅仓储接口
 type SubscriptionRepository interface {
 	Create(subscription *model.Subscription) error
+	// CreateInTx 在调用方事务中创建订阅
+	CreateInTx(tx *gorm.DB, subscription *model.Subscription) error
 	Update(subscription *model.Subscription) error
+	UpdateRSSWatermark(id uint, expectedURL string, expectedUpdatedAt time.Time, watermark *time.Time) error
+	UpdateRSSWatermarkInTx(tx *gorm.DB, id uint, expectedURL string, expectedUpdatedAt time.Time, watermark *time.Time) error
 	Delete(id uint) error
 	GetByID(id uint) (*model.Subscription, error)
 	GetByRSSURL(rssURL string) (*model.Subscription, error)
@@ -92,14 +99,47 @@ func (r *subscriptionRepository) Create(subscription *model.Subscription) error 
 	return r.db.Create(subscription).Error
 }
 
+// CreateInTx 在调用方事务中创建订阅
+func (r *subscriptionRepository) CreateInTx(tx *gorm.DB, subscription *model.Subscription) error {
+	return tx.Create(subscription).Error
+}
+
 // Update 更新订阅
 func (r *subscriptionRepository) Update(subscription *model.Subscription) error {
 	return r.db.Save(subscription).Error
 }
 
+// UpdateRSSWatermark advances only the RSS watermark for the expected source.
+func (r *subscriptionRepository) UpdateRSSWatermark(id uint, expectedURL string, expectedUpdatedAt time.Time, watermark *time.Time) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		return r.UpdateRSSWatermarkInTx(tx, id, expectedURL, expectedUpdatedAt, watermark)
+	})
+}
+
+func (r *subscriptionRepository) UpdateRSSWatermarkInTx(tx *gorm.DB, id uint, expectedURL string, expectedUpdatedAt time.Time, watermark *time.Time) error {
+	updates := map[string]any{"updated_at": time.Now()}
+	if watermark != nil {
+		updates["last_rss_pub_time"] = gorm.Expr(
+			"CASE WHEN last_rss_pub_time IS NULL OR last_rss_pub_time < ? THEN ? ELSE last_rss_pub_time END",
+			*watermark,
+			*watermark,
+		)
+	}
+	result := tx.Model(&model.Subscription{}).
+		Where("id = ? AND rss_url = ? AND updated_at = ?", id, expectedURL, expectedUpdatedAt).
+		Updates(updates)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("RSS source changed while updating watermark for subscription %d", id)
+	}
+	return nil
+}
+
 // Delete 删除订阅
 func (r *subscriptionRepository) Delete(id uint) error {
-	return r.db.Delete(&model.Subscription{}, id).Error
+	return r.deleteByIDs([]uint{id})
 }
 
 // GetByID 根据 ID 获取订阅
@@ -176,6 +216,7 @@ func (r *subscriptionRepository) GetSubscriptionsWithDownloadCount() ([]Subscrip
 		Select(
 			"subscriptions.*",
 			"COUNT(CASE WHEN downloads.status = 'downloading' THEN 1 END) as downloading_count",
+			"(SELECT COUNT(*) FROM subscription_feeds sf WHERE sf.subscription_id = subscriptions.id) AS feed_count",
 		).
 		Joins("LEFT JOIN downloads ON downloads.subscription_id = subscriptions.id").
 		Group("subscriptions.id").
@@ -197,7 +238,26 @@ func (r *subscriptionRepository) BatchDelete(ids []uint) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	return r.db.Delete(&model.Subscription{}, "id IN ?", ids).Error
+	return r.deleteByIDs(ids)
+}
+
+func (r *subscriptionRepository) deleteByIDs(ids []uint) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if tx.Migrator().HasTable(&model.SubscriptionEpisode{}) {
+			if tx.Migrator().HasTable(&model.EpisodeResourceCandidate{}) {
+				if err := tx.Where(
+					"subscription_episode_id IN (?)",
+					tx.Model(&model.SubscriptionEpisode{}).Select("id").Where("subscription_id IN ?", ids),
+				).Delete(&model.EpisodeResourceCandidate{}).Error; err != nil {
+					return err
+				}
+			}
+			if err := tx.Where("subscription_id IN ?", ids).Delete(&model.SubscriptionEpisode{}).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Where("id IN ?", ids).Delete(&model.Subscription{}).Error
+	})
 }
 
 // BatchUpdateGroup 批量更新订阅分组

@@ -2,9 +2,12 @@ package database
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/go-gormigrate/gormigrate/v2"
 	"gorm.io/gorm"
 )
@@ -161,7 +164,7 @@ func RunMigrations(db *gorm.DB) error {
 			},
 		},
 		{
-			ID: "202607110001", // episode ledger schema and historical backfill
+			ID: "202607110001", // add the subscription episode ledger
 			Migrate: func(tx *gorm.DB) error {
 				if err := tx.AutoMigrate(
 					&model.Subscription{},
@@ -174,6 +177,66 @@ func RunMigrations(db *gorm.DB) error {
 				return backfillSubscriptionEpisodes(tx)
 			},
 			Rollback: func(tx *gorm.DB) error {
+				return tx.Migrator().DropTable(
+					&model.EpisodeResourceCandidate{},
+					&model.SubscriptionEpisode{},
+				)
+			},
+		},
+		{
+			ID: "202607110002", // add per-subscription RSS feeds
+			Migrate: func(tx *gorm.DB) error {
+				if err := tx.AutoMigrate(
+					&model.SubscriptionFeed{},
+					&model.SubscriptionFeedSeenItem{},
+					&model.Download{},
+					&model.EpisodeResourceCandidate{},
+				); err != nil {
+					return err
+				}
+				return backfillSubscriptionFeeds(tx)
+			},
+			Rollback: func(tx *gorm.DB) error {
+				return tx.Migrator().DropTable(
+					&model.SubscriptionFeedSeenItem{},
+					&model.SubscriptionFeed{},
+				)
+			},
+		},
+		{
+			ID: "202607120001", // add replacement recovery snapshots
+			Migrate: func(tx *gorm.DB) error {
+				if err := tx.AutoMigrate(&model.EpisodeResourceCandidate{}); err != nil {
+					return err
+				}
+				return tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_episode_candidate_single_replacing
+					ON episode_resource_candidates(subscription_episode_id)
+					WHERE status = 'replacing'`).Error
+			},
+			Rollback: func(tx *gorm.DB) error {
+				if err := tx.Exec("DROP INDEX IF EXISTS idx_episode_candidate_single_replacing").Error; err != nil {
+					return err
+				}
+				if tx.Migrator().HasColumn(&model.EpisodeResourceCandidate{}, "old_download_id") {
+					if err := tx.Migrator().DropColumn(&model.EpisodeResourceCandidate{}, "old_download_id"); err != nil {
+						return err
+					}
+				}
+				if tx.Migrator().HasColumn(&model.EpisodeResourceCandidate{}, "old_torrent_hash") {
+					return tx.Migrator().DropColumn(&model.EpisodeResourceCandidate{}, "old_torrent_hash")
+				}
+				return nil
+			},
+		},
+		{
+			ID: "202607120002", // persist replacement torrent ownership
+			Migrate: func(tx *gorm.DB) error {
+				return tx.AutoMigrate(&model.Download{})
+			},
+			Rollback: func(tx *gorm.DB) error {
+				if tx.Migrator().HasColumn(&model.Download{}, "replacement_torrent_owned") {
+					return tx.Migrator().DropColumn(&model.Download{}, "replacement_torrent_owned")
+				}
 				return nil
 			},
 		},
@@ -189,135 +252,213 @@ func RunMigrations(db *gorm.DB) error {
 	return m.Migrate()
 }
 
-type episodeBackfillKey struct {
-	subscriptionID uint
-	episode        int
-}
-
-type episodeBackfillCandidate struct {
-	download model.Download
-	status   string
-	rank     int
-}
-
-func backfillSubscriptionEpisodes(tx *gorm.DB) error {
+func backfillSubscriptionFeeds(db *gorm.DB) error {
 	var subscriptions []model.Subscription
-	if err := tx.Find(&subscriptions).Error; err != nil {
+	if err := db.Where("rss_url <> ''").Order("id ASC").Find(&subscriptions).Error; err != nil {
 		return err
 	}
 
-	subscriptionByID := make(map[uint]model.Subscription, len(subscriptions))
-	for _, sub := range subscriptions {
-		subscriptionByID[sub.ID] = sub
+	for _, subscription := range subscriptions {
+		normalizedURL := utils.NormalizeFeedURL(subscription.RssURL)
+		if normalizedURL == "" || subscription.IsCalendarOnly() {
+			continue
+		}
+		episodeOffset := subscription.EpisodeOffset
+		if episodeOffset < 0 {
+			episodeOffset = 0
+		}
+		feed := model.SubscriptionFeed{
+			SubscriptionID:   subscription.ID,
+			Name:             fallbackFeedName(subscription.Fansub),
+			Fansub:           subscription.Fansub,
+			RSSURL:           strings.TrimSpace(subscription.RssURL),
+			RSSURLNormalized: normalizedURL,
+			EpisodeOffset:    episodeOffset,
+			Enabled:          subscription.Enabled && subscription.Status == "active",
+			LastRSSPubTime:   subscription.LastRSSPubTime,
+			BaselinePending:  subscription.RSSBaselinePending,
+		}
+		if err := db.Where(
+			"subscription_id = ? AND rss_url_normalized = ?",
+			feed.SubscriptionID,
+			feed.RSSURLNormalized,
+		).FirstOrCreate(&feed).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func fallbackFeedName(fansub string) string {
+	if name := strings.TrimSpace(fansub); name != "" {
+		return name
+	}
+	return "默认 RSS"
+}
+
+func backfillSubscriptionEpisodes(db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		return backfillSubscriptionEpisodesInTx(tx)
+	})
+}
+
+func backfillSubscriptionEpisodesInTx(db *gorm.DB) error {
+	var subscriptions []model.Subscription
+	if err := db.Order("id ASC").Find(&subscriptions).Error; err != nil {
+		return err
 	}
 
 	var downloads []model.Download
-	if err := tx.Where("subscription_id > 0 AND episode > 0").
-		Order("subscription_id ASC, episode ASC, updated_at DESC, id DESC").
+	if err := db.
+		Where("episode > 0").
+		Where("status IN ?", []string{
+			model.DownloadStatusCompleted,
+			model.DownloadStatusOrganizing,
+			model.DownloadStatusDownloading,
+			model.DownloadStatusPending,
+			model.DownloadStatusStalled,
+			model.DownloadStatusFailed,
+		}).
 		Find(&downloads).Error; err != nil {
 		return err
 	}
 
-	bestByEpisode := make(map[episodeBackfillKey]episodeBackfillCandidate)
+	downloadsBySubscription := make(map[uint][]model.Download)
 	for _, download := range downloads {
-		sub, ok := subscriptionByID[download.SubscriptionID]
-		if !ok {
-			continue
-		}
-		relativeEpisode := sub.RelativeEpisode(download.Episode)
-		if relativeEpisode <= 0 {
-			continue
-		}
-
-		status, rank := episodeStatusFromDownloadStatus(download.Status)
-		candidate := episodeBackfillCandidate{download: download, status: status, rank: rank}
-		key := episodeBackfillKey{subscriptionID: sub.ID, episode: relativeEpisode}
-		if current, exists := bestByEpisode[key]; !exists || betterEpisodeBackfillCandidate(candidate, current) {
-			bestByEpisode[key] = candidate
-		}
+		downloadsBySubscription[download.SubscriptionID] = append(downloadsBySubscription[download.SubscriptionID], download)
 	}
 
-	for key, candidate := range bestByEpisode {
-		download := candidate.download
-		ledger := model.SubscriptionEpisode{
-			SubscriptionID:    key.subscriptionID,
-			Episode:           key.episode,
-			Status:            candidate.status,
-			ActiveDownloadID:  &download.ID,
-			ActiveTorrentHash: download.TorrentHash,
-			ActiveTorrentURL:  download.TorrentURL,
-			ActiveTitle:       download.Title,
-			StatusSource:      model.EpisodeStatusSourceMigration,
-		}
-		if candidate.status == model.EpisodeStatusDownloaded {
-			ledger.DownloadedAt = download.DownloadedAt
-			if ledger.DownloadedAt == nil && !download.UpdatedAt.IsZero() {
-				downloadedAt := download.UpdatedAt
-				ledger.DownloadedAt = &downloadedAt
+	for _, subscription := range subscriptions {
+		preferred := make(map[int]model.Download)
+		for _, download := range downloadsBySubscription[subscription.ID] {
+			relativeEpisode := subscription.RelativeEpisode(download.Episode)
+			if relativeEpisode <= 0 {
+				continue
+			}
+			current, exists := preferred[relativeEpisode]
+			if !exists || downloadPreferredForEpisode(download, current) {
+				preferred[relativeEpisode] = download
 			}
 		}
-		if err := tx.Where("subscription_id = ? AND episode = ?", key.subscriptionID, key.episode).
-			FirstOrCreate(&ledger).Error; err != nil {
-			return err
-		}
-	}
 
-	for _, sub := range subscriptions {
-		knownRange := sub.TotalEpisodes
-		if knownRange <= 0 {
-			knownRange = sub.RelativeLatestEpisode()
+		episodes := make([]int, 0, len(preferred))
+		for episode := range preferred {
+			episodes = append(episodes, episode)
 		}
-		for episode := 1; episode <= knownRange; episode++ {
-			ledger := model.SubscriptionEpisode{
-				SubscriptionID: sub.ID,
+		sort.Ints(episodes)
+		for _, episode := range episodes {
+			download := preferred[episode]
+			ledgerEntry := subscriptionEpisodeFromDownload(subscription.ID, episode, download)
+			if err := db.Where(
+				"subscription_id = ? AND episode = ?",
+				subscription.ID,
+				episode,
+			).FirstOrCreate(&ledgerEntry).Error; err != nil {
+				return err
+			}
+		}
+
+		knownEpisodes := subscription.TotalEpisodes
+		if knownEpisodes <= 0 {
+			knownEpisodes = subscription.RelativeEpisode(subscription.LatestEpisode)
+		}
+		for episode := 1; episode <= knownEpisodes; episode++ {
+			ledgerEntry := model.SubscriptionEpisode{
+				SubscriptionID: subscription.ID,
 				Episode:        episode,
 				Status:         model.EpisodeStatusMissing,
 				StatusSource:   model.EpisodeStatusSourceMigration,
 			}
-			if err := tx.Where("subscription_id = ? AND episode = ?", sub.ID, episode).
-				FirstOrCreate(&ledger).Error; err != nil {
+			if err := db.Where(
+				"subscription_id = ? AND episode = ?",
+				subscription.ID,
+				episode,
+			).FirstOrCreate(&ledgerEntry).Error; err != nil {
+				return err
+			}
+		}
+
+		if strings.TrimSpace(subscription.RssURL) != "" && !subscription.IsCalendarOnly() {
+			if err := db.Model(&model.Subscription{}).
+				Where("id = ?", subscription.ID).
+				Update("rss_baseline_pending", true).Error; err != nil {
 				return err
 			}
 		}
 	}
 
-	if err := tx.Model(&model.Download{}).
-		Where("purpose = '' OR purpose IS NULL").
-		Update("purpose", model.DownloadPurposeNormal).Error; err != nil {
-		return err
-	}
-
-	return tx.Model(&model.Subscription{}).
-		Where("rss_url <> '' AND source_type <> ?", "calendar").
-		Update("rss_baseline_pending", true).Error
+	return nil
 }
 
-func episodeStatusFromDownloadStatus(status string) (string, int) {
+func downloadPreferredForEpisode(candidate, current model.Download) bool {
+	candidatePriority := downloadMigrationPriority(candidate.Status)
+	currentPriority := downloadMigrationPriority(current.Status)
+	if candidatePriority != currentPriority {
+		return candidatePriority > currentPriority
+	}
+
+	candidateRenamed := strings.TrimSpace(candidate.RenamedPath) != ""
+	currentRenamed := strings.TrimSpace(current.RenamedPath) != ""
+	if candidateRenamed != currentRenamed {
+		return candidateRenamed
+	}
+	if !candidate.UpdatedAt.Equal(current.UpdatedAt) {
+		return candidate.UpdatedAt.After(current.UpdatedAt)
+	}
+	return candidate.ID > current.ID
+}
+
+func subscriptionEpisodeFromDownload(subscriptionID uint, episode int, download model.Download) model.SubscriptionEpisode {
+	status := episodeStatusForDownload(download.Status)
+	ledgerEntry := model.SubscriptionEpisode{
+		SubscriptionID: subscriptionID,
+		Episode:        episode,
+		Status:         status,
+		StatusSource:   model.EpisodeStatusSourceMigration,
+	}
+	if status != model.EpisodeStatusDownloaded && status != model.EpisodeStatusDownloading {
+		return ledgerEntry
+	}
+
+	activeDownloadID := download.ID
+	ledgerEntry.ActiveDownloadID = &activeDownloadID
+	ledgerEntry.ActiveTorrentHash = download.TorrentHash
+	ledgerEntry.ActiveTorrentURL = download.TorrentURL
+	ledgerEntry.ActiveTitle = download.Title
+	if status == model.EpisodeStatusDownloaded {
+		ledgerEntry.DownloadedAt = download.DownloadedAt
+	}
+	return ledgerEntry
+}
+
+func downloadMigrationPriority(status string) int {
 	switch status {
 	case model.DownloadStatusCompleted:
-		return model.EpisodeStatusDownloaded, 3
-	case model.DownloadStatusOrganizing, model.DownloadStatusDownloading, model.DownloadStatusPending, model.DownloadStatusStalled:
-		return model.EpisodeStatusDownloading, 2
+		return 3
+	case model.DownloadStatusOrganizing,
+		model.DownloadStatusDownloading,
+		model.DownloadStatusPending,
+		model.DownloadStatusStalled:
+		return 2
 	case model.DownloadStatusFailed:
-		return model.EpisodeStatusMissing, 1
+		return 1
 	default:
-		return model.EpisodeStatusMissing, 0
+		return 0
 	}
 }
 
-func betterEpisodeBackfillCandidate(candidate, current episodeBackfillCandidate) bool {
-	if candidate.rank != current.rank {
-		return candidate.rank > current.rank
+func episodeStatusForDownload(status string) string {
+	switch status {
+	case model.DownloadStatusCompleted:
+		return model.EpisodeStatusDownloaded
+	case model.DownloadStatusOrganizing,
+		model.DownloadStatusDownloading,
+		model.DownloadStatusPending,
+		model.DownloadStatusStalled:
+		return model.EpisodeStatusDownloading
+	default:
+		return model.EpisodeStatusMissing
 	}
-	candidateHasRenamedPath := candidate.download.RenamedPath != ""
-	currentHasRenamedPath := current.download.RenamedPath != ""
-	if candidateHasRenamedPath != currentHasRenamedPath {
-		return candidateHasRenamedPath
-	}
-	if !candidate.download.UpdatedAt.Equal(current.download.UpdatedAt) {
-		return candidate.download.UpdatedAt.After(current.download.UpdatedAt)
-	}
-	return candidate.download.ID > current.download.ID
 }
 
 // GetCurrentVersion 获取当前迁移版本
