@@ -91,6 +91,45 @@ func TestQBittorrentClientAddTorrentExclusiveOwnsOnlyNewCategoryHash(t *testing.
 	}
 }
 
+func TestQBittorrentClientAddTorrentExclusiveRejectsSavePathMismatch(t *testing.T) {
+	const newHash = "cccccccccccccccccccccccccccccccccccccccc"
+	added := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/torrents/info":
+			w.Header().Set("Content-Type", "application/json")
+			if !added {
+				_ = json.NewEncoder(w).Encode([]map[string]any{})
+				return
+			}
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"hash": newHash, "name": "new", "category": "AutoRss:replacement:9", "save_path": "/downloads/other",
+			}})
+		case "/api/v2/torrents/add":
+			added = true
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := &qbittorrentClient{host: server.URL, client: resty.New()}
+
+	hash, err := client.AddTorrentExclusive(
+		"magnet:?xt=urn:btih:"+newHash,
+		"/downloads/expected",
+		"AutoRss:replacement:9",
+		newHash,
+	)
+
+	if !errors.Is(err, ErrTorrentOwnershipUnconfirmed) {
+		t.Fatalf("error = %v, want ErrTorrentOwnershipUnconfirmed", err)
+	}
+	if hash != "" {
+		t.Fatalf("hash = %q, want empty", hash)
+	}
+}
+
 func TestQBittorrentClientPauseResumeTorrentContracts(t *testing.T) {
 	tests := []struct {
 		name     string

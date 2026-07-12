@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
@@ -125,6 +126,7 @@ func validateRenameEndpoint(path string, mustExist bool) error {
 }
 
 type ReplacementService struct {
+	recoveryMu    sync.Mutex
 	db            *gorm.DB
 	episodes      repository.EpisodeRepository
 	downloads     repository.DownloadRepository
@@ -161,18 +163,41 @@ func (s *ReplacementService) RecoverIncomplete(ctx context.Context) error {
 	if err := s.validate(); err != nil {
 		return err
 	}
+	s.recoveryMu.Lock()
+	defer s.recoveryMu.Unlock()
 	candidates, err := s.episodes.ListIncompleteReplacements()
 	if err != nil {
 		return err
 	}
-	var recoveryErrors []error
+	errCh := make(chan error, len(candidates))
+	var activeDownloads sync.WaitGroup
+	advanceCandidate := func(candidate model.EpisodeResourceCandidate) {
+		if err := s.advance(ctx, &candidate); err != nil {
+			errCh <- fmt.Errorf("candidate %d: %w", candidate.ID, err)
+		}
+	}
 	for i := range candidates {
 		if err := ctx.Err(); err != nil {
-			return err
+			errCh <- err
+			break
 		}
-		if err := s.advance(ctx, &candidates[i]); err != nil {
-			recoveryErrors = append(recoveryErrors, fmt.Errorf("candidate %d: %w", candidates[i].ID, err))
+		candidate := candidates[i]
+		if candidate.Status == model.CandidateStatusReplacing &&
+			(candidate.ReplacementStage == "" || candidate.ReplacementStage == ReplacementStageQueued || candidate.ReplacementStage == ReplacementStageDownloading) {
+			activeDownloads.Add(1)
+			go func() {
+				defer activeDownloads.Done()
+				advanceCandidate(candidate)
+			}()
+			continue
 		}
+		advanceCandidate(candidate)
+	}
+	activeDownloads.Wait()
+	close(errCh)
+	var recoveryErrors []error
+	for err := range errCh {
+		recoveryErrors = append(recoveryErrors, err)
 	}
 	return errors.Join(recoveryErrors...)
 }
@@ -239,7 +264,13 @@ func (s *ReplacementService) advance(ctx context.Context, candidate *model.Episo
 			if freshErr == nil {
 				*candidate = *fresh
 			}
-			if errors.Is(downloadErr, ErrReplacementOwnershipUnknown) {
+			if errors.Is(downloadErr, ErrReplacementOwnershipUnknown) || errors.Is(downloadErr, ErrReplacementCheckpointPending) {
+				if freshErr != nil {
+					return errors.Join(downloadErr, freshErr)
+				}
+				if candidate.Status != model.CandidateStatusReplacing || candidate.ReplacementStage != ReplacementStageDownloading {
+					return downloadErr
+				}
 				candidate.Status = model.CandidateStatusReplacing
 				candidate.FailureReason = downloadErr.Error()
 				if saveErr := s.episodes.UpdateCandidate(candidate); saveErr != nil {
@@ -376,8 +407,12 @@ func (s *ReplacementService) advance(ctx context.Context, candidate *model.Episo
 			oldExists := s.files.Exists(candidate.OldResourcePath)
 			rollbackExists := s.files.Exists(candidate.RollbackPath)
 			if oldExists && rollbackExists {
-				candidate.FailureReason = "both old and rollback resources exist at staged checkpoint"
-				return s.episodes.UpdateCandidate(candidate)
+				err := errors.New("both old and rollback resources exist at staged checkpoint")
+				candidate.FailureReason = err.Error()
+				if saveErr := s.episodes.UpdateCandidate(candidate); saveErr != nil {
+					return errors.Join(err, saveErr)
+				}
+				return err
 			}
 			if !oldExists && !rollbackExists {
 				return s.failAndResume(candidate, errors.New("old resource and rollback files are missing"))
@@ -411,8 +446,12 @@ func (s *ReplacementService) advance(ctx context.Context, candidate *model.Episo
 			return s.finishPromoted(ctx, candidate)
 		}
 		if finalExists && stagedExists {
-			candidate.FailureReason = "both staged and final resources exist at old_backed_up checkpoint"
-			return s.episodes.UpdateCandidate(candidate)
+			err := errors.New("both staged and final resources exist at old_backed_up checkpoint")
+			candidate.FailureReason = err.Error()
+			if saveErr := s.episodes.UpdateCandidate(candidate); saveErr != nil {
+				return errors.Join(err, saveErr)
+			}
+			return err
 		}
 		if !stagedExists {
 			if candidate.RollbackPath != "" && s.files.Exists(candidate.RollbackPath) && !s.files.Exists(candidate.FinalPath) {
@@ -445,11 +484,8 @@ func validateDetachingTorrentOwnership(candidate *model.EpisodeResourceCandidate
 		return errors.New("detaching torrent ownership information is missing")
 	}
 	expectedCategory := replacementTorrentCategoryPrefix + fmt.Sprint(candidate.ID)
-	expectedSavePath, pathErr := filepath.Abs(filepath.Dir(candidate.StagedPath))
-	actualSavePath, actualPathErr := filepath.Abs(strings.TrimSpace(info.SavePath))
-	if pathErr != nil || actualPathErr != nil ||
-		!strings.EqualFold(strings.TrimSpace(info.Hash), strings.TrimSpace(download.TorrentHash)) ||
-		info.Category != expectedCategory || filepath.Clean(actualSavePath) != filepath.Clean(expectedSavePath) {
+	if !strings.EqualFold(strings.TrimSpace(info.Hash), strings.TrimSpace(download.TorrentHash)) ||
+		info.Category != expectedCategory || !sameReplacementSavePath(info.SavePath, filepath.Dir(candidate.StagedPath)) {
 		return errors.New("detaching torrent ownership hash/category/save path changed")
 	}
 	return nil
@@ -680,10 +716,38 @@ func (s *ReplacementService) cleanupFailure(candidate *model.EpisodeResourceCand
 }
 
 func (s *ReplacementService) failAndResume(candidate *model.EpisodeResourceCandidate, err error) error {
-	if candidate.OldTorrentHash != "" {
-		_ = s.torrents.ResumeTorrent(candidate.OldTorrentHash)
+	var compensation []error
+	oldRestored := candidate.OldResourcePath == "" || s.files.Exists(candidate.OldResourcePath)
+	if !oldRestored && candidate.RollbackPath != "" && s.files.Exists(candidate.RollbackPath) {
+		if restoreErr := s.files.Move(candidate.RollbackPath, candidate.OldResourcePath); restoreErr != nil {
+			compensation = append(compensation, fmt.Errorf("restore old resource: %w", restoreErr))
+		} else {
+			oldRestored = true
+		}
 	}
-	return s.recordFailure(candidate, err)
+	if oldRestored && candidate.OldTorrentHash != "" {
+		if resumeErr := s.torrents.ResumeTorrent(candidate.OldTorrentHash); resumeErr != nil {
+			compensation = append(compensation, fmt.Errorf("resume old torrent: %w", resumeErr))
+		}
+	}
+	if !oldRestored && len(compensation) == 0 {
+		compensation = append(compensation, errors.New("old resource restoration is incomplete"))
+	}
+	joined := errors.Join(append([]error{err}, compensation...)...)
+	if len(compensation) == 0 {
+		return s.recordFailure(candidate, joined)
+	}
+	candidate.Status = model.CandidateStatusReplacing
+	if oldRestored {
+		candidate.ReplacementStage = ReplacementStageStaged
+	} else {
+		candidate.ReplacementStage = ReplacementStageOldBackedUp
+	}
+	candidate.FailureReason = joined.Error()
+	if saveErr := s.episodes.UpdateCandidate(candidate); saveErr != nil {
+		return errors.Join(joined, saveErr)
+	}
+	return joined
 }
 
 func (s *ReplacementService) compensateSwitchFailure(candidate *model.EpisodeResourceCandidate, cause error) error {
@@ -696,17 +760,19 @@ func (s *ReplacementService) compensateSwitchFailure(candidate *model.EpisodeRes
 			newRestored = true
 		}
 	}
-	oldRestored := candidate.RollbackPath == "" || s.files.Exists(candidate.OldResourcePath)
-	if candidate.RollbackPath != "" && s.files.Exists(candidate.RollbackPath) && !s.files.Exists(candidate.OldResourcePath) {
+	oldRestored := candidate.RollbackPath == "" || (newRestored && s.files.Exists(candidate.OldResourcePath))
+	if newRestored && candidate.RollbackPath != "" && s.files.Exists(candidate.RollbackPath) && !s.files.Exists(candidate.OldResourcePath) {
 		if err := s.files.Move(candidate.RollbackPath, candidate.OldResourcePath); err != nil {
 			compensation = append(compensation, err)
 		} else {
 			oldRestored = true
 		}
 	}
-	if oldRestored && candidate.OldTorrentHash != "" {
+	resumeFailed := false
+	if newRestored && oldRestored && candidate.OldTorrentHash != "" {
 		if err := s.torrents.ResumeTorrent(candidate.OldTorrentHash); err != nil {
 			compensation = append(compensation, err)
+			resumeFailed = true
 		}
 	}
 	joined := errors.Join(append([]error{cause}, compensation...)...)
@@ -714,10 +780,14 @@ func (s *ReplacementService) compensateSwitchFailure(candidate *model.EpisodeRes
 		return s.recordFailure(candidate, joined)
 	}
 	candidate.Status = model.CandidateStatusReplacing
-	if newRestored {
-		candidate.ReplacementStage = ReplacementStageOldBackedUp
-	} else {
+	if !newRestored {
 		candidate.ReplacementStage = ReplacementStagePromoted
+	} else if !oldRestored {
+		candidate.ReplacementStage = ReplacementStageOldBackedUp
+	} else if resumeFailed {
+		candidate.ReplacementStage = ReplacementStageStaged
+	} else {
+		candidate.ReplacementStage = ReplacementStageStaged
 	}
 	candidate.FailureReason = joined.Error()
 	if err := s.episodes.UpdateCandidate(candidate); err != nil {
@@ -731,10 +801,32 @@ func (s *ReplacementService) recordFailure(candidate *model.EpisodeResourceCandi
 	if candidate.StagedPath != "" && s.files.Exists(candidate.StagedPath) {
 		cleanupErr = s.files.Remove(candidate.StagedPath)
 	}
-	candidate.Status = model.CandidateStatusFailed
-	candidate.FailureReason = errors.Join(cause, cleanupErr).Error()
-	if err := s.episodes.UpdateCandidate(candidate); err != nil {
-		return errors.Join(cause, cleanupErr, err)
+	if cleanupErr == nil && candidate.ReplacementDownloadID != nil &&
+		(candidate.OldResourcePath == "" || s.files.Exists(candidate.OldResourcePath)) &&
+		(candidate.RollbackPath == "" || !s.files.Exists(candidate.RollbackPath)) {
+		download, loadErr := s.downloads.GetByID(*candidate.ReplacementDownloadID)
+		if loadErr == nil {
+			if download.ReplacementTorrentOwned {
+				cleanupErr = errors.New("replacement torrent is still owned during terminal failure")
+			} else {
+				cleanupErr = s.discardFailedReplacementDownload(candidate, download)
+			}
+		} else if !errors.Is(loadErr, gorm.ErrRecordNotFound) {
+			cleanupErr = loadErr
+		}
 	}
-	return errors.Join(cause, cleanupErr)
+	if cleanupErr != nil {
+		candidate.Status = model.CandidateStatusReplacing
+		candidate.FailureReason = errors.Join(cause, cleanupErr).Error()
+		if err := s.episodes.UpdateCandidate(candidate); err != nil {
+			return errors.Join(cause, cleanupErr, err)
+		}
+		return errors.Join(cause, cleanupErr)
+	}
+	candidate.Status = model.CandidateStatusFailed
+	candidate.FailureReason = cause.Error()
+	if err := s.episodes.UpdateCandidate(candidate); err != nil {
+		return errors.Join(cause, err)
+	}
+	return cause
 }

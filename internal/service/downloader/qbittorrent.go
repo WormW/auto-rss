@@ -2,7 +2,9 @@ package downloader
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -157,6 +159,10 @@ func (c *qbittorrentClient) AddTorrent(torrentURL string, savePath string, categ
 // AddTorrentExclusive adds a torrent only when this call can prove ownership
 // of a task that did not exist in the global pre-add snapshot.
 func (c *qbittorrentClient) AddTorrentExclusive(torrentURL, savePath, category, expectedHash string) (string, error) {
+	expectedSavePath, err := normalizedTorrentSavePath(savePath)
+	if err != nil {
+		return "", fmt.Errorf("exclusive add save path: %w", err)
+	}
 	before, err := c.getAllTorrents()
 	if err != nil {
 		return "", fmt.Errorf("snapshot torrents before exclusive add: %w", err)
@@ -197,7 +203,8 @@ func (c *qbittorrentClient) AddTorrentExclusive(torrentURL, savePath, category, 
 			owned := make([]string, 0, 1)
 			for _, torrent := range after {
 				hash := strings.ToLower(strings.TrimSpace(torrent.Hash))
-				if hash == "" || torrent.Category != category {
+				actualSavePath, pathErr := normalizedTorrentSavePath(torrent.SavePath)
+				if hash == "" || torrent.Category != category || pathErr != nil || actualSavePath != expectedSavePath {
 					continue
 				}
 				if _, preexisting := existing[hash]; preexisting {
@@ -220,6 +227,18 @@ func (c *qbittorrentClient) AddTorrentExclusive(torrentURL, savePath, category, 
 		}
 		time.Sleep(torrentAddPollInterval)
 	}
+}
+
+func normalizedTorrentSavePath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", errors.New("save path is empty")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(abs), nil
 }
 
 // getAllTorrents 获取所有种子

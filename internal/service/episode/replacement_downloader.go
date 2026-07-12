@@ -21,6 +21,7 @@ const replacementTorrentCategoryPrefix = "AutoRss:replacement:"
 var replacementPollInterval = 5 * time.Second
 
 var ErrReplacementOwnershipUnknown = qbclient.ErrTorrentOwnershipUnconfirmed
+var ErrReplacementCheckpointPending = errors.New("replacement checkpoint pending")
 
 type qbReplacementDownloader struct {
 	db             *gorm.DB
@@ -71,6 +72,7 @@ func (d *qbReplacementDownloader) DownloadToStage(ctx context.Context, candidate
 	originalEpisode := ledger.Episode + max(subscription.EpisodeOffset, 0)
 	queuedHash := fmt.Sprintf("replacement:%d:queued", candidate.ID)
 	var download *model.Download
+	newDownload := candidate.ReplacementDownloadID == nil
 	if candidate.ReplacementDownloadID != nil {
 		download, err = d.downloads.GetByID(*candidate.ReplacementDownloadID)
 		if err != nil {
@@ -93,9 +95,12 @@ func (d *qbReplacementDownloader) DownloadToStage(ctx context.Context, candidate
 			ReplacementCandidateID: &candidate.ID,
 			MaxRetries:             0,
 		}
-		if err := d.downloads.Create(download); err != nil {
-			return nil, "", err
+	}
+	checkpointFailure := func(cause error) (*model.Download, string, error) {
+		if newDownload {
+			return nil, "", cause
 		}
+		return download, "", cause
 	}
 
 	plannedFromMetadata := strings.TrimSpace(candidate.FinalPath) == ""
@@ -110,34 +115,53 @@ func (d *qbReplacementDownloader) DownloadToStage(ctx context.Context, candidate
 	}
 	finalPath, err = filepath.Abs(finalPath)
 	if err != nil || !pathWithin(root, finalPath) {
-		return download, "", fmt.Errorf("replacement final path escapes download root: %s", finalPath)
+		return checkpointFailure(fmt.Errorf("replacement final path escapes download root: %s", finalPath))
 	}
 	if err := validateRenameEndpoint(finalPath, false); err != nil {
-		return download, "", err
+		return checkpointFailure(err)
 	}
 	expectedStagedDir := filepath.Join(filepath.Dir(finalPath), ".auto-rss-replacements", fmt.Sprint(candidate.ID))
 	if stagedDir != "" {
 		stagedDir, err = filepath.Abs(stagedDir)
 		if err != nil || filepath.Clean(stagedDir) != filepath.Clean(expectedStagedDir) {
-			return download, "", fmt.Errorf("replacement staging directory is not beside planned final path: %s", stagedDir)
+			return checkpointFailure(fmt.Errorf("replacement staging directory is not beside planned final path: %s", stagedDir))
 		}
 	} else {
 		stagedDir = expectedStagedDir
 	}
 	if !pathWithin(root, stagedDir) {
-		return download, "", fmt.Errorf("replacement staging directory escapes download root: %s", stagedDir)
+		return checkpointFailure(fmt.Errorf("replacement staging directory escapes download root: %s", stagedDir))
 	}
 	if err := validateRenameEndpoint(stagedDir, false); err != nil {
-		return download, "", err
+		return checkpointFailure(err)
 	}
-	checkpoint := d.db.Model(&model.EpisodeResourceCandidate{}).
-		Where("id = ? AND status = ? AND replacement_stage = ?", candidate.ID, model.CandidateStatusReplacing, ReplacementStageDownloading).
-		Updates(map[string]any{"replacement_download_id": download.ID, "final_path": finalPath})
-	if checkpoint.Error != nil || checkpoint.RowsAffected != 1 {
-		if checkpoint.Error != nil {
-			return download, "", checkpoint.Error
+	checkpointErr := d.db.Transaction(func(tx *gorm.DB) error {
+		if newDownload {
+			if err := d.downloads.CreateInTx(tx, download); err != nil {
+				return err
+			}
 		}
-		return download, "", errors.New("replacement candidate checkpoint changed before qBittorrent add")
+		checkpoint := tx.Model(&model.EpisodeResourceCandidate{}).
+			Where("id = ? AND status = ? AND replacement_stage = ?", candidate.ID, model.CandidateStatusReplacing, ReplacementStageDownloading)
+		if newDownload {
+			checkpoint = checkpoint.Where("replacement_download_id IS NULL")
+		} else {
+			checkpoint = checkpoint.Where("replacement_download_id = ?", download.ID)
+		}
+		result := checkpoint.Updates(map[string]any{"replacement_download_id": download.ID, "final_path": finalPath})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return errors.New("replacement candidate checkpoint changed before qBittorrent add")
+		}
+		return nil
+	})
+	if checkpointErr != nil {
+		if newDownload {
+			download.ID = 0
+		}
+		return nil, "", fmt.Errorf("%w: %v", ErrReplacementCheckpointPending, checkpointErr)
 	}
 	candidate.ReplacementDownloadID = &download.ID
 	candidate.FinalPath = finalPath
@@ -202,7 +226,7 @@ func (d *qbReplacementDownloader) DownloadToStage(ctx context.Context, candidate
 		}
 	}
 	if download.FilePath != "" && download.RenamedPath != "" && pathWithin(stagedDir, download.FilePath) && (osFilePromoter{}).Exists(download.FilePath) {
-		checkpoint = d.db.Model(&model.EpisodeResourceCandidate{}).
+		checkpoint := d.db.Model(&model.EpisodeResourceCandidate{}).
 			Where("id = ? AND status = ? AND replacement_stage = ?", candidate.ID, model.CandidateStatusReplacing, ReplacementStageDownloading).
 			Updates(map[string]any{
 				"replacement_download_id": download.ID,
@@ -266,7 +290,7 @@ func (d *qbReplacementDownloader) DownloadToStage(ctx context.Context, candidate
 	if err := validateStagedPath(stagedPath, stagedDir); err != nil {
 		return download, "", err
 	}
-	checkpoint = d.db.Model(&model.EpisodeResourceCandidate{}).
+	checkpoint := d.db.Model(&model.EpisodeResourceCandidate{}).
 		Where("id = ? AND status = ? AND replacement_stage = ?", candidate.ID, model.CandidateStatusReplacing, ReplacementStageDownloading).
 		Updates(map[string]any{
 			"replacement_download_id": download.ID,
@@ -337,8 +361,7 @@ func (d *qbReplacementDownloader) adoptCandidateTorrent(candidate model.EpisodeR
 	if torrent.Category != category || hash == "" {
 		return "", false, fmt.Errorf("%w: candidate torrent category/hash mismatch", ErrReplacementOwnershipUnknown)
 	}
-	actualSavePath, pathErr := filepath.Abs(strings.TrimSpace(torrent.SavePath))
-	if pathErr != nil || filepath.Clean(actualSavePath) != filepath.Clean(stagedDir) {
+	if !sameReplacementSavePath(torrent.SavePath, stagedDir) {
 		return "", false, fmt.Errorf("%w: candidate torrent save path mismatch", ErrReplacementOwnershipUnknown)
 	}
 	if expected := strings.TrimSpace(candidate.TorrentHash); expected != "" && !strings.EqualFold(expected, hash) {
@@ -471,7 +494,7 @@ func (d *qbReplacementDownloader) CleanupFailedDownload(download *model.Download
 		return nil
 	}
 	var candidate model.EpisodeResourceCandidate
-	if err := d.db.Select("old_torrent_hash").First(&candidate, *persisted.ReplacementCandidateID).Error; err != nil {
+	if err := d.db.Select("old_torrent_hash", "staged_path", "final_path").First(&candidate, *persisted.ReplacementCandidateID).Error; err != nil {
 		return fmt.Errorf("verify replacement cleanup ownership: %w", err)
 	}
 	if candidate.OldTorrentHash != "" && strings.EqualFold(strings.TrimSpace(candidate.OldTorrentHash), hash) {
@@ -490,12 +513,32 @@ func (d *qbReplacementDownloader) CleanupFailedDownload(download *model.Download
 	if info == nil || !strings.EqualFold(strings.TrimSpace(info.Hash), hash) || info.Category != expectedCategory {
 		return fmt.Errorf("replacement torrent ownership category changed: expected %s", expectedCategory)
 	}
+	expectedSavePath := ""
+	if candidate.StagedPath != "" {
+		expectedSavePath = filepath.Dir(candidate.StagedPath)
+	} else if candidate.FinalPath != "" {
+		expectedSavePath = filepath.Join(filepath.Dir(candidate.FinalPath), ".auto-rss-replacements", fmt.Sprint(*persisted.ReplacementCandidateID))
+	}
+	if expectedSavePath == "" || !sameReplacementSavePath(info.SavePath, expectedSavePath) {
+		return fmt.Errorf("replacement torrent ownership save path changed: expected %s", expectedSavePath)
+	}
 	if err := d.qb.DeleteTorrentWithPayload(hash); err != nil {
 		return err
 	}
 	persisted.ReplacementTorrentOwned = false
 	persisted.Status = model.DownloadStatusFailed
 	return d.downloads.Update(persisted)
+}
+
+func sameReplacementSavePath(actual, expected string) bool {
+	actual = strings.TrimSpace(actual)
+	expected = strings.TrimSpace(expected)
+	if actual == "" || expected == "" {
+		return false
+	}
+	actualAbs, actualErr := filepath.Abs(actual)
+	expectedAbs, expectedErr := filepath.Abs(expected)
+	return actualErr == nil && expectedErr == nil && filepath.Clean(actualAbs) == filepath.Clean(expectedAbs)
 }
 
 func pathWithin(root, path string) bool {
