@@ -38,6 +38,8 @@ func setupEpisodeHandlerTest(t *testing.T) (*gorm.DB, *gin.Engine) {
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(
 		&model.Subscription{},
+		&model.SubscriptionFeed{},
+		&model.SubscriptionFeedSeenItem{},
 		&model.Download{},
 		&model.SubscriptionEpisode{},
 		&model.EpisodeResourceCandidate{},
@@ -167,6 +169,8 @@ func newReplacementHandlerFixture(t *testing.T, replacement ReplacementActions) 
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(
 		&model.Subscription{},
+		&model.SubscriptionFeed{},
+		&model.SubscriptionFeedSeenItem{},
 		&model.Download{},
 		&model.SubscriptionEpisode{},
 		&model.EpisodeResourceCandidate{},

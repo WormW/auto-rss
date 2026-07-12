@@ -28,6 +28,8 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(
 		&model.Subscription{},
+		&model.SubscriptionFeed{},
+		&model.SubscriptionFeedSeenItem{},
 		&model.Download{},
 		&model.SubscriptionEpisode{},
 		&model.EpisodeResourceCandidate{},

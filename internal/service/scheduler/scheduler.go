@@ -228,7 +228,7 @@ func (s *scheduler) checkRSSFeeds() {
 				"subscription", status.Subscription.Name)
 			continue
 		}
-		if _, err := s.collectFeeds(context.Background(), status.Subscription, subscriptionFeeds); err != nil {
+		if _, err := s.collectFeeds(context.Background(), status.Subscription, subscriptionFeeds, false); err != nil {
 			logger.Error("Failed to collect subscription feeds",
 				"subscription_id", status.Subscription.ID,
 				"subscription", status.Subscription.Name,
@@ -254,13 +254,14 @@ func (s *scheduler) CollectSubscription(ctx context.Context, subscriptionID uint
 			enabled = append(enabled, feed)
 		}
 	}
-	return s.collectFeeds(ctx, subscription, enabled)
+	return s.collectFeeds(ctx, subscription, enabled, true)
 }
 
 func (s *scheduler) collectFeeds(
 	ctx context.Context,
 	subscription *model.Subscription,
 	feeds []model.SubscriptionFeed,
+	includeHistorical bool,
 ) (CollectSummary, error) {
 	var summary CollectSummary
 	if len(feeds) == 0 {
@@ -301,7 +302,13 @@ func (s *scheduler) collectFeeds(
 			continue
 		}
 		summary.ItemsScanned += len(result.Items)
-		maxPubTime, itemSummary, err := s.processFetchedFeedItemsWithSummary(ctx, subscription, &result.Feed, result.Items)
+		maxPubTime, itemSummary, err := s.processFetchedFeedItemsWithSummary(
+			ctx,
+			subscription,
+			&result.Feed,
+			result.Items,
+			includeHistorical,
+		)
 		if err != nil {
 			summary.FeedErrors++
 			_ = s.feedRepo.UpdateCheckFailure(result.Feed.ID, result.CheckedAt, err.Error())
@@ -337,7 +344,7 @@ func (s *scheduler) processFetchedFeedItems(
 	feed *model.SubscriptionFeed,
 	items []rss.RSSItem,
 ) (*time.Time, error) {
-	maxPubTime, _, err := s.processFetchedFeedItemsWithSummary(ctx, subscription, feed, items)
+	maxPubTime, _, err := s.processFetchedFeedItemsWithSummary(ctx, subscription, feed, items, false)
 	return maxPubTime, err
 }
 
@@ -346,6 +353,7 @@ func (s *scheduler) processFetchedFeedItemsWithSummary(
 	subscription *model.Subscription,
 	feed *model.SubscriptionFeed,
 	items []rss.RSSItem,
+	includeHistorical bool,
 ) (*time.Time, CollectSummary, error) {
 	var maxPubTime *time.Time
 	var summary CollectSummary
@@ -379,16 +387,20 @@ func (s *scheduler) processFetchedFeedItemsWithSummary(
 				"title", item.Title)
 			continue
 		}
-		if item.PubTime.IsZero() {
-			seen, err := s.feedRepo.HasSeenItem(feed.ID, resourceKey)
-			if err != nil {
-				return nil, summary, err
-			}
-			if seen {
+		// Manual collection explicitly rescans the current feed so episodes that
+		// were only observed during baseline sync can still be backfilled.
+		if !includeHistorical {
+			if item.PubTime.IsZero() {
+				seen, err := s.feedRepo.HasSeenItem(feed.ID, resourceKey)
+				if err != nil {
+					return nil, summary, err
+				}
+				if seen {
+					continue
+				}
+			} else if !feed.BaselinePending && feed.LastRSSPubTime != nil && !item.PubTime.After(*feed.LastRSSPubTime) {
 				continue
 			}
-		} else if !feed.BaselinePending && feed.LastRSSPubTime != nil && !item.PubTime.After(*feed.LastRSSPubTime) {
-			continue
 		}
 
 		if relativeEpisode <= 0 || (subscription.TotalEpisodes > 0 && relativeEpisode > subscription.TotalEpisodes) {
@@ -397,12 +409,12 @@ func (s *scheduler) processFetchedFeedItemsWithSummary(
 			}
 			continue
 		}
-		if feed.BaselinePending {
+		if feed.BaselinePending && !includeHistorical {
 			decision, err := s.episodeService.EvaluateRSSItem(ctx, subscription, resource, true)
 			if err != nil {
 				return nil, summary, err
 			}
-			if decision.Action == episode.DecisionCandidate {
+			if decision.Action == episode.DecisionCandidate && decision.CandidateCreated {
 				summary.CandidatesCreated++
 			}
 			if err := s.feedRepo.MarkSeenItem(feed.ID, resourceKey, item.Episode, time.Now()); err != nil {
@@ -461,7 +473,9 @@ func (s *scheduler) processFetchedFeedItemsWithSummary(
 				summary.DownloadsCreated++
 			}
 		case episode.DecisionCandidate:
-			summary.CandidatesCreated++
+			if decision.CandidateCreated {
+				summary.CandidatesCreated++
+			}
 		}
 		if err := s.feedRepo.MarkSeenItem(feed.ID, resourceKey, item.Episode, time.Now()); err != nil {
 			return nil, summary, err

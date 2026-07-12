@@ -47,6 +47,8 @@ func newReplacementFixture(t *testing.T) *replacementFixture {
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(
 		&model.Subscription{},
+		&model.SubscriptionFeed{},
+		&model.SubscriptionFeedSeenItem{},
 		&model.Download{},
 		&model.SubscriptionEpisode{},
 		&model.EpisodeResourceCandidate{},

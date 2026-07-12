@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -175,6 +176,33 @@ func TestNewFeedBaselineDoesNotDownloadHistoricalMissingEpisodes(t *testing.T) {
 	assert.False(t, stored.BaselinePending)
 	require.NotNil(t, stored.LastRSSPubTime)
 	assert.Equal(t, base.Add(time.Minute), *stored.LastRSSPubTime)
+}
+
+func TestManualCollectionBackfillsHistoricalMissingEpisodesAfterBaseline(t *testing.T) {
+	fx := newSchedulerLedgerFixture(t, nil)
+	sub := fx.createSubscription(t)
+	feed := fx.defaultFeed(t, sub.ID)
+	feed.BaselinePending = true
+	require.NoError(t, fx.feedRepo.Update(&feed))
+
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	items := []rss.RSSItem{
+		schedulerRSSItem(1, "manual-backfill-1", base),
+		schedulerRSSItem(2, "manual-backfill-2", base.Add(time.Minute)),
+	}
+	fx.parser.set(feed.RSSURL, items)
+
+	fx.scheduler.checkRSSFeeds()
+
+	var downloads int64
+	require.NoError(t, fx.db.Model(&model.Download{}).Count(&downloads).Error)
+	assert.Zero(t, downloads, "automatic baseline sync must not backfill historical episodes")
+
+	summary, err := fx.scheduler.CollectSubscription(context.Background(), sub.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, summary.DownloadsCreated)
+	require.NoError(t, fx.db.Model(&model.Download{}).Count(&downloads).Error)
+	assert.EqualValues(t, 2, downloads)
 }
 
 func TestOneFeedFailureDoesNotBlockAnotherFeed(t *testing.T) {

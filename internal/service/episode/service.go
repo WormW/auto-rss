@@ -34,10 +34,11 @@ type RSSResource struct {
 }
 
 type RSSDecision struct {
-	Action      string
-	EpisodeID   uint
-	CandidateID uint
-	Reason      string
+	Action           string
+	EpisodeID        uint
+	CandidateID      uint
+	CandidateCreated bool
+	Reason           string
 }
 
 type Service struct {
@@ -154,15 +155,16 @@ func (s *Service) evaluate(sub *model.Subscription, item RSSResource, baseline, 
 			pubTime := item.PubTime
 			candidate.PubTime = &pubTime
 		}
-		persisted, _, candidateErr := s.repository.UpsertCandidate(ledger.ID, candidate)
+		persisted, created, candidateErr := s.repository.UpsertCandidate(ledger.ID, candidate)
 		if candidateErr != nil {
 			return RSSDecision{}, candidateErr
 		}
 		return RSSDecision{
-			Action:      DecisionCandidate,
-			EpisodeID:   ledger.ID,
-			CandidateID: persisted.ID,
-			Reason:      "different_resource",
+			Action:           DecisionCandidate,
+			EpisodeID:        ledger.ID,
+			CandidateID:      persisted.ID,
+			CandidateCreated: created,
+			Reason:           "different_resource",
 		}, nil
 	default:
 		return RSSDecision{Action: DecisionSkip, EpisodeID: ledger.ID, Reason: "unsupported_episode_status"}, nil

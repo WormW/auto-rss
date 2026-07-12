@@ -557,12 +557,31 @@ func (r *episodeRepository) RefreshSubscriptionProgressInTx(tx *gorm.DB, subscri
 	continuousOwned := 0
 	latest := 0
 	for _, episode := range episodes {
-		if episode.Episode > latest {
+		if episodeCountsAsDiscovered(episode) && episode.Episode > latest {
 			latest = episode.Episode
 		}
 		if episode.Episode == continuousOwned+1 && episodeStatusCountsAsOwned(episode.Status) {
 			continuousOwned++
 		}
+	}
+
+	var latestObserved int
+	observedQuery := tx.Model(&model.SubscriptionFeedSeenItem{}).
+		Select("COALESCE(MAX(subscription_feed_seen_items.original_episode - subscription_feeds.episode_offset), 0)").
+		Joins("JOIN subscription_feeds ON subscription_feeds.id = subscription_feed_seen_items.subscription_feed_id").
+		Where("subscription_feeds.subscription_id = ?", subscriptionID).
+		Where("subscription_feed_seen_items.original_episode > subscription_feeds.episode_offset")
+	if subscription.TotalEpisodes > 0 {
+		observedQuery = observedQuery.Where(
+			"subscription_feed_seen_items.original_episode - subscription_feeds.episode_offset <= ?",
+			subscription.TotalEpisodes,
+		)
+	}
+	if err := observedQuery.Scan(&latestObserved).Error; err != nil {
+		return err
+	}
+	if latestObserved > latest {
+		latest = latestObserved
 	}
 	currentEpisode := progressWithOffset(continuousOwned, subscription.EpisodeOffset)
 	latestEpisode := progressWithOffset(latest, subscription.EpisodeOffset)
@@ -605,6 +624,11 @@ func episodeStatusCountsAsOwned(status string) bool {
 	default:
 		return false
 	}
+}
+
+func episodeCountsAsDiscovered(episode model.SubscriptionEpisode) bool {
+	return episode.Status != model.EpisodeStatusMissing ||
+		episode.StatusSource != model.EpisodeStatusSourceAutomatic
 }
 
 func progressWithOffset(relativeEpisode, offset int) int {
