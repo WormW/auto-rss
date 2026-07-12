@@ -30,6 +30,8 @@ func RunMigrations(db *gorm.DB) error {
 				return tx.AutoMigrate(
 					&model.Subscription{},
 					&model.Download{},
+					&model.SubscriptionEpisode{},
+					&model.EpisodeResourceCandidate{},
 					&model.Config{},
 					&model.DiskSample{},
 					&model.DiskCleanupRecord{},
@@ -43,6 +45,8 @@ func RunMigrations(db *gorm.DB) error {
 				return tx.Migrator().DropTable(
 					"subscriptions",
 					"downloads",
+					"subscription_episodes",
+					"episode_resource_candidates",
 					"configs",
 					"disk_samples",
 					"disk_cleanup_records",
@@ -156,6 +160,23 @@ func RunMigrations(db *gorm.DB) error {
 				return nil
 			},
 		},
+		{
+			ID: "202607110001", // episode ledger schema and historical backfill
+			Migrate: func(tx *gorm.DB) error {
+				if err := tx.AutoMigrate(
+					&model.Subscription{},
+					&model.Download{},
+					&model.SubscriptionEpisode{},
+					&model.EpisodeResourceCandidate{},
+				); err != nil {
+					return err
+				}
+				return backfillSubscriptionEpisodes(tx)
+			},
+			Rollback: func(tx *gorm.DB) error {
+				return nil
+			},
+		},
 	})
 
 	// 设置迁移超时
@@ -166,6 +187,137 @@ func RunMigrations(db *gorm.DB) error {
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
 	return m.Migrate()
+}
+
+type episodeBackfillKey struct {
+	subscriptionID uint
+	episode        int
+}
+
+type episodeBackfillCandidate struct {
+	download model.Download
+	status   string
+	rank     int
+}
+
+func backfillSubscriptionEpisodes(tx *gorm.DB) error {
+	var subscriptions []model.Subscription
+	if err := tx.Find(&subscriptions).Error; err != nil {
+		return err
+	}
+
+	subscriptionByID := make(map[uint]model.Subscription, len(subscriptions))
+	for _, sub := range subscriptions {
+		subscriptionByID[sub.ID] = sub
+	}
+
+	var downloads []model.Download
+	if err := tx.Where("subscription_id > 0 AND episode > 0").
+		Order("subscription_id ASC, episode ASC, updated_at DESC, id DESC").
+		Find(&downloads).Error; err != nil {
+		return err
+	}
+
+	bestByEpisode := make(map[episodeBackfillKey]episodeBackfillCandidate)
+	for _, download := range downloads {
+		sub, ok := subscriptionByID[download.SubscriptionID]
+		if !ok {
+			continue
+		}
+		relativeEpisode := sub.RelativeEpisode(download.Episode)
+		if relativeEpisode <= 0 {
+			continue
+		}
+
+		status, rank := episodeStatusFromDownloadStatus(download.Status)
+		candidate := episodeBackfillCandidate{download: download, status: status, rank: rank}
+		key := episodeBackfillKey{subscriptionID: sub.ID, episode: relativeEpisode}
+		if current, exists := bestByEpisode[key]; !exists || betterEpisodeBackfillCandidate(candidate, current) {
+			bestByEpisode[key] = candidate
+		}
+	}
+
+	for key, candidate := range bestByEpisode {
+		download := candidate.download
+		ledger := model.SubscriptionEpisode{
+			SubscriptionID:    key.subscriptionID,
+			Episode:           key.episode,
+			Status:            candidate.status,
+			ActiveDownloadID:  &download.ID,
+			ActiveTorrentHash: download.TorrentHash,
+			ActiveTorrentURL:  download.TorrentURL,
+			ActiveTitle:       download.Title,
+			StatusSource:      model.EpisodeStatusSourceMigration,
+		}
+		if candidate.status == model.EpisodeStatusDownloaded {
+			ledger.DownloadedAt = download.DownloadedAt
+			if ledger.DownloadedAt == nil && !download.UpdatedAt.IsZero() {
+				downloadedAt := download.UpdatedAt
+				ledger.DownloadedAt = &downloadedAt
+			}
+		}
+		if err := tx.Where("subscription_id = ? AND episode = ?", key.subscriptionID, key.episode).
+			FirstOrCreate(&ledger).Error; err != nil {
+			return err
+		}
+	}
+
+	for _, sub := range subscriptions {
+		knownRange := sub.TotalEpisodes
+		if knownRange <= 0 {
+			knownRange = sub.RelativeLatestEpisode()
+		}
+		for episode := 1; episode <= knownRange; episode++ {
+			ledger := model.SubscriptionEpisode{
+				SubscriptionID: sub.ID,
+				Episode:        episode,
+				Status:         model.EpisodeStatusMissing,
+				StatusSource:   model.EpisodeStatusSourceMigration,
+			}
+			if err := tx.Where("subscription_id = ? AND episode = ?", sub.ID, episode).
+				FirstOrCreate(&ledger).Error; err != nil {
+				return err
+			}
+		}
+	}
+
+	if err := tx.Model(&model.Download{}).
+		Where("purpose = '' OR purpose IS NULL").
+		Update("purpose", model.DownloadPurposeNormal).Error; err != nil {
+		return err
+	}
+
+	return tx.Model(&model.Subscription{}).
+		Where("rss_url <> '' AND source_type <> ?", "calendar").
+		Update("rss_baseline_pending", true).Error
+}
+
+func episodeStatusFromDownloadStatus(status string) (string, int) {
+	switch status {
+	case model.DownloadStatusCompleted:
+		return model.EpisodeStatusDownloaded, 3
+	case model.DownloadStatusOrganizing, model.DownloadStatusDownloading, model.DownloadStatusPending, model.DownloadStatusStalled:
+		return model.EpisodeStatusDownloading, 2
+	case model.DownloadStatusFailed:
+		return model.EpisodeStatusMissing, 1
+	default:
+		return model.EpisodeStatusMissing, 0
+	}
+}
+
+func betterEpisodeBackfillCandidate(candidate, current episodeBackfillCandidate) bool {
+	if candidate.rank != current.rank {
+		return candidate.rank > current.rank
+	}
+	candidateHasRenamedPath := candidate.download.RenamedPath != ""
+	currentHasRenamedPath := current.download.RenamedPath != ""
+	if candidateHasRenamedPath != currentHasRenamedPath {
+		return candidateHasRenamedPath
+	}
+	if !candidate.download.UpdatedAt.Equal(current.download.UpdatedAt) {
+		return candidate.download.UpdatedAt.After(current.download.UpdatedAt)
+	}
+	return candidate.download.ID > current.download.ID
 }
 
 // GetCurrentVersion 获取当前迁移版本
@@ -198,6 +350,8 @@ func ResetMigrations(db *gorm.DB) error {
 				return tx.AutoMigrate(
 					&model.Subscription{},
 					&model.Download{},
+					&model.SubscriptionEpisode{},
+					&model.EpisodeResourceCandidate{},
 					&model.Config{},
 					&model.DiskSample{},
 					&model.DiskCleanupRecord{},
@@ -210,6 +364,8 @@ func ResetMigrations(db *gorm.DB) error {
 				return tx.Migrator().DropTable(
 					"subscriptions",
 					"downloads",
+					"subscription_episodes",
+					"episode_resource_candidates",
 					"configs",
 					"rss_sources",
 					"logs",

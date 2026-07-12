@@ -24,11 +24,11 @@ type Config struct {
 // DefaultConfig 返回默认数据库配置
 func DefaultConfig() *Config {
 	return &Config{
-		MaxOpenConns:    10,                // SQLite 并发性能有限，不宜设置过高
-		MaxIdleConns:    5,                 // 保持一定数量的空闲连接
-		ConnMaxLifetime: 30 * time.Minute,  // 连接最多存活30分钟
-		ConnMaxIdleTime: 10 * time.Minute,  // 空闲连接最多存活10分钟
-		BusyTimeout:     5 * time.Second,   // 忙等待超时5秒
+		MaxOpenConns:    10,               // SQLite 并发性能有限，不宜设置过高
+		MaxIdleConns:    5,                // 保持一定数量的空闲连接
+		ConnMaxLifetime: 30 * time.Minute, // 连接最多存活30分钟
+		ConnMaxIdleTime: 10 * time.Minute, // 空闲连接最多存活10分钟
+		BusyTimeout:     5 * time.Second,  // 忙等待超时5秒
 	}
 }
 
@@ -100,12 +100,12 @@ func GetStats(db *gorm.DB) (*DBStats, error) {
 
 	stats := sqlDB.Stats()
 	return &DBStats{
-		OpenConnections: stats.OpenConnections,
-		InUse:           stats.InUse,
-		Idle:            stats.Idle,
-		WaitCount:       stats.WaitCount,
-		WaitDuration:    stats.WaitDuration,
-		MaxIdleClosed:   stats.MaxIdleClosed,
+		OpenConnections:   stats.OpenConnections,
+		InUse:             stats.InUse,
+		Idle:              stats.Idle,
+		WaitCount:         stats.WaitCount,
+		WaitDuration:      stats.WaitDuration,
+		MaxIdleClosed:     stats.MaxIdleClosed,
 		MaxLifetimeClosed: stats.MaxLifetimeClosed,
 	}, nil
 }
@@ -127,6 +127,8 @@ func Migrate(db *gorm.DB) error {
 		&model.RSSSource{},
 		&model.Subscription{},
 		&model.Download{},
+		&model.SubscriptionEpisode{},
+		&model.EpisodeResourceCandidate{},
 		&model.Config{},
 		&model.Log{},
 		&model.Notification{},
