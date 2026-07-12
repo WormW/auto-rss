@@ -9,13 +9,16 @@ import (
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"github.com/WormW/auto-rss/internal/pkg/utils"
+	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/episode"
 	"gorm.io/gorm"
 )
 
 const (
-	SchemaVersion       = "1.1"
+	SchemaVersion       = "1.2"
 	legacySchemaVersion = "1.0"
+	ledgerSchemaVersion = "1.1"
 	RedactedValue       = "__AUTO_RSS_REDACTED__"
 	MaxPackageBytes     = 8 << 20
 
@@ -107,8 +110,9 @@ type ConfigRecord struct {
 
 type SubscriptionRecord struct {
 	model.Subscription
-	GroupName     string `json:"group_name,omitempty"`
-	RSSSourceName string `json:"rss_source_name,omitempty"`
+	GroupName     string                   `json:"group_name,omitempty"`
+	RSSSourceName string                   `json:"rss_source_name,omitempty"`
+	Feeds         []model.SubscriptionFeed `json:"feeds,omitempty"`
 }
 
 type EpisodeRecord struct {
@@ -229,6 +233,10 @@ func (s *Service) Export(includeSensitive bool) (*Package, error) {
 	if err := s.db.Order("name ASC, season ASC, id ASC").Find(&subscriptions).Error; err != nil {
 		return nil, err
 	}
+	var feeds []model.SubscriptionFeed
+	if err := s.db.Order("subscription_id ASC, id ASC").Find(&feeds).Error; err != nil {
+		return nil, err
+	}
 
 	var episodes []model.SubscriptionEpisode
 	if err := s.db.Order("subscription_id ASC, episode ASC").Find(&episodes).Error; err != nil {
@@ -262,6 +270,10 @@ func (s *Service) Export(includeSensitive bool) (*Package, error) {
 	tagNames := make(map[uint]string, len(tags))
 	for _, tag := range tags {
 		tagNames[tag.ID] = tag.Name
+	}
+	feedsBySubscription := make(map[uint][]model.SubscriptionFeed)
+	for _, feed := range feeds {
+		feedsBySubscription[feed.SubscriptionID] = append(feedsBySubscription[feed.SubscriptionID], sanitizeFeedForBackup(feed))
 	}
 	subscriptionByID := make(map[uint]model.Subscription, len(subscriptions))
 	subscriptionKeyByID := make(map[uint]string, len(subscriptions))
@@ -309,7 +321,7 @@ func (s *Service) Export(includeSensitive bool) (*Package, error) {
 	pkg.Tags = tags
 
 	for _, sub := range subscriptions {
-		record := SubscriptionRecord{Subscription: sub}
+		record := SubscriptionRecord{Subscription: sub, Feeds: feedsBySubscription[sub.ID]}
 		if sub.GroupID != nil {
 			record.GroupName = groupNames[*sub.GroupID]
 		}
@@ -319,6 +331,7 @@ func (s *Service) Export(includeSensitive bool) (*Package, error) {
 		record.Group = nil
 		record.RSSSource = nil
 		record.Downloads = nil
+		record.Subscription.Feeds = nil
 		pkg.Subscriptions = append(pkg.Subscriptions, record)
 	}
 
@@ -541,8 +554,11 @@ func parseAutoRSSPackage(data json.RawMessage) (*Package, error) {
 	if pkg.SchemaVersion == "" {
 		pkg.SchemaVersion = legacySchemaVersion
 	}
-	if pkg.SchemaVersion != legacySchemaVersion && pkg.SchemaVersion != SchemaVersion {
+	if pkg.SchemaVersion != legacySchemaVersion && pkg.SchemaVersion != ledgerSchemaVersion && pkg.SchemaVersion != SchemaVersion {
 		return nil, fmt.Errorf("unsupported auto-rss backup schema version %q", pkg.SchemaVersion)
+	}
+	for i := range pkg.Subscriptions {
+		ensureSubscriptionRecordFeeds(&pkg.Subscriptions[i])
 	}
 	if pkg.App == "" {
 		pkg.App = "auto-rss"
@@ -972,6 +988,9 @@ func applyPackage(tx *gorm.DB, pkg *Package, state *currentState, strategy strin
 			if err := tx.Create(&sub).Error; err != nil {
 				return err
 			}
+			if err := restoreSubscriptionFeeds(tx, record, sub.ID, StrategyOverwrite); err != nil {
+				return err
+			}
 			state.subscriptions[key] = sub
 			continue
 		}
@@ -981,6 +1000,9 @@ func applyPackage(tx *gorm.DB, pkg *Package, state *currentState, strategy strin
 			if err := tx.Save(&sub).Error; err != nil {
 				return err
 			}
+			if err := restoreSubscriptionFeeds(tx, record, sub.ID, StrategyOverwrite); err != nil {
+				return err
+			}
 			state.subscriptions[key] = sub
 		} else if strategy == StrategyMerge {
 			if mergeSubscription(&existing, sub) {
@@ -988,6 +1010,9 @@ func applyPackage(tx *gorm.DB, pkg *Package, state *currentState, strategy strin
 					return err
 				}
 				state.subscriptions[key] = existing
+			}
+			if err := restoreSubscriptionFeeds(tx, record, existing.ID, StrategyMerge); err != nil {
+				return err
 			}
 		}
 	}
@@ -1100,6 +1125,7 @@ func prepareSubscription(record SubscriptionRecord, state *currentState) model.S
 	sub.Group = nil
 	sub.RSSSource = nil
 	sub.Downloads = nil
+	sub.Feeds = nil
 
 	if record.GroupName != "" {
 		if group, ok := state.groups[normalizedKey(record.GroupName)]; ok {
@@ -1123,6 +1149,84 @@ func prepareSubscription(record SubscriptionRecord, state *currentState) model.S
 		sub.SourceType = "manual"
 	}
 	return sub
+}
+
+func sanitizeFeedForBackup(feed model.SubscriptionFeed) model.SubscriptionFeed {
+	feed.ID = 0
+	feed.SubscriptionID = 0
+	feed.RSSURLNormalized = ""
+	feed.LastRSSPubTime = nil
+	feed.BaselinePending = false
+	feed.LastCheckTime = nil
+	feed.LastSuccessAt = nil
+	feed.LastError = ""
+	feed.CreatedAt = time.Time{}
+	feed.UpdatedAt = time.Time{}
+	return feed
+}
+
+func ensureSubscriptionRecordFeeds(record *SubscriptionRecord) {
+	if len(record.Feeds) > 0 || strings.TrimSpace(record.RssURL) == "" {
+		return
+	}
+	record.Feeds = []model.SubscriptionFeed{{
+		Name:          "Default",
+		Fansub:        record.Fansub,
+		RSSURL:        record.RssURL,
+		EpisodeOffset: record.EpisodeOffset,
+		Enabled:       true,
+	}}
+}
+
+func restoreSubscriptionFeeds(tx *gorm.DB, record SubscriptionRecord, subscriptionID uint, strategy string) error {
+	feeds := append([]model.SubscriptionFeed(nil), record.Feeds...)
+	repo := repository.NewSubscriptionFeedRepository(tx)
+	if strategy == StrategyOverwrite {
+		existing, err := repo.ListBySubscription(subscriptionID)
+		if err != nil {
+			return err
+		}
+		for _, feed := range existing {
+			if err := repo.DeleteInTx(tx, feed.ID); err != nil {
+				return err
+			}
+		}
+	}
+	if len(feeds) == 0 {
+		return nil
+	}
+	existingByURL := make(map[string]struct{})
+	if strategy == StrategyMerge {
+		existing, err := repo.ListBySubscription(subscriptionID)
+		if err != nil {
+			return err
+		}
+		for _, feed := range existing {
+			existingByURL[feed.RSSURLNormalized] = struct{}{}
+		}
+	}
+	for _, feed := range feeds {
+		normalizedURL := utils.NormalizeFeedURL(feed.RSSURL)
+		if normalizedURL == "" {
+			return fmt.Errorf("subscription %d has invalid feed URL %q", subscriptionID, feed.RSSURL)
+		}
+		if _, exists := existingByURL[normalizedURL]; exists {
+			continue
+		}
+		feed = sanitizeFeedForBackup(feed)
+		feed.SubscriptionID = subscriptionID
+		feed.RSSURL = strings.TrimSpace(feed.RSSURL)
+		feed.RSSURLNormalized = normalizedURL
+		if strings.TrimSpace(feed.Name) == "" {
+			feed.Name = "Default"
+		}
+		feed.BaselinePending = true
+		if err := repo.CreateInTx(tx, &feed); err != nil {
+			return err
+		}
+		existingByURL[normalizedURL] = struct{}{}
+	}
+	return nil
 }
 
 func mergeSubscription(dst *model.Subscription, src model.Subscription) bool {

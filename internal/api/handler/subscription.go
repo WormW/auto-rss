@@ -3,14 +3,13 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
-	"html"
 	"math"
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -2214,6 +2213,63 @@ func (h *SubscriptionHandler) GetStatistics(c *gin.Context) {
 
 // ==================== 导入/导出 API ====================
 
+const subscriptionExportVersion = "2.0"
+
+type subscriptionExportRecord struct {
+	repository.SubscriptionWithStats
+	Feeds []model.SubscriptionFeed `json:"feeds"`
+}
+
+type subscriptionImportRecord struct {
+	model.Subscription
+	Feeds []model.SubscriptionFeed `json:"feeds"`
+}
+
+type subscriptionExportEnvelope struct {
+	Version       string                     `json:"version"`
+	Subscriptions []subscriptionImportRecord `json:"subscriptions"`
+}
+
+type subscriptionExportAPIEnvelope struct {
+	Data subscriptionExportEnvelope `json:"data"`
+}
+
+type subscriptionOPML struct {
+	XMLName xml.Name             `xml:"opml"`
+	Version string               `xml:"version,attr"`
+	Head    subscriptionOPMLHead `xml:"head"`
+	Body    subscriptionOPMLBody `xml:"body"`
+}
+
+type subscriptionOPMLHead struct {
+	Title string `xml:"title"`
+}
+
+type subscriptionOPMLBody struct {
+	Outlines []subscriptionOPMLOutline `xml:"outline"`
+}
+
+type subscriptionOPMLOutline struct {
+	Type                string                    `xml:"type,attr,omitempty"`
+	Text                string                    `xml:"text,attr,omitempty"`
+	Title               string                    `xml:"title,attr,omitempty"`
+	XMLURL              string                    `xml:"xmlUrl,attr,omitempty"`
+	AutoRSSSubscription string                    `xml:"autoRssSubscription,attr,omitempty"`
+	AutoRSSSeason       string                    `xml:"autoRssSeason,attr,omitempty"`
+	AutoRSSFeed         string                    `xml:"autoRssFeed,attr,omitempty"`
+	AutoRSSFansub       string                    `xml:"autoRssFansub,attr,omitempty"`
+	AutoRSSOffset       string                    `xml:"autoRssOffset,attr,omitempty"`
+	AutoRSSEnabled      string                    `xml:"autoRssEnabled,attr,omitempty"`
+	Children            []subscriptionOPMLOutline `xml:"outline"`
+}
+
+type subscriptionImportGroup struct {
+	sub       model.Subscription
+	feeds     []subscriptionfeed.Input
+	parseErr  error
+	resultKey string
+}
+
 // ExportSubscriptions 导出订阅（支持 JSON 和 OPML 格式）
 func (h *SubscriptionHandler) ExportSubscriptions(c *gin.Context) {
 	format := c.DefaultQuery("format", "json")
@@ -2228,20 +2284,38 @@ func (h *SubscriptionHandler) ExportSubscriptions(c *gin.Context) {
 		return
 	}
 
+	records, err := h.buildSubscriptionExportRecords(subscriptions)
+	if err != nil {
+		logger.Error("Failed to get subscription feeds for export", "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Failed to export subscriptions",
+		})
+		return
+	}
+
 	switch format {
 	case "opml":
-		opml := h.generateOPML(subscriptions)
+		opmlData, marshalErr := generateSubscriptionOPML(records)
+		if marshalErr != nil {
+			logger.Error("Failed to encode subscription OPML", "error", marshalErr.Error())
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"code":    500,
+				"message": "Failed to export subscriptions",
+			})
+			return
+		}
 		c.Header("Content-Type", "application/xml")
 		c.Header("Content-Disposition", "attachment; filename=subscriptions.opml")
-		c.String(http.StatusOK, opml)
+		c.Data(http.StatusOK, "application/xml", opmlData)
 	case "json":
 		c.JSON(http.StatusOK, gin.H{
 			"code":    0,
 			"message": "Success",
 			"data": gin.H{
 				"export_time":   time.Now().Format(time.RFC3339),
-				"version":       "1.0",
-				"subscriptions": subscriptions,
+				"version":       subscriptionExportVersion,
+				"subscriptions": records,
 			},
 		})
 	default:
@@ -2252,25 +2326,97 @@ func (h *SubscriptionHandler) ExportSubscriptions(c *gin.Context) {
 	}
 }
 
-// generateOPML 生成 OPML 格式
-func (h *SubscriptionHandler) generateOPML(subscriptions []repository.SubscriptionWithStats) string {
-	var buf strings.Builder
-	buf.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
-	buf.WriteString(`<opml version="2.0">` + "\n")
-	buf.WriteString("  <head>\n")
-	buf.WriteString(fmt.Sprintf("    <title>Auto-RSS Subscriptions - %s</title>\n", time.Now().Format("2006-01-02")))
-	buf.WriteString("  </head>\n")
-	buf.WriteString("  <body>\n")
-
+func (h *SubscriptionHandler) buildSubscriptionExportRecords(
+	subscriptions []repository.SubscriptionWithStats,
+) ([]subscriptionExportRecord, error) {
+	ids := make([]uint, 0, len(subscriptions))
 	for _, sub := range subscriptions {
-		title := html.EscapeString(sub.Name)
-		rssURL := html.EscapeString(sub.RssURL)
-		buf.WriteString(fmt.Sprintf(`    <outline type="rss" text="%s" title="%s" xmlUrl="%s" />`+"\n", title, title, rssURL))
+		ids = append(ids, sub.ID)
 	}
 
-	buf.WriteString("  </body>\n")
-	buf.WriteString("</opml>")
-	return buf.String()
+	feedsBySubscription := make(map[uint][]model.SubscriptionFeed, len(subscriptions))
+	if h.feedRepo != nil {
+		feeds, err := h.feedRepo.ListBySubscriptionIDs(ids)
+		if err != nil {
+			return nil, err
+		}
+		for _, feed := range feeds {
+			feedsBySubscription[feed.SubscriptionID] = append(
+				feedsBySubscription[feed.SubscriptionID],
+				sanitizeSubscriptionFeedForExport(feed),
+			)
+		}
+	}
+
+	records := make([]subscriptionExportRecord, 0, len(subscriptions))
+	for _, sub := range subscriptions {
+		feeds := feedsBySubscription[sub.ID]
+		if len(feeds) == 0 && strings.TrimSpace(sub.RssURL) != "" {
+			feeds = []model.SubscriptionFeed{sanitizeSubscriptionFeedForExport(model.SubscriptionFeed{
+				Name:          sub.Fansub,
+				Fansub:        sub.Fansub,
+				RSSURL:        sub.RssURL,
+				EpisodeOffset: sub.EpisodeOffset,
+				Enabled:       sub.Enabled,
+			})}
+		}
+		records = append(records, subscriptionExportRecord{
+			SubscriptionWithStats: sub,
+			Feeds:                 feeds,
+		})
+	}
+	return records, nil
+}
+
+func sanitizeSubscriptionFeedForExport(feed model.SubscriptionFeed) model.SubscriptionFeed {
+	feed.ID = 0
+	feed.SubscriptionID = 0
+	feed.RSSURLNormalized = ""
+	feed.LastRSSPubTime = nil
+	feed.BaselinePending = false
+	feed.LastCheckTime = nil
+	feed.LastSuccessAt = nil
+	feed.LastError = ""
+	feed.CreatedAt = time.Time{}
+	feed.UpdatedAt = time.Time{}
+	return feed
+}
+
+func generateSubscriptionOPML(records []subscriptionExportRecord) ([]byte, error) {
+	doc := subscriptionOPML{
+		Version: "2.0",
+		Head: subscriptionOPMLHead{
+			Title: fmt.Sprintf("Auto-RSS Subscriptions - %s", time.Now().Format("2006-01-02")),
+		},
+	}
+	for _, record := range records {
+		for _, feed := range record.Feeds {
+			feedName := strings.TrimSpace(feed.Name)
+			if feedName == "" {
+				feedName = strings.TrimSpace(feed.Fansub)
+			}
+			if feedName == "" {
+				feedName = "Feed"
+			}
+			doc.Body.Outlines = append(doc.Body.Outlines, subscriptionOPMLOutline{
+				Type:                "rss",
+				Text:                fmt.Sprintf("%s - %s", record.Name, feedName),
+				Title:               record.Name,
+				XMLURL:              feed.RSSURL,
+				AutoRSSSubscription: record.Name,
+				AutoRSSSeason:       strconv.Itoa(max(record.Season, 1)),
+				AutoRSSFeed:         feedName,
+				AutoRSSFansub:       feed.Fansub,
+				AutoRSSOffset:       strconv.Itoa(feed.EpisodeOffset),
+				AutoRSSEnabled:      strconv.FormatBool(feed.Enabled),
+			})
+		}
+	}
+	encoded, err := xml.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(xml.Header), encoded...), nil
 }
 
 // ImportSubscriptionsRequest 导入订阅请求
@@ -2301,9 +2447,9 @@ func (h *SubscriptionHandler) ImportSubscriptions(c *gin.Context) {
 
 	switch req.Format {
 	case "json":
-		results, importErr = h.importFromJSON(req.Data, req.GroupID)
+		results, importErr = h.importFromJSON(c.Request.Context(), req.Data, req.GroupID)
 	case "opml":
-		results, importErr = h.importFromOPML(req.Data, req.GroupID)
+		results, importErr = h.importFromOPML(c.Request.Context(), req.Data, req.GroupID)
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    400,
@@ -2354,104 +2500,241 @@ func (h *SubscriptionHandler) ImportSubscriptions(c *gin.Context) {
 }
 
 // importFromJSON 从 JSON 导入
-func (h *SubscriptionHandler) importFromJSON(data string, groupID *uint) ([]subscription.ImportResult, error) {
-	var exportData struct {
-		Subscriptions []model.Subscription `json:"subscriptions"`
+func (h *SubscriptionHandler) importFromJSON(
+	ctx context.Context,
+	data string,
+	groupID *uint,
+) ([]subscription.ImportResult, error) {
+	records, version, err := decodeSubscriptionJSON(data)
+	if err != nil {
+		return nil, err
+	}
+	if version != "" && version != "1.0" && version != subscriptionExportVersion {
+		return nil, fmt.Errorf("unsupported subscription export version %q", version)
 	}
 
-	if err := json.Unmarshal([]byte(data), &exportData); err != nil {
-		// 尝试直接解析为订阅数组
-		var subs []model.Subscription
-		if err := json.Unmarshal([]byte(data), &subs); err != nil {
-			return nil, fmt.Errorf("invalid JSON format: %w", err)
-		}
-		exportData.Subscriptions = subs
+	groups := make([]subscriptionImportGroup, 0, len(records))
+	for _, record := range records {
+		sub := resetImportedSubscription(record.Subscription, groupID)
+		feeds := feedInputsFromImportRecord(record)
+		groups = append(groups, subscriptionImportGroup{
+			sub:       sub,
+			feeds:     feeds,
+			resultKey: sub.Name,
+		})
 	}
-
-	results := make([]subscription.ImportResult, 0, len(exportData.Subscriptions))
-
-	for _, sub := range exportData.Subscriptions {
-		result := subscription.ImportResult{Title: sub.Name, Success: false}
-
-		// 检查是否已存在
-		if sub.RssURL != "" {
-			existing, err := h.repo.GetByRSSURLAndSeason(sub.RssURL, sub.Season)
-			if err == nil && existing != nil {
-				result.Skipped = true
-				result.Success = true
-				result.Message = "Already exists"
-				results = append(results, result)
-				continue
-			}
-		}
-
-		// 重置 ID 和时间戳
-		sub.ID = 0
-		sub.CreatedAt = time.Time{}
-		sub.UpdatedAt = time.Time{}
-		sub.GroupID = groupID
-
-		// 丰富 Bangumi 数据
-		h.enrichWithBangumi(&sub)
-
-		if err := h.repo.Create(&sub); err != nil {
-			result.Message = "Create failed: " + err.Error()
-			results = append(results, result)
-			continue
-		}
-
-		result.Success = true
-		result.Message = "Imported successfully"
-		result.Subscription = &sub
-		results = append(results, result)
-	}
-
-	return results, nil
+	return h.createImportedSubscriptionGroups(ctx, groups), nil
 }
 
 // importFromOPML 从 OPML 导入
-func (h *SubscriptionHandler) importFromOPML(data string, groupID *uint) ([]subscription.ImportResult, error) {
-	// 简单的 OPML 解析（提取 outline 元素）
-	outlineRegex := regexp.MustCompile(`<outline[^>]*text="([^"]*)"[^>]*xmlUrl="([^"]*)"[^>]*/>`)
-	matches := outlineRegex.FindAllStringSubmatch(data, -1)
+func (h *SubscriptionHandler) importFromOPML(
+	ctx context.Context,
+	data string,
+	groupID *uint,
+) ([]subscription.ImportResult, error) {
+	var doc subscriptionOPML
+	if err := xml.Unmarshal([]byte(data), &doc); err != nil {
+		return nil, fmt.Errorf("invalid OPML format: %w", err)
+	}
+	outlines := flattenSubscriptionOPMLOutlines(doc.Body.Outlines)
+	groups := groupSubscriptionOPMLOutlines(outlines, groupID)
+	return h.createImportedSubscriptionGroups(ctx, groups), nil
+}
 
-	results := make([]subscription.ImportResult, 0, len(matches))
+func decodeSubscriptionJSON(data string) ([]subscriptionImportRecord, string, error) {
+	trimmed := strings.TrimSpace(data)
+	if strings.HasPrefix(trimmed, "[") {
+		var records []subscriptionImportRecord
+		if err := json.Unmarshal([]byte(trimmed), &records); err != nil {
+			return nil, "", fmt.Errorf("invalid JSON format: %w", err)
+		}
+		return records, "", nil
+	}
 
-	for _, match := range matches {
-		if len(match) < 3 {
+	var direct subscriptionExportEnvelope
+	if err := json.Unmarshal([]byte(trimmed), &direct); err != nil {
+		return nil, "", fmt.Errorf("invalid JSON format: %w", err)
+	}
+	if direct.Subscriptions != nil {
+		return direct.Subscriptions, direct.Version, nil
+	}
+
+	var apiResponse subscriptionExportAPIEnvelope
+	if err := json.Unmarshal([]byte(trimmed), &apiResponse); err != nil {
+		return nil, "", fmt.Errorf("invalid JSON format: %w", err)
+	}
+	if apiResponse.Data.Subscriptions == nil {
+		return nil, "", errors.New("invalid JSON format: subscriptions are required")
+	}
+	return apiResponse.Data.Subscriptions, apiResponse.Data.Version, nil
+}
+
+func feedInputsFromImportRecord(record subscriptionImportRecord) []subscriptionfeed.Input {
+	if len(record.Feeds) == 0 {
+		if strings.TrimSpace(record.RssURL) == "" {
+			return nil
+		}
+		return []subscriptionfeed.Input{{
+			Name:          record.Fansub,
+			Fansub:        record.Fansub,
+			RSSURL:        record.RssURL,
+			EpisodeOffset: record.EpisodeOffset,
+			Enabled:       true,
+		}}
+	}
+
+	feeds := make([]subscriptionfeed.Input, 0, len(record.Feeds))
+	for _, feed := range record.Feeds {
+		feeds = append(feeds, subscriptionfeed.Input{
+			Name:          feed.Name,
+			Fansub:        feed.Fansub,
+			RSSURL:        feed.RSSURL,
+			EpisodeOffset: feed.EpisodeOffset,
+			Enabled:       feed.Enabled,
+		})
+	}
+	return feeds
+}
+
+func resetImportedSubscription(sub model.Subscription, groupID *uint) model.Subscription {
+	sub.ID = 0
+	sub.LastCheckTime = nil
+	sub.LastDownloadAt = nil
+	sub.LastRSSPubTime = nil
+	sub.RSSBaselinePending = false
+	sub.CompletedAt = nil
+	sub.CurrentEpisode = 0
+	sub.LatestEpisode = 0
+	sub.GroupID = groupID
+	sub.Group = nil
+	sub.RSSSourceID = nil
+	sub.RSSSource = nil
+	sub.Downloads = nil
+	sub.Feeds = nil
+	sub.CreatedAt = time.Time{}
+	sub.UpdatedAt = time.Time{}
+	return sub
+}
+
+func flattenSubscriptionOPMLOutlines(outlines []subscriptionOPMLOutline) []subscriptionOPMLOutline {
+	var flattened []subscriptionOPMLOutline
+	for _, outline := range outlines {
+		if strings.TrimSpace(outline.XMLURL) != "" {
+			flattened = append(flattened, outline)
+		}
+		flattened = append(flattened, flattenSubscriptionOPMLOutlines(outline.Children)...)
+	}
+	return flattened
+}
+
+func groupSubscriptionOPMLOutlines(
+	outlines []subscriptionOPMLOutline,
+	groupID *uint,
+) []subscriptionImportGroup {
+	groups := make([]subscriptionImportGroup, 0, len(outlines))
+	groupIndexes := make(map[string]int)
+	for index, outline := range outlines {
+		name := strings.TrimSpace(outline.AutoRSSSubscription)
+		season := 1
+		key := fmt.Sprintf("legacy:%d", index)
+		if name == "" {
+			name = firstNonEmpty(strings.TrimSpace(outline.Title), strings.TrimSpace(outline.Text))
+		} else {
+			seasonText := strings.TrimSpace(outline.AutoRSSSeason)
+			if seasonText != "" {
+				parsed, err := strconv.Atoi(seasonText)
+				if err != nil || parsed <= 0 {
+					groups = append(groups, invalidOPMLImportGroup(name, fmt.Errorf("invalid season %q", seasonText)))
+					continue
+				}
+				season = parsed
+			}
+			key = fmt.Sprintf("extended:%s:%d", name, season)
+		}
+
+		groupIndex, exists := groupIndexes[key]
+		if !exists {
+			groupIndex = len(groups)
+			groupIndexes[key] = groupIndex
+			groups = append(groups, subscriptionImportGroup{
+				sub: model.Subscription{
+					Name:    name,
+					Season:  season,
+					Status:  "active",
+					Enabled: true,
+					GroupID: groupID,
+				},
+				resultKey: name,
+			})
+		}
+
+		offset := 0
+		if offsetText := strings.TrimSpace(outline.AutoRSSOffset); offsetText != "" {
+			parsed, err := strconv.Atoi(offsetText)
+			if err != nil || parsed < 0 {
+				groups[groupIndex].parseErr = fmt.Errorf("invalid episode offset %q", offsetText)
+				continue
+			}
+			offset = parsed
+		}
+		enabled := true
+		if enabledText := strings.TrimSpace(outline.AutoRSSEnabled); enabledText != "" {
+			parsed, err := strconv.ParseBool(enabledText)
+			if err != nil {
+				groups[groupIndex].parseErr = fmt.Errorf("invalid enabled value %q", enabledText)
+				continue
+			}
+			enabled = parsed
+		}
+		feedName := firstNonEmpty(strings.TrimSpace(outline.AutoRSSFeed), strings.TrimSpace(outline.Text), strings.TrimSpace(outline.Title))
+		groups[groupIndex].feeds = append(groups[groupIndex].feeds, subscriptionfeed.Input{
+			Name:          feedName,
+			Fansub:        strings.TrimSpace(outline.AutoRSSFansub),
+			RSSURL:        strings.TrimSpace(outline.XMLURL),
+			EpisodeOffset: offset,
+			Enabled:       enabled,
+		})
+	}
+	return groups
+}
+
+func invalidOPMLImportGroup(name string, err error) subscriptionImportGroup {
+	return subscriptionImportGroup{
+		sub:       model.Subscription{Name: name},
+		parseErr:  err,
+		resultKey: name,
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (h *SubscriptionHandler) createImportedSubscriptionGroups(
+	ctx context.Context,
+	groups []subscriptionImportGroup,
+) []subscription.ImportResult {
+	results := make([]subscription.ImportResult, 0, len(groups))
+	for _, group := range groups {
+		result := subscription.ImportResult{Title: group.resultKey}
+		if group.parseErr != nil {
+			result.Message = group.parseErr.Error()
+			results = append(results, result)
+			continue
+		}
+		if h.creator == nil {
+			result.Message = "Create failed: subscription creator is not configured"
+			results = append(results, result)
 			continue
 		}
 
-		name := match[1]
-		rssURL := match[2]
-
-		result := subscription.ImportResult{Title: name, Success: false}
-
-		// 检查是否已存在
-		if rssURL != "" {
-			existing, err := h.repo.GetByRSSURLAndSeason(rssURL, 1)
-			if err == nil && existing != nil {
-				result.Skipped = true
-				result.Success = true
-				result.Message = "Already exists"
-				results = append(results, result)
-				continue
-			}
-		}
-
-		sub := model.Subscription{
-			Name:    name,
-			RssURL:  rssURL,
-			Season:  1,
-			Status:  "active",
-			Enabled: true,
-			GroupID: groupID,
-		}
-
-		// 丰富 Bangumi 数据
-		h.enrichWithBangumi(&sub)
-
-		if err := h.repo.Create(&sub); err != nil {
+		h.enrichWithBangumi(&group.sub)
+		if err := h.creator.Create(ctx, &group.sub, group.feeds); err != nil {
 			result.Message = "Create failed: " + err.Error()
 			results = append(results, result)
 			continue
@@ -2459,9 +2742,8 @@ func (h *SubscriptionHandler) importFromOPML(data string, groupID *uint) ([]subs
 
 		result.Success = true
 		result.Message = "Imported successfully"
-		result.Subscription = &sub
+		result.Subscription = &group.sub
 		results = append(results, result)
 	}
-
-	return results, nil
+	return results
 }

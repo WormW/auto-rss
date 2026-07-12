@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,106 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+func TestSubscriptionOPMLRoundTripGroupsFeedsIntoOneSubscription(t *testing.T) {
+	fx := newSubscriptionFeedHandlerFixture(t)
+	fx.seedSubscriptionWithFeeds(2)
+
+	exported := fx.get("/subscriptions/export?format=opml")
+	require.Equal(t, http.StatusOK, exported.Code, exported.Body.String())
+	assert.Contains(t, exported.Body.String(), `autoRssOffset="100"`)
+	assert.Contains(t, exported.Body.String(), `autoRssSubscription=`)
+
+	target := newSubscriptionFeedHandlerFixture(t)
+	imported := target.postJSON("/subscriptions/import", marshalImportRequest("opml", exported.Body.String()))
+	require.Equal(t, http.StatusOK, imported.Code, imported.Body.String())
+	var subscriptions, feeds int64
+	require.NoError(t, target.db.Model(&model.Subscription{}).Count(&subscriptions).Error)
+	require.NoError(t, target.db.Model(&model.SubscriptionFeed{}).Count(&feeds).Error)
+	assert.EqualValues(t, 1, subscriptions)
+	assert.EqualValues(t, 2, feeds)
+	var restored []model.SubscriptionFeed
+	require.NoError(t, target.db.Order("episode_offset ASC").Find(&restored).Error)
+	require.Len(t, restored, 2)
+	assert.Equal(t, []int{0, 100}, []int{restored[0].EpisodeOffset, restored[1].EpisodeOffset})
+}
+
+func TestSubscriptionJSONRoundTripPreservesFeedsFromAPIResponse(t *testing.T) {
+	fx := newSubscriptionFeedHandlerFixture(t)
+	fx.seedSubscriptionWithFeeds(2)
+
+	exported := fx.get("/subscriptions/export?format=json")
+	require.Equal(t, http.StatusOK, exported.Code, exported.Body.String())
+	assert.Contains(t, exported.Body.String(), `"version":"2.0"`)
+
+	target := newSubscriptionFeedHandlerFixture(t)
+	imported := target.postJSON("/subscriptions/import", marshalImportRequest("json", exported.Body.String()))
+	require.Equal(t, http.StatusOK, imported.Code, imported.Body.String())
+	assert.Contains(t, imported.Body.String(), `"success":1`)
+
+	var feeds []model.SubscriptionFeed
+	require.NoError(t, target.db.Order("episode_offset ASC").Find(&feeds).Error)
+	require.Len(t, feeds, 2)
+	assert.Equal(t, []int{0, 100}, []int{feeds[0].EpisodeOffset, feeds[1].EpisodeOffset})
+	assert.Zero(t, feeds[0].LastError)
+	assert.Nil(t, feeds[0].LastCheckTime)
+	assert.True(t, feeds[0].BaselinePending)
+}
+
+func TestSubscriptionOPMLRoundTripUsesXMLAttributeEscaping(t *testing.T) {
+	fx := newSubscriptionFeedHandlerFixture(t)
+	sub := model.Subscription{Name: `Anime & "Friends"`, Season: 2, Status: "active", Enabled: true}
+	require.NoError(t, fx.db.Create(&sub).Error)
+	feed := model.SubscriptionFeed{
+		SubscriptionID:   sub.ID,
+		Name:             `A & B`,
+		Fansub:           `Group "One"`,
+		RSSURL:           "https://feed.test/rss?a=1&b=2",
+		RSSURLNormalized: "https://feed.test/rss?a=1&b=2",
+		Enabled:          true,
+	}
+	require.NoError(t, fx.db.Create(&feed).Error)
+
+	exported := fx.get("/subscriptions/export?format=opml")
+	require.Equal(t, http.StatusOK, exported.Code, exported.Body.String())
+	assert.Contains(t, exported.Body.String(), `Anime &amp; &#34;Friends&#34;`)
+	assert.Contains(t, exported.Body.String(), `https://feed.test/rss?a=1&amp;b=2`)
+
+	target := newSubscriptionFeedHandlerFixture(t)
+	imported := target.postJSON("/subscriptions/import", marshalImportRequest("opml", exported.Body.String()))
+	require.Equal(t, http.StatusOK, imported.Code, imported.Body.String())
+	var restored model.SubscriptionFeed
+	require.NoError(t, target.db.First(&restored).Error)
+	assert.Equal(t, `A & B`, restored.Name)
+	assert.Equal(t, `Group "One"`, restored.Fansub)
+	assert.Equal(t, "https://feed.test/rss?a=1&b=2", restored.RSSURL)
+}
+
+func TestSubscriptionOPMLImportRejectsInvalidOffsetForGroup(t *testing.T) {
+	fx := newSubscriptionFeedHandlerFixture(t)
+	opml := `<?xml version="1.0"?><opml version="2.0"><body>` +
+		`<outline type="rss" text="Anime - A" title="Anime" xmlUrl="https://a.test/rss" autoRssSubscription="Anime" autoRssSeason="1" autoRssFeed="A" autoRssOffset="invalid" />` +
+		`</body></opml>`
+
+	imported := fx.postJSON("/subscriptions/import", marshalImportRequest("opml", opml))
+	require.Equal(t, http.StatusOK, imported.Code, imported.Body.String())
+	assert.Contains(t, imported.Body.String(), `"failed":1`)
+	assert.Contains(t, imported.Body.String(), "invalid episode offset")
+
+	var subscriptions, feeds int64
+	require.NoError(t, fx.db.Model(&model.Subscription{}).Count(&subscriptions).Error)
+	require.NoError(t, fx.db.Model(&model.SubscriptionFeed{}).Count(&feeds).Error)
+	assert.Zero(t, subscriptions)
+	assert.Zero(t, feeds)
+}
+
+func marshalImportRequest(format, data string) string {
+	encoded, err := json.Marshal(map[string]string{"format": format, "data": data})
+	if err != nil {
+		panic(err)
+	}
+	return string(encoded)
+}
 
 func TestCreateSubscriptionWithFeedsPersistsSubscriptionAndFeeds(t *testing.T) {
 	fx := newSubscriptionFeedHandlerFixture(t)
@@ -96,13 +197,24 @@ func newSubscriptionFeedHandlerFixture(t *testing.T) *subscriptionFeedHandlerFix
 	subHandler := NewSubscriptionHandlerWithFeeds(
 		subRepo, nil, nil, nil, "", episodeRepo, feedRepo, feedService, creator,
 	)
+	subHandler.bangumiEnricher = nil
 	feedHandler := NewSubscriptionFeedHandler(feedRepo, feedService, episode.NewService(episodeRepo))
 	router := gin.New()
 	subscriptions := router.Group("/subscriptions")
 	subscriptions.POST("", subHandler.Create)
+	subscriptions.GET("/export", subHandler.ExportSubscriptions)
+	subscriptions.POST("/import", subHandler.ImportSubscriptions)
 	subscriptions.PUT("/:id", subHandler.Update)
 	registerSubscriptionFeedRoutes(subscriptions, feedHandler)
 	return &subscriptionFeedHandlerFixture{t: t, db: db, router: router}
+}
+
+func (fx *subscriptionFeedHandlerFixture) get(path string) *httptest.ResponseRecorder {
+	fx.t.Helper()
+	request := httptest.NewRequest(http.MethodGet, path, nil)
+	recorder := httptest.NewRecorder()
+	fx.router.ServeHTTP(recorder, request)
+	return recorder
 }
 
 func (fx *subscriptionFeedHandlerFixture) postJSON(path, body string) *httptest.ResponseRecorder {
@@ -132,6 +244,7 @@ func (fx *subscriptionFeedHandlerFixture) seedSubscriptionWithFeeds(count int) m
 			Name:             fmt.Sprintf("Feed %d", index+1),
 			RSSURL:           fmt.Sprintf("https://feed-%d.test/rss", index+1),
 			RSSURLNormalized: fmt.Sprintf("https://feed-%d.test/rss", index+1),
+			EpisodeOffset:    index * 100,
 			Enabled:          true,
 		}
 		require.NoError(fx.t, fx.db.Create(&feed).Error)

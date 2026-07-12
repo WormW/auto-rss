@@ -23,6 +23,9 @@ func newBackupTestDB(t *testing.T) *gorm.DB {
 		&model.Config{},
 		&model.RSSSource{},
 		&model.Subscription{},
+		&model.SubscriptionFeed{},
+		&model.SubscriptionFeedSeenItem{},
+		&model.Download{},
 		&model.SubscriptionGroup{},
 		&model.SubscriptionTag{},
 		&model.SubscriptionTagRelation{},
@@ -33,6 +36,97 @@ func newBackupTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("migrate sqlite: %v", err)
 	}
 	return db
+}
+
+func TestBackupRoundTripPreservesSubscriptionFeedsWithoutRuntimeState(t *testing.T) {
+	source := newBackupTestDB(t)
+	sub := model.Subscription{Name: "Anime", Season: 1, RssURL: "https://a.test/rss"}
+	if err := source.Create(&sub).Error; err != nil {
+		t.Fatalf("seed subscription: %v", err)
+	}
+	lastCheck := time.Now().UTC()
+	feeds := []model.SubscriptionFeed{
+		{SubscriptionID: sub.ID, Name: "A", RSSURL: "https://a.test/rss", RSSURLNormalized: "https://a.test/rss", EpisodeOffset: 0, Enabled: true, BaselinePending: false},
+		{SubscriptionID: sub.ID, Name: "B", RSSURL: "https://b.test/rss", RSSURLNormalized: "https://b.test/rss", EpisodeOffset: 100, Enabled: true, BaselinePending: true, LastError: "old timeout", LastCheckTime: &lastCheck, LastSuccessAt: &lastCheck, LastRSSPubTime: &lastCheck},
+	}
+	if err := source.Create(&feeds).Error; err != nil {
+		t.Fatalf("seed feeds: %v", err)
+	}
+
+	pkg, err := NewService(source).Export(false)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if pkg.SchemaVersion != "1.2" {
+		t.Fatalf("schema version = %q, want 1.2", pkg.SchemaVersion)
+	}
+	if len(pkg.Subscriptions) != 1 || len(pkg.Subscriptions[0].Feeds) != 2 {
+		t.Fatalf("unexpected exported feeds: %#v", pkg.Subscriptions)
+	}
+	exported := pkg.Subscriptions[0].Feeds[1]
+	if exported.BaselinePending || exported.LastError != "" || exported.LastRSSPubTime != nil || exported.LastCheckTime != nil || exported.LastSuccessAt != nil {
+		t.Fatalf("feed runtime state leaked: %#v", exported)
+	}
+
+	target := newBackupTestDB(t)
+	data, err := json.Marshal(pkg)
+	if err != nil {
+		t.Fatalf("marshal package: %v", err)
+	}
+	if _, err := NewService(target).Import(data, SourceAutoRSS, StrategyOverwrite); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	var restored []model.SubscriptionFeed
+	if err := target.Order("episode_offset ASC").Find(&restored).Error; err != nil {
+		t.Fatalf("load restored feeds: %v", err)
+	}
+	if len(restored) != 2 || restored[0].EpisodeOffset != 0 || restored[1].EpisodeOffset != 100 {
+		t.Fatalf("unexpected restored feeds: %#v", restored)
+	}
+	for _, feed := range restored {
+		if !feed.BaselinePending || feed.LastRSSPubTime != nil || feed.LastCheckTime != nil || feed.LastSuccessAt != nil || feed.LastError != "" {
+			t.Fatalf("restored feed runtime state not reset: %#v", feed)
+		}
+	}
+}
+
+func TestBackupOverwriteRemovesFeedsWhenPackageHasNone(t *testing.T) {
+	target := newBackupTestDB(t)
+	sub := model.Subscription{Name: "Calendar only", Season: 1, Status: "active", Enabled: true}
+	if err := target.Create(&sub).Error; err != nil {
+		t.Fatalf("seed subscription: %v", err)
+	}
+	feed := model.SubscriptionFeed{
+		SubscriptionID:   sub.ID,
+		Name:             "Stale",
+		RSSURL:           "https://stale.test/rss",
+		RSSURLNormalized: "https://stale.test/rss",
+		Enabled:          true,
+	}
+	if err := target.Create(&feed).Error; err != nil {
+		t.Fatalf("seed feed: %v", err)
+	}
+
+	pkg := Package{
+		SchemaVersion: SchemaVersion,
+		App:           "auto-rss",
+		Subscriptions: []SubscriptionRecord{{Subscription: sub}},
+	}
+	data, err := json.Marshal(pkg)
+	if err != nil {
+		t.Fatalf("marshal package: %v", err)
+	}
+	if _, err := NewService(target).Import(data, SourceAutoRSS, StrategyOverwrite); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	var feedCount int64
+	if err := target.Model(&model.SubscriptionFeed{}).Where("subscription_id = ?", sub.ID).Count(&feedCount).Error; err != nil {
+		t.Fatalf("count feeds: %v", err)
+	}
+	if feedCount != 0 {
+		t.Fatalf("feed count = %d, want 0", feedCount)
+	}
 }
 
 func TestBackupRoundTripPreservesEpisodeLedgerWithoutRuntimeLinks(t *testing.T) {
@@ -82,8 +176,8 @@ func TestBackupRoundTripPreservesEpisodeLedgerWithoutRuntimeLinks(t *testing.T) 
 	if err != nil {
 		t.Fatalf("export: %v", err)
 	}
-	if pkg.SchemaVersion != "1.1" {
-		t.Fatalf("schema version = %q, want 1.1", pkg.SchemaVersion)
+	if pkg.SchemaVersion != "1.2" {
+		t.Fatalf("schema version = %q, want 1.2", pkg.SchemaVersion)
 	}
 	if len(pkg.Episodes) != 1 || len(pkg.EpisodeCandidates) != 1 {
 		t.Fatalf("unexpected episode summary: episodes=%d candidates=%d", len(pkg.Episodes), len(pkg.EpisodeCandidates))

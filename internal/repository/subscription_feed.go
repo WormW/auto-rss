@@ -10,6 +10,7 @@ import (
 
 type SubscriptionFeedRepository interface {
 	ListBySubscription(subscriptionID uint) ([]model.SubscriptionFeed, error)
+	ListBySubscriptionIDs(subscriptionIDs []uint) ([]model.SubscriptionFeed, error)
 	ListEnabledBySubscriptionIDs(subscriptionIDs []uint) ([]model.SubscriptionFeed, error)
 	GetByID(id uint) (*model.SubscriptionFeed, error)
 	Create(feed *model.SubscriptionFeed) error
@@ -36,6 +37,16 @@ func NewSubscriptionFeedRepository(db *gorm.DB) SubscriptionFeedRepository {
 func (r *subscriptionFeedRepository) ListBySubscription(subscriptionID uint) ([]model.SubscriptionFeed, error) {
 	var feeds []model.SubscriptionFeed
 	err := r.db.Where("subscription_id = ?", subscriptionID).Order("created_at ASC, id ASC").Find(&feeds).Error
+	return feeds, err
+}
+
+func (r *subscriptionFeedRepository) ListBySubscriptionIDs(subscriptionIDs []uint) ([]model.SubscriptionFeed, error) {
+	if len(subscriptionIDs) == 0 {
+		return []model.SubscriptionFeed{}, nil
+	}
+	var feeds []model.SubscriptionFeed
+	err := r.db.Where("subscription_id IN ?", subscriptionIDs).
+		Order("subscription_id ASC, id ASC").Find(&feeds).Error
 	return feeds, err
 }
 
