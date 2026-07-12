@@ -171,6 +171,30 @@ export interface Subscription {
   smart_fetch_override?: 'follow' | 'always' | 'never' | ''
 }
 
+export interface BangumiSubject {
+  id: number
+  type: number
+  name: string
+  name_cn: string
+  summary: string
+  score: number
+  total_episodes: number
+  air_date: string
+  air_weekday: number
+  season: number
+  images?: {
+    large?: string
+    common?: string
+    medium?: string
+    small?: string
+    grid?: string
+  }
+  rating?: {
+    rank?: number
+    score?: number
+  }
+}
+
 export interface Download {
   id: number
   subscription_id: number
@@ -522,6 +546,11 @@ export const subscriptionApi = {
     api.post(`/subscriptions/${id}/enrich-bangumi`),
   batchImportFromRSS: (items: Array<{title: string, fansub?: string, rss_url?: string, season?: number, source_id?: number, source_name?: string}>) =>
     api.post('/subscriptions/batch-import-from-rss', { items }),
+}
+
+export const bangumiApi = {
+  getSubject: (id: number) =>
+    api.get(`/bangumi/subjects/${id}`),
 }
 
 export const downloadApi = {

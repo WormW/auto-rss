@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "test:episodes": "node --experimental-strip-types --test tests/episodes.test.ts tests/episode-ledger.test.ts",
     "test:subscription-feeds": "node --experimental-strip-types --test tests/subscription-feeds.test.ts",
-    "test:diagnostics": "node --experimental-strip-types --test tests/subscription-diagnostics.test.ts"
+    "test:diagnostics": "node --experimental-strip-types --test tests/subscription-diagnostics.test.ts",
+    "test:bangumi": "node --experimental-strip-types --test tests/bangumi.test.ts"
   },
   "dependencies": {
     "@vicons/antd": "^0.13.0",

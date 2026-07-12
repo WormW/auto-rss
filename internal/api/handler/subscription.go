@@ -730,8 +730,9 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		subscription.RSSBaselinePending = subscription.RssURL != ""
 	}
 
-	// 自动获取Bangumi数据
-	h.enrichWithBangumi(&subscription)
+	// 显式指定 Bangumi ID 时必须按 ID 拉取；否则 Enricher 会把已有 ID
+	// 视为已富化并跳过，导致创建记录只有 ID 而没有元数据和本地封面。
+	h.enrichWithBangumiInternal(&subscription, subscription.BangumiID > 0)
 
 	// 将标题中的"第X季/Season X"规范到 season 字段
 	// Keep Subscription.Name as the series title; Season carries the season number.

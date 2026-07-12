@@ -971,17 +971,26 @@
               </n-form-item>
 
               <n-form-item label="Bangumi ID">
-                <n-input-number
-                  v-model:value="formData.bangumi_id"
-                  :min="0"
-                  :show-button="false"
-                  style="width: 100%;"
-                  placeholder="可选：手动指定 Bangumi 条目 ID"
-                >
-                  <template #suffix>
+                <div class="bangumi-lookup-field">
+                  <n-input-group>
+                    <n-input
+                      v-model:value="bangumiIDText"
+                      inputmode="numeric"
+                      class="bangumi-id-input"
+                      placeholder="输入 Bangumi 条目 ID"
+                    />
                     <n-button
-                      text
-                      size="small"
+                      v-if="!editingId"
+                      type="primary"
+                      ghost
+                      :loading="bangumiLookupLoading"
+                      :disabled="!formData.bangumi_id || formData.bangumi_id <= 0"
+                      @click="handleLookupBangumi"
+                    >
+                      <template #icon><n-icon><SearchOutlined /></n-icon></template>
+                      获取信息
+                    </n-button>
+                    <n-button
                       tag="a"
                       :href="formData.bangumi_id ? `https://bgm.tv/subject/${formData.bangumi_id}` : 'https://bgm.tv'"
                       target="_blank"
@@ -989,8 +998,38 @@
                     >
                       查看
                     </n-button>
-                  </template>
-                </n-input-number>
+                  </n-input-group>
+
+                  <div
+                    v-if="bangumiLookupSubject && bangumiLookupSubject.id === formData.bangumi_id"
+                    class="bangumi-lookup-preview"
+                  >
+                    <img
+                      v-if="bangumiLookupCover"
+                      :src="bangumiLookupCover"
+                      :alt="bangumiLookupTitle"
+                      referrerpolicy="no-referrer"
+                    />
+                    <div class="bangumi-lookup-content">
+                      <div class="bangumi-lookup-title">
+                        <strong>{{ bangumiLookupTitle }}</strong>
+                        <n-tag size="small" type="success">已回填</n-tag>
+                      </div>
+                      <div class="bangumi-lookup-meta">
+                        <n-tag v-if="bangumiLookupSubject.score > 0" size="small">
+                          评分 {{ bangumiLookupSubject.score.toFixed(1) }}
+                        </n-tag>
+                        <n-tag v-if="bangumiLookupSubject.total_episodes > 0" size="small">
+                          {{ bangumiLookupSubject.total_episodes }} 集
+                        </n-tag>
+                        <n-tag v-if="bangumiLookupSubject.air_date" size="small">
+                          {{ bangumiLookupSubject.air_date }} 开播
+                        </n-tag>
+                      </div>
+                      <p v-if="bangumiLookupSubject.summary">{{ bangumiLookupSubject.summary }}</p>
+                    </div>
+                  </div>
+                </div>
               </n-form-item>
 
               <n-form-item label="总集数">
@@ -1062,6 +1101,7 @@ import {
   NForm,
   NFormItem,
   NInput,
+  NInputGroup,
   NInputNumber,
   NSpace,
   NTabs,
@@ -1086,6 +1126,8 @@ import {
 } from 'naive-ui'
 import {
   subscriptionApi,
+  bangumiApi,
+  type BangumiSubject,
   type DiagnosticStatus,
   type SmartFetchStatus,
   type Subscription,
@@ -1138,6 +1180,7 @@ import {
   getRelativeLatestEpisode,
   isEpisodeProgressComplete
 } from '@/utils/episodes'
+import { buildBangumiSubscriptionPatch } from '@/utils/bangumi'
 
 const route = useRoute()
 const message = useMessage()
@@ -1195,6 +1238,8 @@ const diagnosticsSession = ref(0)
 const diagnosticsActionLoading = ref('')
 const diagnosticsActionResult = ref('')
 const bangumiEnrichingId = ref<number | null>(null)
+const bangumiLookupLoading = ref(false)
+const bangumiLookupSubject = ref<BangumiSubject | null>(null)
 
 // 星期列表
 const weekList = [
@@ -1230,6 +1275,21 @@ const smartFetchOverrideOptions = [
   { label: '强制启用', value: 'always' },
   { label: '强制关闭', value: 'never' }
 ]
+
+const bangumiLookupTitle = computed(() => {
+  if (!bangumiLookupSubject.value) return ''
+  return bangumiLookupSubject.value.name_cn || bangumiLookupSubject.value.name
+})
+const bangumiIDText = computed({
+  get: () => formData.value.bangumi_id > 0 ? String(formData.value.bangumi_id) : '',
+  set: (value: string) => {
+    const normalized = value.trim()
+    formData.value.bangumi_id = /^\d+$/.test(normalized) ? Number(normalized) : 0
+  }
+})
+const bangumiLookupCover = computed(() => {
+  return bangumiLookupSubject.value?.images?.large || bangumiLookupSubject.value?.images?.common || ''
+})
 
 const getSmartFetchStatus = (id: number) => smartFetchStatusMap.value[id]
 
@@ -1833,6 +1893,7 @@ const handleEnrichBangumi = async (sub: Subscription) => {
 // 对话框操作
 const showAddDialog = () => {
   editingId.value = undefined
+  bangumiLookupSubject.value = null
   resetFeedDrafts()
   formData.value = {
     name: '',
@@ -1909,6 +1970,7 @@ const handleSearchSubscribe = (data: {
 
 const handleEdit = async (sub: Subscription) => {
   editingId.value = sub.id
+  bangumiLookupSubject.value = null
   showRssStep.value = false
   showModal.value = true
   step2Loading.value = true
@@ -2048,6 +2110,38 @@ const handleSubmit = async () => {
     }
   } finally {
     submitLoading.value = false
+  }
+}
+
+const handleLookupBangumi = async () => {
+  const bangumiID = Number(formData.value.bangumi_id)
+  if (!Number.isInteger(bangumiID) || bangumiID <= 0) {
+    message.error('请输入有效的 Bangumi ID')
+    return
+  }
+
+  bangumiLookupLoading.value = true
+  try {
+    const response: any = await bangumiApi.getSubject(bangumiID)
+    const subject = response?.data as BangumiSubject | undefined
+    if (!subject?.id) {
+      throw new Error('Bangumi 条目信息为空')
+    }
+
+    const patch = buildBangumiSubscriptionPatch(subject)
+    formData.value.name = patch.name
+    formData.value.bangumi_id = patch.bangumi_id
+    if (patch.season !== undefined) formData.value.season = patch.season
+    if (patch.total_episodes !== undefined) formData.value.total_episodes = patch.total_episodes
+    if (patch.air_day !== undefined) formData.value.air_day = patch.air_day
+    if (patch.update_day !== undefined) formData.value.update_day = patch.update_day
+    bangumiLookupSubject.value = subject
+    message.success(`已获取 ${patch.name} 的 Bangumi 信息`)
+  } catch (error: any) {
+    bangumiLookupSubject.value = null
+    message.error(error.response?.data?.error || error.response?.data?.message || error.message || '获取 Bangumi 信息失败')
+  } finally {
+    bangumiLookupLoading.value = false
   }
 }
 
@@ -3403,6 +3497,54 @@ onMounted(() => {
   padding-right: 12px;
 }
 
+.bangumi-lookup-field {
+  width: 100%;
+}
+
+.bangumi-id-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.bangumi-lookup-preview {
+  display: flex;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 10px 0;
+  border-top: 1px solid #e5e7eb;
+}
+
+.bangumi-lookup-preview img {
+  width: 56px;
+  height: 78px;
+  flex: 0 0 56px;
+  object-fit: cover;
+  border-radius: 6px;
+}
+
+.bangumi-lookup-content {
+  min-width: 0;
+}
+
+.bangumi-lookup-title,
+.bangumi-lookup-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.bangumi-lookup-content p {
+  display: -webkit-box;
+  margin: 7px 0 0;
+  overflow: hidden;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 @media (max-width: 768px) {
   .modal-card :deep(.n-card__content) {
     padding: 12px !important;
@@ -3414,6 +3556,15 @@ onMounted(() => {
 
   .modal-card :deep(.n-form-item-label) {
     padding-bottom: 4px;
+  }
+
+  .bangumi-lookup-field :deep(.n-input-group) {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
+  .bangumi-id-input {
+    flex-basis: 100%;
   }
 
   .card-content {

@@ -28,6 +28,19 @@ type fakeSubscriptionCollector struct {
 	calls          int
 }
 
+type recordingBangumiEnricher struct {
+	calls int
+	force bool
+}
+
+func (r *recordingBangumiEnricher) Enrich(subscription *model.Subscription, force bool) error {
+	r.calls++
+	r.force = force
+	subscription.Name = "BGM 富化名称"
+	subscription.TotalEpisodes = 12
+	return nil
+}
+
 func (f *fakeSubscriptionCollector) CollectSubscription(_ context.Context, subscriptionID uint) (scheduler.CollectSummary, error) {
 	f.calls++
 	f.subscriptionID = subscriptionID
@@ -43,6 +56,38 @@ func TestCollectEpisodesDelegatesToMultiFeedCollector(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint(7), collector.subscriptionID)
 	assert.Equal(t, 1, collector.calls)
+}
+
+func TestSubscriptionHandler_CreateForcesBangumiEnrichmentForExplicitID(t *testing.T) {
+	var created *model.Subscription
+	repo := &mockSubscriptionRepo{createFunc: func(subscription *model.Subscription) error {
+		created = subscription
+		subscription.ID = 1
+		return nil
+	}}
+	enricher := &recordingBangumiEnricher{}
+	handler := NewSubscriptionHandler(repo, nil, nil, nil, "")
+	handler.bangumiEnricher = enricher
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.POST("/subscriptions", handler.Create)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/subscriptions",
+		bytes.NewBufferString(`{"name":"草稿名称","source_type":"calendar","bangumi_id":12345}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.NotNil(t, created)
+	assert.Equal(t, 1, enricher.calls)
+	assert.True(t, enricher.force)
+	assert.Equal(t, 12345, created.BangumiID)
+	assert.Equal(t, "BGM 富化名称", created.Name)
+	assert.Equal(t, 12, created.TotalEpisodes)
 }
 
 // mockSubscriptionRepo is a mock implementation of SubscriptionRepository for testing
