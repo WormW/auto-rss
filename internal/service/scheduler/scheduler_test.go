@@ -537,6 +537,7 @@ func TestProcessDownloadItemCreatesPendingIntentWithoutQBAdd(t *testing.T) {
 	item := schedulerRSSItem(4, "pending-intent-hash", time.Now().UTC())
 	decision, err := fx.episodeService.EvaluateRSSItem(t.Context(), &sub, episode.RSSResource{
 		OriginalEpisode: item.Episode,
+		RelativeEpisode: item.Episode,
 		Resource:        model.EpisodeResource{Hash: item.TorrentHash, URL: item.TorrentURL, Title: item.Title},
 	}, false)
 	require.NoError(t, err)
@@ -596,6 +597,7 @@ func TestProcessDownloadItemPauseReturnsRetryableErrorAndReleasesClaim(t *testin
 	resource := model.EpisodeResource{Hash: item.TorrentHash, URL: item.TorrentURL, Title: item.Title}
 	decision, err := fx.episodeService.EvaluateRSSItem(t.Context(), &sub, episode.RSSResource{
 		OriginalEpisode: item.Episode,
+		RelativeEpisode: item.Episode,
 		Resource:        resource,
 	}, false)
 	require.NoError(t, err)
@@ -664,6 +666,7 @@ func TestProcessDownloadItemAttachFailureRollsBackDownloadAndReleasesClaim(t *te
 	resource := model.EpisodeResource{Hash: item.TorrentHash, URL: item.TorrentURL, Title: item.Title}
 	decision, err := fx.episodeService.EvaluateRSSItem(t.Context(), &sub, episode.RSSResource{
 		OriginalEpisode: item.Episode,
+		RelativeEpisode: item.Episode,
 		Resource:        resource,
 	}, false)
 	require.NoError(t, err)

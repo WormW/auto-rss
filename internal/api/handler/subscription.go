@@ -553,6 +553,7 @@ func (h *SubscriptionHandler) Preview(c *gin.Context) {
 			} else {
 				decision, decisionErr := h.episodeService.PreviewRSSItem(sub, episode.RSSResource{
 					OriginalEpisode: item.Episode,
+					RelativeEpisode: relativeEpisode,
 					Resource: model.EpisodeResource{
 						Hash:  item.TorrentHash,
 						URL:   item.TorrentURL,
@@ -1561,7 +1562,7 @@ func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Tas
 				continue
 			}
 
-			if _, err := txEpisodeService.ObserveRSSItem(subscription, item.Episode); err != nil {
+			if _, err := txEpisodeService.ObserveRSSItem(subscription, relativeEpisode); err != nil {
 				return fmt.Errorf("failed to observe episode %d: %w", item.Episode, err)
 			}
 			terminal := func() {
@@ -1607,6 +1608,7 @@ func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Tas
 			resource := model.EpisodeResource{Hash: item.TorrentHash, URL: item.TorrentURL, Title: item.Title}
 			decision, err := txEpisodeService.EvaluateRSSItem(ctx, subscription, episode.RSSResource{
 				OriginalEpisode: item.Episode,
+				RelativeEpisode: relativeEpisode,
 				Resource:        resource,
 				Fansub:          item.Fansub,
 				Language:        string(item.Language),

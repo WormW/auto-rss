@@ -333,7 +333,7 @@ func (s *scheduler) checkRSSFeeds() {
 				continue
 			}
 
-			if _, err := s.episodeService.ObserveRSSItem(&sub, item.Episode); err != nil {
+			if _, err := s.episodeService.ObserveRSSItem(&sub, relativeEpisode); err != nil {
 				retryableProcessingFailure = true
 				logger.Error("Failed to observe RSS episode",
 					"subscription_id", sub.ID,
@@ -370,6 +370,7 @@ func (s *scheduler) checkRSSFeeds() {
 			resource := rssItemResource(&item)
 			decision, err := s.episodeService.EvaluateRSSItem(context.Background(), &sub, episode.RSSResource{
 				OriginalEpisode: item.Episode,
+				RelativeEpisode: relativeEpisode,
 				Resource:        resource,
 				Fansub:          item.Fansub,
 				Language:        string(item.Language),
@@ -449,6 +450,7 @@ func (s *scheduler) reconcileRSSBaseline(sub *model.Subscription, items []rss.RS
 			}
 			_, err := txEpisodeService.EvaluateRSSItem(context.Background(), sub, episode.RSSResource{
 				OriginalEpisode: item.Episode,
+				RelativeEpisode: relativeEpisode,
 				Resource:        rssItemResource(&item),
 				Fansub:          item.Fansub,
 				Language:        string(item.Language),

@@ -21,12 +21,16 @@ const (
 )
 
 type RSSResource struct {
-	OriginalEpisode int
-	Resource        model.EpisodeResource
-	Fansub          string
-	Language        string
-	PubTime         time.Time
-	SourceRSSURL    string
+	OriginalEpisode     int
+	RelativeEpisode     int
+	SubscriptionFeedID  uint
+	SourceFeedName      string
+	SourceEpisodeOffset int
+	Resource            model.EpisodeResource
+	Fansub              string
+	Language            string
+	PubTime             time.Time
+	SourceRSSURL        string
 }
 
 type RSSDecision struct {
@@ -54,8 +58,7 @@ func ResourceKey(resource model.EpisodeResource) string {
 	return ""
 }
 
-func (s *Service) ObserveRSSItem(sub *model.Subscription, originalEpisode int) (*model.SubscriptionEpisode, error) {
-	relativeEpisode := sub.RelativeEpisode(originalEpisode)
+func (s *Service) ObserveRSSItem(sub *model.Subscription, relativeEpisode int) (*model.SubscriptionEpisode, error) {
 	if relativeEpisode <= 0 {
 		return nil, nil
 	}
@@ -74,7 +77,7 @@ func (s *Service) PreviewRSSItem(sub *model.Subscription, item RSSResource) (RSS
 }
 
 func (s *Service) evaluate(sub *model.Subscription, item RSSResource, baseline, mutate bool) (RSSDecision, error) {
-	relativeEpisode := sub.RelativeEpisode(item.OriginalEpisode)
+	relativeEpisode := item.RelativeEpisode
 	if relativeEpisode <= 0 {
 		return RSSDecision{Action: DecisionSkip, Reason: "non_positive_relative_episode"}, nil
 	}
@@ -131,14 +134,21 @@ func (s *Service) evaluate(sub *model.Subscription, item RSSResource, baseline, 
 			return RSSDecision{Action: DecisionCandidate, EpisodeID: ledger.ID, Reason: "different_resource"}, nil
 		}
 		candidate := &model.EpisodeResourceCandidate{
-			ResourceKey:  resourceKey,
-			TorrentHash:  item.Resource.Hash,
-			TorrentURL:   item.Resource.URL,
-			Title:        item.Resource.Title,
-			Fansub:       item.Fansub,
-			Language:     item.Language,
-			SourceRSSURL: item.SourceRSSURL,
-			Status:       model.CandidateStatusPending,
+			ResourceKey:         resourceKey,
+			TorrentHash:         item.Resource.Hash,
+			TorrentURL:          item.Resource.URL,
+			Title:               item.Resource.Title,
+			Fansub:              item.Fansub,
+			Language:            item.Language,
+			SourceFeedName:      item.SourceFeedName,
+			SourceFansub:        item.Fansub,
+			SourceEpisodeOffset: item.SourceEpisodeOffset,
+			SourceRSSURL:        item.SourceRSSURL,
+			Status:              model.CandidateStatusPending,
+		}
+		if item.SubscriptionFeedID != 0 {
+			feedID := item.SubscriptionFeedID
+			candidate.SubscriptionFeedID = &feedID
 		}
 		if !item.PubTime.IsZero() {
 			pubTime := item.PubTime

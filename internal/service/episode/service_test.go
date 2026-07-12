@@ -54,6 +54,7 @@ func TestEvaluateRSSItemCreatesCandidateForDifferentDownloadedResource(t *testin
 
 	decision, err := fx.service.EvaluateRSSItem(context.Background(), &sub, RSSResource{
 		OriginalEpisode: 4,
+		RelativeEpisode: 4,
 		Resource:        model.EpisodeResource{Hash: "NEW", URL: "https://x/new", Title: "new title"},
 		Fansub:          "Group",
 		Language:        "CHS",
@@ -78,6 +79,60 @@ func TestEvaluateRSSItemCreatesCandidateForDifferentDownloadedResource(t *testin
 	assert.Equal(t, model.CandidateStatusPending, candidates[0].Status)
 	require.NotNil(t, candidates[0].PubTime)
 	assert.Equal(t, pubTime, *candidates[0].PubTime)
+}
+
+func TestEvaluateRSSItemUsesProvidedRelativeEpisode(t *testing.T) {
+	fx := newServiceFixture(t)
+	sub := model.Subscription{ID: 1, Name: "provided-relative", EpisodeOffset: 0}
+	require.NoError(t, fx.db.Create(&sub).Error)
+
+	decision, err := fx.service.EvaluateRSSItem(context.Background(), &sub, RSSResource{
+		OriginalEpisode:    101,
+		RelativeEpisode:    1,
+		SubscriptionFeedID: 9,
+		Resource:           model.EpisodeResource{Hash: "hash-101", URL: "https://b.test/101"},
+	}, false)
+
+	require.NoError(t, err)
+	assert.Equal(t, DecisionDownload, decision.Action)
+	ledger, err := fx.repo.GetBySubscriptionAndEpisode(sub.ID, 1)
+	require.NoError(t, err)
+	assert.Equal(t, 1, ledger.Episode)
+}
+
+func TestCandidatePersistsFeedSnapshot(t *testing.T) {
+	fx := newServiceFixture(t)
+	sub := model.Subscription{ID: 1, Name: "candidate-snapshot"}
+	require.NoError(t, fx.db.Create(&sub).Error)
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID:    sub.ID,
+		Episode:           1,
+		Status:            model.EpisodeStatusDownloaded,
+		StatusSource:      model.EpisodeStatusSourceAutomatic,
+		ActiveTorrentHash: "old",
+	}
+	require.NoError(t, fx.db.Create(&ledger).Error)
+
+	decision, err := fx.service.EvaluateRSSItem(context.Background(), &sub, RSSResource{
+		OriginalEpisode:     101,
+		RelativeEpisode:     1,
+		SubscriptionFeedID:  9,
+		SourceFeedName:      "B",
+		Fansub:              "Group B",
+		SourceEpisodeOffset: 100,
+		SourceRSSURL:        "https://b.test/rss",
+		Resource:            model.EpisodeResource{Hash: "new", URL: "https://b.test/101"},
+	}, false)
+
+	require.NoError(t, err)
+	candidates, err := fx.repo.ListCandidates(decision.EpisodeID)
+	require.NoError(t, err)
+	require.Len(t, candidates, 1)
+	require.NotNil(t, candidates[0].SubscriptionFeedID)
+	assert.EqualValues(t, 9, *candidates[0].SubscriptionFeedID)
+	assert.Equal(t, "B", candidates[0].SourceFeedName)
+	assert.Equal(t, "Group B", candidates[0].SourceFansub)
+	assert.Equal(t, 100, candidates[0].SourceEpisodeOffset)
 }
 
 func TestRefreshSubscriptionProgressUsesContinuousOwnedEpisodesAndOffset(t *testing.T) {
@@ -120,14 +175,14 @@ func TestEvaluateRSSItemDecisionMatrix(t *testing.T) {
 		{
 			name:       "non-positive relative episode skips",
 			sub:        model.Subscription{ID: 1, EpisodeOffset: 10},
-			item:       RSSResource{OriginalEpisode: 10, Resource: model.EpisodeResource{Hash: "a"}},
+			item:       RSSResource{OriginalEpisode: 10, RelativeEpisode: 0, Resource: model.EpisodeResource{Hash: "a"}},
 			wantAction: DecisionSkip,
 			wantReason: "non_positive_relative_episode",
 		},
 		{
 			name:       "missing resource identity skips",
 			sub:        model.Subscription{ID: 1},
-			item:       RSSResource{OriginalEpisode: 1},
+			item:       RSSResource{OriginalEpisode: 1, RelativeEpisode: 1},
 			wantAction: DecisionSkip,
 			wantReason: "resource_identity_missing",
 		},
@@ -135,7 +190,7 @@ func TestEvaluateRSSItemDecisionMatrix(t *testing.T) {
 			name:       "ignored stays ignored",
 			sub:        model.Subscription{ID: 1},
 			ledger:     ledgerForMatrix(model.EpisodeStatusIgnored, "", ""),
-			item:       RSSResource{OriginalEpisode: 1, Resource: model.EpisodeResource{Hash: "a"}},
+			item:       RSSResource{OriginalEpisode: 1, RelativeEpisode: 1, Resource: model.EpisodeResource{Hash: "a"}},
 			wantAction: DecisionIgnored,
 			wantReason: "episode_ignored",
 		},
@@ -143,14 +198,14 @@ func TestEvaluateRSSItemDecisionMatrix(t *testing.T) {
 			name:       "missing claims download",
 			sub:        model.Subscription{ID: 1},
 			ledger:     ledgerForMatrix(model.EpisodeStatusMissing, "", ""),
-			item:       RSSResource{OriginalEpisode: 1, Resource: model.EpisodeResource{Hash: "a"}},
+			item:       RSSResource{OriginalEpisode: 1, RelativeEpisode: 1, Resource: model.EpisodeResource{Hash: "a"}},
 			wantAction: DecisionDownload,
 			wantReason: "episode_missing",
 		},
 		{
 			name:       "baseline only observes missing",
 			sub:        model.Subscription{ID: 1},
-			item:       RSSResource{OriginalEpisode: 1, Resource: model.EpisodeResource{Hash: "a"}},
+			item:       RSSResource{OriginalEpisode: 1, RelativeEpisode: 1, Resource: model.EpisodeResource{Hash: "a"}},
 			baseline:   true,
 			wantAction: DecisionBaseline,
 			wantReason: "baseline_observed",
@@ -159,7 +214,7 @@ func TestEvaluateRSSItemDecisionMatrix(t *testing.T) {
 			name:       "downloading same hash skips case insensitive",
 			sub:        model.Subscription{ID: 1},
 			ledger:     ledgerForMatrix(model.EpisodeStatusDownloading, "ABC", "https://old"),
-			item:       RSSResource{OriginalEpisode: 1, Resource: model.EpisodeResource{Hash: "abc", URL: "https://new"}},
+			item:       RSSResource{OriginalEpisode: 1, RelativeEpisode: 1, Resource: model.EpisodeResource{Hash: "abc", URL: "https://new"}},
 			wantAction: DecisionSkip,
 			wantReason: "resource_already_known",
 		},
@@ -167,7 +222,7 @@ func TestEvaluateRSSItemDecisionMatrix(t *testing.T) {
 			name:           "downloaded different hash creates candidate",
 			sub:            model.Subscription{ID: 1},
 			ledger:         ledgerForMatrix(model.EpisodeStatusDownloaded, "old", ""),
-			item:           RSSResource{OriginalEpisode: 1, Resource: model.EpisodeResource{Hash: "new"}},
+			item:           RSSResource{OriginalEpisode: 1, RelativeEpisode: 1, Resource: model.EpisodeResource{Hash: "new"}},
 			wantAction:     DecisionCandidate,
 			wantReason:     "different_resource",
 			wantCandidates: 1,
@@ -176,7 +231,7 @@ func TestEvaluateRSSItemDecisionMatrix(t *testing.T) {
 			name:       "marked downloaded same url skips",
 			sub:        model.Subscription{ID: 1},
 			ledger:     ledgerForMatrix(model.EpisodeStatusMarkedDownloaded, "", " https://x/e01 "),
-			item:       RSSResource{OriginalEpisode: 1, Resource: model.EpisodeResource{URL: "https://x/e01"}},
+			item:       RSSResource{OriginalEpisode: 1, RelativeEpisode: 1, Resource: model.EpisodeResource{URL: "https://x/e01"}},
 			wantAction: DecisionSkip,
 			wantReason: "resource_already_known",
 		},
@@ -184,7 +239,7 @@ func TestEvaluateRSSItemDecisionMatrix(t *testing.T) {
 			name:           "empty current identity creates candidate",
 			sub:            model.Subscription{ID: 1},
 			ledger:         ledgerForMatrix(model.EpisodeStatusDownloaded, "", ""),
-			item:           RSSResource{OriginalEpisode: 1, Resource: model.EpisodeResource{URL: "https://x/e01"}},
+			item:           RSSResource{OriginalEpisode: 1, RelativeEpisode: 1, Resource: model.EpisodeResource{URL: "https://x/e01"}},
 			wantAction:     DecisionCandidate,
 			wantReason:     "different_resource",
 			wantCandidates: 1,
@@ -297,6 +352,7 @@ func TestEvaluateRSSItemOwnedStateResourceMatchingMatrix(t *testing.T) {
 
 				decision, err := fx.service.EvaluateRSSItem(context.Background(), &sub, RSSResource{
 					OriginalEpisode: 1,
+					RelativeEpisode: 1,
 					Resource:        tt.candidate,
 				}, false)
 				require.NoError(t, err)
@@ -316,14 +372,14 @@ func TestObserveRSSItemAndEnsureRangeAreIdempotent(t *testing.T) {
 	sub := model.Subscription{ID: 1, Name: "show", EpisodeOffset: 170, TotalEpisodes: 4}
 	require.NoError(t, fx.db.Create(&sub).Error)
 
-	observed, err := fx.service.ObserveRSSItem(&sub, 172)
+	observed, err := fx.service.ObserveRSSItem(&sub, 2)
 	require.NoError(t, err)
 	require.NotNil(t, observed)
 	assert.Equal(t, 2, observed.Episode)
 	assert.Equal(t, model.EpisodeStatusMissing, observed.Status)
 	require.NoError(t, fx.repo.SetStatus(sub.ID, []int{2}, model.EpisodeStatusIgnored, model.EpisodeStatusSourceUser))
 
-	again, err := fx.service.ObserveRSSItem(&sub, 172)
+	again, err := fx.service.ObserveRSSItem(&sub, 2)
 	require.NoError(t, err)
 	assert.Equal(t, observed.ID, again.ID)
 	assert.Equal(t, model.EpisodeStatusIgnored, again.Status)
@@ -336,7 +392,7 @@ func TestObserveRSSItemAndEnsureRangeAreIdempotent(t *testing.T) {
 	require.Len(t, episodes, 4)
 	assert.Equal(t, model.EpisodeStatusIgnored, episodes[1].Status)
 
-	invalid, err := fx.service.ObserveRSSItem(&sub, 170)
+	invalid, err := fx.service.ObserveRSSItem(&sub, 0)
 	require.NoError(t, err)
 	assert.Nil(t, invalid)
 }
@@ -348,6 +404,7 @@ func TestPreviewRSSItemDoesNotMutateLedgerOrCandidates(t *testing.T) {
 
 	decision, err := fx.service.PreviewRSSItem(&sub, RSSResource{
 		OriginalEpisode: 1,
+		RelativeEpisode: 1,
 		Resource:        model.EpisodeResource{Hash: "abc"},
 	})
 	require.NoError(t, err)
