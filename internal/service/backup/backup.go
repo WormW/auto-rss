@@ -17,6 +17,21 @@ const (
 	SchemaVersion       = "1.1"
 	legacySchemaVersion = "1.0"
 	RedactedValue       = "__AUTO_RSS_REDACTED__"
+	MaxPackageBytes     = 8 << 20
+
+	MaxSubscriptionsPerPackage = 10_000
+	MaxEpisodesPerPackage      = 100_000
+	MaxCandidatesPerPackage    = 200_000
+	MaxPackageItems            = 300_000
+
+	MaxSubscriptionKeyBytes = 4 << 10
+	MaxTorrentHashBytes     = 256
+	MaxURLBytes             = 16 << 10
+	MaxTitleBytes           = 4 << 10
+	MaxFansubBytes          = 1 << 10
+	MaxLanguageBytes        = 256
+	MaxStatusBytes          = 256
+	MaxFailureReasonBytes   = 16 << 10
 
 	StrategySkip      = "skip"
 	StrategyOverwrite = "overwrite"
@@ -26,6 +41,22 @@ const (
 	SourceAutoRSS     = "auto-rss"
 	SourceAutoBangumi = "auto-bangumi"
 )
+
+var ErrPackageTooLarge = errors.New("backup package too large")
+
+type PackageLimitError struct {
+	Field  string
+	Actual int
+	Limit  int
+}
+
+func (e *PackageLimitError) Error() string {
+	return fmt.Sprintf("%s: %s is %d, limit is %d", ErrPackageTooLarge, e.Field, e.Actual, e.Limit)
+}
+
+func (e *PackageLimitError) Unwrap() error {
+	return ErrPackageTooLarge
+}
 
 type Service struct {
 	db *gorm.DB
@@ -307,6 +338,7 @@ func (s *Service) Export(includeSensitive bool) (*Package, error) {
 			StatusSource:      ledger.StatusSource,
 			DownloadedAt:      ledger.DownloadedAt,
 		}
+		normalizeEpisodeRecord(&record)
 		pkg.Episodes = append(pkg.Episodes, record)
 		episodeRecordByID[ledger.ID] = record
 	}
@@ -437,6 +469,9 @@ func (s *Service) Import(data json.RawMessage, sourceFormat, strategy string) (*
 }
 
 func ParsePackage(data json.RawMessage, sourceFormat string) (*Package, string, error) {
+	if len(data) > MaxPackageBytes {
+		return nil, "", newPackageLimitError("raw_bytes", len(data), MaxPackageBytes)
+	}
 	sourceFormat = strings.TrimSpace(strings.ToLower(sourceFormat))
 	if sourceFormat == "" {
 		sourceFormat = SourceAuto
@@ -447,6 +482,9 @@ func ParsePackage(data json.RawMessage, sourceFormat string) (*Package, string, 
 		if err == nil {
 			return pkg, SourceAutoRSS, nil
 		}
+		if errors.Is(err, ErrPackageTooLarge) {
+			return nil, "", err
+		}
 		if sourceFormat == SourceAutoRSS {
 			return nil, "", err
 		}
@@ -456,6 +494,9 @@ func ParsePackage(data json.RawMessage, sourceFormat string) (*Package, string, 
 		pkg, err := parseAutoBangumiPackage(data)
 		if err == nil {
 			return pkg, SourceAutoBangumi, nil
+		}
+		if errors.Is(err, ErrPackageTooLarge) {
+			return nil, "", err
 		}
 		if sourceFormat == SourceAutoBangumi {
 			return nil, "", err
@@ -589,6 +630,9 @@ func parseAutoBangumiPackage(data json.RawMessage) (*Package, error) {
 
 	if len(pkg.Subscriptions) == 0 {
 		return nil, errors.New("auto-bangumi data contains no importable RSS subscriptions")
+	}
+	if err := validatePackage(pkg); err != nil {
+		return nil, err
 	}
 	pkg.recount()
 	return pkg, nil
@@ -953,6 +997,9 @@ func applyPackage(tx *gorm.DB, pkg *Package, state *currentState, strategy strin
 		sub := state.subscriptions[subscriptionKey]
 		key := episodeRecordKey(subscriptionKey, record.Episode)
 		existing, exists := state.episodes[key]
+		if !exists || strategy == StrategyOverwrite {
+			normalizeEpisodeRecord(&record)
+		}
 		next := model.SubscriptionEpisode{
 			SubscriptionID:    sub.ID,
 			Episode:           record.Episode,
@@ -1397,7 +1444,120 @@ func packageHasOwnership(pkg *Package) bool {
 	return len(pkg.Episodes) > 0 || len(pkg.EpisodeCandidates) > 0
 }
 
+type packageItemCounts struct {
+	Configs              int
+	RSSSources           int
+	Groups               int
+	Tags                 int
+	Subscriptions        int
+	Episodes             int
+	Candidates           int
+	SubscriptionTags     int
+	NotificationSettings int
+}
+
+func packageCounts(pkg *Package) packageItemCounts {
+	return packageItemCounts{
+		Configs:              len(pkg.Configs),
+		RSSSources:           len(pkg.RSSSources),
+		Groups:               len(pkg.Groups),
+		Tags:                 len(pkg.Tags),
+		Subscriptions:        len(pkg.Subscriptions),
+		Episodes:             len(pkg.Episodes),
+		Candidates:           len(pkg.EpisodeCandidates),
+		SubscriptionTags:     len(pkg.SubscriptionTags),
+		NotificationSettings: len(pkg.NotificationSettings),
+	}
+}
+
+func (counts packageItemCounts) total() int {
+	return counts.Configs + counts.RSSSources + counts.Groups + counts.Tags + counts.Subscriptions +
+		counts.Episodes + counts.Candidates + counts.SubscriptionTags + counts.NotificationSettings
+}
+
+func validatePackageItemCounts(counts packageItemCounts) error {
+	for _, limit := range []struct {
+		field  string
+		actual int
+		max    int
+	}{
+		{field: "subscriptions", actual: counts.Subscriptions, max: MaxSubscriptionsPerPackage},
+		{field: "episodes", actual: counts.Episodes, max: MaxEpisodesPerPackage},
+		{field: "episode_candidates", actual: counts.Candidates, max: MaxCandidatesPerPackage},
+		{field: "total_items", actual: counts.total(), max: MaxPackageItems},
+	} {
+		if limit.actual > limit.max {
+			return newPackageLimitError(limit.field, limit.actual, limit.max)
+		}
+	}
+	return nil
+}
+
+func validateStableStringBytes(field, value string, limit int) error {
+	if len(value) > limit {
+		return newPackageLimitError(field, len(value), limit)
+	}
+	return nil
+}
+
+func validateOwnershipStringLimits(pkg *Package) error {
+	for i, record := range pkg.Episodes {
+		for _, field := range []struct {
+			name  string
+			value string
+			max   int
+		}{
+			{name: "subscription_key", value: record.SubscriptionKey, max: MaxSubscriptionKeyBytes},
+			{name: "active_torrent_hash", value: record.ActiveTorrentHash, max: MaxTorrentHashBytes},
+			{name: "active_torrent_url", value: record.ActiveTorrentURL, max: MaxURLBytes},
+			{name: "active_title", value: record.ActiveTitle, max: MaxTitleBytes},
+			{name: "status", value: record.Status, max: MaxStatusBytes},
+			{name: "status_source", value: record.StatusSource, max: MaxStatusBytes},
+		} {
+			if err := validateStableStringBytes(fmt.Sprintf("episodes[%d].%s", i, field.name), field.value, field.max); err != nil {
+				return err
+			}
+		}
+	}
+	for i, record := range pkg.EpisodeCandidates {
+		for _, field := range []struct {
+			name  string
+			value string
+			max   int
+		}{
+			{name: "subscription_key", value: record.SubscriptionKey, max: MaxSubscriptionKeyBytes},
+			{name: "torrent_hash", value: record.TorrentHash, max: MaxTorrentHashBytes},
+			{name: "torrent_url", value: record.TorrentURL, max: MaxURLBytes},
+			{name: "title", value: record.Title, max: MaxTitleBytes},
+			{name: "fansub", value: record.Fansub, max: MaxFansubBytes},
+			{name: "language", value: record.Language, max: MaxLanguageBytes},
+			{name: "source_rss_url", value: record.SourceRSSURL, max: MaxURLBytes},
+			{name: "status", value: record.Status, max: MaxStatusBytes},
+			{name: "failure_reason", value: record.FailureReason, max: MaxFailureReasonBytes},
+			{name: "replacement_stage", value: record.runtimeStage, max: MaxStatusBytes},
+		} {
+			if err := validateStableStringBytes(fmt.Sprintf("episode_candidates[%d].%s", i, field.name), field.value, field.max); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func newPackageLimitError(field string, actual, limit int) error {
+	return &PackageLimitError{Field: field, Actual: actual, Limit: limit}
+}
+
 func validatePackage(pkg *Package) error {
+	// Raw JSON is capped first. Count and field limits remain defense in depth for
+	// exports, direct validation, and future non-JSON inputs; they do not promise
+	// that a 200k-candidate JSON package fits within MaxPackageBytes.
+	if err := validatePackageItemCounts(packageCounts(pkg)); err != nil {
+		return err
+	}
+	if err := validateOwnershipStringLimits(pkg); err != nil {
+		return err
+	}
 	hasOwnership := packageHasOwnership(pkg)
 	subscriptionKeys := make(map[string]struct{}, len(pkg.Subscriptions))
 	for i, record := range pkg.Subscriptions {
@@ -1495,6 +1655,17 @@ func validCandidateStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+func normalizeEpisodeRecord(record *EpisodeRecord) {
+	if record.Status != model.EpisodeStatusDownloading {
+		return
+	}
+	record.Status = model.EpisodeStatusMissing
+	record.ActiveTorrentHash = ""
+	record.ActiveTorrentURL = ""
+	record.ActiveTitle = ""
+	record.DownloadedAt = nil
 }
 
 func normalizeCandidateRecord(record *CandidateRecord) {
