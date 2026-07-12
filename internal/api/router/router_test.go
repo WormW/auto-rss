@@ -947,6 +947,14 @@ func TestSetup_RoutesRSSHealthValidationThroughAPIGroup(t *testing.T) {
 	if err := db.Create(&deadSubscription).Error; err != nil {
 		t.Fatalf("failed to seed dead subscription: %v", err)
 	}
+	for _, subscriptionFeed := range []model.SubscriptionFeed{
+		{SubscriptionID: subscription.ID, Name: "Default", RSSURL: feed.URL, RSSURLNormalized: feed.URL, Enabled: true},
+		{SubscriptionID: deadSubscription.ID, Name: "Default", RSSURL: deadFeed.URL, RSSURLNormalized: deadFeed.URL, Enabled: true},
+	} {
+		if err := repository.NewSubscriptionFeedRepository(db).Create(&subscriptionFeed); err != nil {
+			t.Fatalf("failed to seed subscription feed: %v", err)
+		}
+	}
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/rss/health/"+strconv.FormatUint(uint64(subscription.ID), 10), nil)

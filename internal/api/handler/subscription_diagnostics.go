@@ -32,6 +32,7 @@ const (
 
 type SubscriptionDiagnosticsHandler struct {
 	subscriptionRepo repository.SubscriptionRepository
+	feedRepo         rss.SubscriptionFeedReader
 	downloadRepo     repository.DownloadRepository
 	configRepo       repository.ConfigRepository
 	qbClient         downloader.QBittorrentClient
@@ -118,6 +119,7 @@ type SubscriptionDiagnosticsResponse struct {
 	Name           string                          `json:"name"`
 	Enabled        bool                            `json:"enabled"`
 	CheckedAt      time.Time                       `json:"checked_at"`
+	Feeds          []rss.FeedHealthCheckResult     `json:"feeds"`
 	Summary        SubscriptionDiagnosticSummary   `json:"summary"`
 	Checks         []SubscriptionDiagnosticCheck   `json:"checks"`
 	Downloads      SubscriptionDownloadDiagnostics `json:"downloads"`
@@ -144,6 +146,7 @@ type SubscriptionRetryResult struct {
 
 func NewSubscriptionDiagnosticsHandler(
 	subscriptionRepo repository.SubscriptionRepository,
+	feedRepo rss.SubscriptionFeedReader,
 	downloadRepo repository.DownloadRepository,
 	configRepo repository.ConfigRepository,
 	qbClient downloader.QBittorrentClient,
@@ -156,11 +159,12 @@ func NewSubscriptionDiagnosticsHandler(
 	}
 	return &SubscriptionDiagnosticsHandler{
 		subscriptionRepo: subscriptionRepo,
+		feedRepo:         feedRepo,
 		downloadRepo:     downloadRepo,
 		configRepo:       configRepo,
 		qbClient:         qbClient,
 		downloadPath:     downloadPath,
-		rssHealthChecker: rss.NewHealthChecker(subscriptionRepo),
+		rssHealthChecker: rss.NewHealthChecker(subscriptionRepo, feedRepo),
 		requeueSvc:       requeue,
 	}
 }
@@ -182,6 +186,26 @@ func (h *SubscriptionDiagnosticsHandler) Get(c *gin.Context) {
 		})
 		return
 	}
+	feeds := make([]model.SubscriptionFeed, 0)
+	if h.feedRepo != nil {
+		feeds, err = h.feedRepo.ListBySubscription(subscription.ID)
+		if err != nil {
+			logger.Error("Failed to list feeds for subscription diagnostics",
+				"subscription_id", subscription.ID,
+				"error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"code":    500,
+				"message": "获取订阅源失败",
+			})
+			return
+		}
+	}
+	enabledFeeds := make([]model.SubscriptionFeed, 0, len(feeds))
+	for _, feed := range feeds {
+		if feed.Enabled {
+			enabledFeeds = append(enabledFeeds, feed)
+		}
+	}
 
 	basePath := h.resolveBaseDownloadPath()
 	expectedPath := utils.GenerateDownloadPath(basePath, subscription.Name)
@@ -192,11 +216,12 @@ func (h *SubscriptionDiagnosticsHandler) Get(c *gin.Context) {
 	downloadsSummary, downloadCheck := h.buildDownloadDiagnostics(downloads)
 	filesSummary, fileChecks := h.buildFileDiagnostics(subscription, downloads, expectedPath)
 	diskSummary, diskCheck := h.buildDiskDiagnostics(basePath)
+	healthResult := h.rssHealthChecker.CheckSubscriptionFeeds(ctx, subscription, enabledFeeds)
 
 	checks := []SubscriptionDiagnosticCheck{
 		h.buildEnabledCheck(subscription),
-		h.buildRSSReachabilityCheck(ctx, subscription),
-		h.buildRSSFreshnessCheck(subscription),
+		h.buildRSSReachabilityCheck(healthResult),
+		h.buildRSSFreshnessCheck(enabledFeeds),
 		h.buildMissingEpisodesCheck(filesSummary.MissingEpisodes),
 		downloadCheck,
 		h.buildQBittorrentCheck(downloads, &downloadsSummary),
@@ -214,12 +239,13 @@ func (h *SubscriptionDiagnosticsHandler) Get(c *gin.Context) {
 			Name:           subscription.Name,
 			Enabled:        subscription.Enabled,
 			CheckedAt:      time.Now(),
+			Feeds:          healthResult.Feeds,
 			Summary:        summary,
 			Checks:         checks,
 			Downloads:      downloadsSummary,
 			Files:          filesSummary,
 			Disk:           diskSummary,
-			Actions:        h.buildActions(subscription, downloadsSummary),
+			Actions:        h.buildActions(subscription, downloadsSummary, len(enabledFeeds) > 0),
 		},
 	})
 }
@@ -328,48 +354,52 @@ func (h *SubscriptionDiagnosticsHandler) buildEnabledCheck(subscription *model.S
 	}
 }
 
-func (h *SubscriptionDiagnosticsHandler) buildRSSReachabilityCheck(ctx context.Context, subscription *model.Subscription) SubscriptionDiagnosticCheck {
-	if strings.TrimSpace(subscription.RssURL) == "" {
-		detail := "这个订阅没有 RSS 地址，无法从 RSS 执行增量检查。"
-		if strings.TrimSpace(subscription.CollectionTorrent) != "" {
-			detail = "这个订阅没有 RSS 地址，目前依赖合集种子或手动文件维护。"
-		}
+func (h *SubscriptionDiagnosticsHandler) buildRSSReachabilityCheck(result *rss.HealthCheckResult) SubscriptionDiagnosticCheck {
+	if len(result.Feeds) == 0 {
 		return SubscriptionDiagnosticCheck{
 			Key:     "rss_reachability",
 			Label:   "RSS 可达性",
 			Status:  SubscriptionDiagnosticUnknown,
-			Summary: "未配置 RSS",
-			Detail:  detail,
+			Summary: "未配置启用的订阅源",
+			Detail:  "这个订阅没有启用的 RSS feed，无法执行增量检查。",
 		}
 	}
 
-	result := h.rssHealthChecker.CheckSubscription(ctx, subscription)
 	check := SubscriptionDiagnosticCheck{
 		Key:   "rss_reachability",
 		Label: "RSS 可达性",
 	}
-
-	switch result.Status {
-	case rss.HealthStatusHealthy:
-		check.Status = SubscriptionDiagnosticHealthy
-		check.Summary = fmt.Sprintf("RSS 可访问，响应 %d ms", result.ResponseTime)
-		if result.LastPostDate != nil {
-			check.Detail = fmt.Sprintf("最新条目发布时间：%s", result.LastPostDate.Format("2006-01-02 15:04"))
-		} else {
-			check.Detail = "RSS 可访问，但条目没有可用发布时间。"
+	healthyCount := 0
+	failedDetails := make([]string, 0)
+	for _, feed := range result.Feeds {
+		if feed.Status == rss.HealthStatusHealthy {
+			healthyCount++
+			continue
 		}
-	case rss.HealthStatusUnhealthy:
+		detail := feed.ErrorMessage
+		if strings.TrimSpace(detail) == "" {
+			detail = string(feed.Status)
+		}
+		failedDetails = append(failedDetails, fmt.Sprintf("%s: %s", feed.Name, detail))
+	}
+
+	switch {
+	case healthyCount == len(result.Feeds):
+		check.Status = SubscriptionDiagnosticHealthy
+		check.Summary = fmt.Sprintf("%d 个订阅源均可访问", healthyCount)
+		check.Detail = "所有启用的 RSS feed 均可访问并成功解析。"
+	case healthyCount > 0:
 		check.Status = SubscriptionDiagnosticWarning
-		check.Summary = "RSS 可访问但解析异常"
-		check.Detail = result.ErrorMessage
-	case rss.HealthStatusDead:
-		check.Status = SubscriptionDiagnosticError
-		check.Summary = "RSS 无法访问"
-		check.Detail = result.ErrorMessage
-	default:
+		check.Summary = fmt.Sprintf("%d/%d 个订阅源可用", healthyCount, len(result.Feeds))
+		check.Detail = strings.Join(failedDetails, "；")
+	case result.Status == rss.HealthStatusUnknown:
 		check.Status = SubscriptionDiagnosticUnknown
-		check.Summary = "RSS 状态未知"
-		check.Detail = result.ErrorMessage
+		check.Summary = "订阅源状态未知"
+		check.Detail = strings.Join(failedDetails, "；")
+	default:
+		check.Status = SubscriptionDiagnosticError
+		check.Summary = "全部订阅源检查失败"
+		check.Detail = strings.Join(failedDetails, "；")
 	}
 
 	if strings.TrimSpace(check.Detail) == "" {
@@ -378,8 +408,28 @@ func (h *SubscriptionDiagnosticsHandler) buildRSSReachabilityCheck(ctx context.C
 	return check
 }
 
-func (h *SubscriptionDiagnosticsHandler) buildRSSFreshnessCheck(subscription *model.Subscription) SubscriptionDiagnosticCheck {
-	if subscription.LastCheckTime == nil {
+func (h *SubscriptionDiagnosticsHandler) buildRSSFreshnessCheck(feeds []model.SubscriptionFeed) SubscriptionDiagnosticCheck {
+	if len(feeds) == 0 {
+		return SubscriptionDiagnosticCheck{
+			Key:     "rss_freshness",
+			Label:   "最近检查",
+			Status:  SubscriptionDiagnosticUnknown,
+			Summary: "没有启用的订阅源",
+			Detail:  "启用 feed 后会记录成功检查时间和发布时间水位线。",
+		}
+	}
+	var latestSuccess, latestPub *time.Time
+	for i := range feeds {
+		if feeds[i].LastSuccessAt != nil && (latestSuccess == nil || feeds[i].LastSuccessAt.After(*latestSuccess)) {
+			value := *feeds[i].LastSuccessAt
+			latestSuccess = &value
+		}
+		if feeds[i].LastRSSPubTime != nil && (latestPub == nil || feeds[i].LastRSSPubTime.After(*latestPub)) {
+			value := *feeds[i].LastRSSPubTime
+			latestPub = &value
+		}
+	}
+	if latestSuccess == nil {
 		return SubscriptionDiagnosticCheck{
 			Key:     "rss_freshness",
 			Label:   "最近检查",
@@ -389,7 +439,7 @@ func (h *SubscriptionDiagnosticsHandler) buildRSSFreshnessCheck(subscription *mo
 		}
 	}
 
-	age := time.Since(*subscription.LastCheckTime)
+	age := time.Since(*latestSuccess)
 	check := SubscriptionDiagnosticCheck{
 		Key:   "rss_freshness",
 		Label: "最近检查",
@@ -405,8 +455,8 @@ func (h *SubscriptionDiagnosticsHandler) buildRSSFreshnessCheck(subscription *mo
 		check.Summary = fmt.Sprintf("%s 前检查", formatDiagnosticDuration(age))
 	}
 
-	if subscription.LastRSSPubTime != nil {
-		check.Detail = fmt.Sprintf("RSS 水位线：%s", subscription.LastRSSPubTime.Format("2006-01-02 15:04"))
+	if latestPub != nil {
+		check.Detail = fmt.Sprintf("最新 feed 水位线：%s", latestPub.Format("2006-01-02 15:04"))
 	} else {
 		check.Detail = "尚未记录 RSS 条目的发布时间水位线。"
 	}
@@ -680,7 +730,7 @@ func (h *SubscriptionDiagnosticsHandler) buildDiskDiagnostics(path string) (Subs
 	return info, check
 }
 
-func (h *SubscriptionDiagnosticsHandler) buildActions(subscription *model.Subscription, downloads SubscriptionDownloadDiagnostics) []SubscriptionDiagnosticAction {
+func (h *SubscriptionDiagnosticsHandler) buildActions(subscription *model.Subscription, downloads SubscriptionDownloadDiagnostics, hasEnabledFeeds bool) []SubscriptionDiagnosticAction {
 	base := fmt.Sprintf("/api/v1/subscriptions/%d", subscription.ID)
 	return []SubscriptionDiagnosticAction{
 		{
@@ -688,8 +738,8 @@ func (h *SubscriptionDiagnosticsHandler) buildActions(subscription *model.Subscr
 			Label:    "刷新 RSS",
 			Method:   http.MethodPost,
 			Endpoint: base + "/collect-episodes",
-			Enabled:  strings.TrimSpace(subscription.RssURL) != "",
-			Reason:   disabledReason(strings.TrimSpace(subscription.RssURL) != "", "未配置 RSS 地址"),
+			Enabled:  hasEnabledFeeds,
+			Reason:   disabledReason(hasEnabledFeeds, "未配置启用的订阅源"),
 		},
 		{
 			Key:      "retry_failed",

@@ -177,7 +177,7 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		rssScheduler,
 	)
 	feedHandler := handler.NewSubscriptionFeedHandler(feedRepo, feedService, episodeService)
-	subscriptionDiagnosticsHandler := handler.NewSubscriptionDiagnosticsHandler(subscriptionRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath, episodeService)
+	subscriptionDiagnosticsHandler := handler.NewSubscriptionDiagnosticsHandler(subscriptionRepo, feedRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath, episodeService)
 	downloadHandler := handler.NewDownloadHandler(downloadRepo, qbClient, configRepo, episodeService)
 	downloadHistoryHandler := handler.NewDownloadHistoryHandler(downloadRepo)
 	rssHandler := handler.NewRSSHandler(rssScheduler)
@@ -307,7 +307,7 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			rssGroup.POST("/refresh", rssHandler.Refresh)
 
 			// RSS 健康检查
-			rssHealthChecker := rss.NewHealthChecker(subscriptionRepo)
+			rssHealthChecker := rss.NewHealthChecker(subscriptionRepo, feedRepo)
 			rssHealthHandler := handler.NewRSSHealthHandler(rssHealthChecker, subscriptionRepo)
 
 			rssGroup.GET("/health", rssHealthHandler.CheckAll)
