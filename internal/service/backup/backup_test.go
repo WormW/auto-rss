@@ -2,7 +2,9 @@ package backup
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
 	"gorm.io/driver/sqlite"
@@ -23,10 +25,496 @@ func newBackupTestDB(t *testing.T) *gorm.DB {
 		&model.SubscriptionTag{},
 		&model.SubscriptionTagRelation{},
 		&model.NotificationSetting{},
+		&model.SubscriptionEpisode{},
+		&model.EpisodeResourceCandidate{},
 	); err != nil {
 		t.Fatalf("migrate sqlite: %v", err)
 	}
 	return db
+}
+
+func TestBackupRoundTripPreservesEpisodeLedgerWithoutRuntimeLinks(t *testing.T) {
+	source := newBackupTestDB(t)
+	sub := seedBackupSubscription(t, source, "https://backup.test/rss", 1)
+	downloadID := uint(99)
+	downloadedAt := time.Date(2026, time.July, 12, 8, 30, 0, 0, time.UTC)
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID:    sub.ID,
+		Episode:           3,
+		Status:            model.EpisodeStatusMarkedDownloaded,
+		ActiveDownloadID:  &downloadID,
+		ActiveTorrentHash: "hash-3",
+		ActiveTorrentURL:  "https://backup.test/e03",
+		ActiveTitle:       "E03",
+		StatusSource:      model.EpisodeStatusSourceUser,
+		DownloadedAt:      &downloadedAt,
+	}
+	if err := source.Create(&ledger).Error; err != nil {
+		t.Fatalf("seed episode ledger: %v", err)
+	}
+	replacementDownloadID := uint(100)
+	oldDownloadID := uint(98)
+	candidate := model.EpisodeResourceCandidate{
+		SubscriptionEpisodeID: ledger.ID,
+		ResourceKey:           "hash:candidate-3",
+		TorrentHash:           "candidate-3",
+		TorrentURL:            "https://backup.test/candidate/e03",
+		Title:                 "E03 candidate",
+		Fansub:                "TestSub",
+		Language:              "zh",
+		Status:                model.CandidateStatusPending,
+		FailureReason:         "retry later",
+		ReplacementStage:      "downloading",
+		ReplacementDownloadID: &replacementDownloadID,
+		OldDownloadID:         &oldDownloadID,
+		StagedPath:            "/runtime/staged",
+		OldResourcePath:       "/runtime/old",
+		RollbackPath:          "/runtime/rollback",
+		FinalPath:             "/runtime/final",
+	}
+	if err := source.Create(&candidate).Error; err != nil {
+		t.Fatalf("seed episode candidate: %v", err)
+	}
+
+	pkg, err := NewService(source).Export(false)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if pkg.SchemaVersion != "1.1" {
+		t.Fatalf("schema version = %q, want 1.1", pkg.SchemaVersion)
+	}
+	if len(pkg.Episodes) != 1 || len(pkg.EpisodeCandidates) != 1 {
+		t.Fatalf("unexpected episode summary: episodes=%d candidates=%d", len(pkg.Episodes), len(pkg.EpisodeCandidates))
+	}
+	if pkg.Summary.Episodes != 1 || pkg.Summary.EpisodeCandidates != 1 {
+		t.Fatalf("unexpected package summary: %#v", pkg.Summary)
+	}
+
+	data, err := json.Marshal(pkg)
+	if err != nil {
+		t.Fatalf("marshal backup: %v", err)
+	}
+	serialized := string(data)
+	for _, runtimeValue := range []string{
+		"/runtime/staged", "/runtime/old", "/runtime/rollback", "/runtime/final",
+		`"active_download_id"`, `"replacement_download_id"`, `"old_download_id"`,
+		`"replacement_stage"`, `"subscription_episode_id"`, `"resource_key"`,
+	} {
+		if strings.Contains(serialized, runtimeValue) {
+			t.Fatalf("backup leaked runtime value %q: %s", runtimeValue, serialized)
+		}
+	}
+
+	target := newBackupTestDB(t)
+	if _, err := NewService(target).Import(data, SourceAutoRSS, StrategyOverwrite); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	var restored model.SubscriptionEpisode
+	if err := target.First(&restored).Error; err != nil {
+		t.Fatalf("load restored episode: %v", err)
+	}
+	if restored.Episode != 3 || restored.Status != model.EpisodeStatusMarkedDownloaded {
+		t.Fatalf("unexpected restored episode: %#v", restored)
+	}
+	if restored.ActiveDownloadID != nil {
+		t.Fatalf("active download runtime link restored: %#v", restored.ActiveDownloadID)
+	}
+	if restored.ActiveTorrentHash != "hash-3" || restored.ActiveTorrentURL != "https://backup.test/e03" || restored.ActiveTitle != "E03" {
+		t.Fatalf("stable episode resource identity not preserved: %#v", restored)
+	}
+	if restored.DownloadedAt == nil || !restored.DownloadedAt.Equal(downloadedAt) {
+		t.Fatalf("downloaded_at not preserved: %#v", restored.DownloadedAt)
+	}
+
+	var restoredCandidate model.EpisodeResourceCandidate
+	if err := target.First(&restoredCandidate).Error; err != nil {
+		t.Fatalf("load restored candidate: %v", err)
+	}
+	if restoredCandidate.ResourceKey != "hash:candidate-3" || restoredCandidate.TorrentHash != "candidate-3" {
+		t.Fatalf("candidate stable identity not preserved: %#v", restoredCandidate)
+	}
+	assertCandidateRuntimeCleared(t, restoredCandidate)
+}
+
+func TestBackupImportNormalizesInterruptedReplacementState(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status string
+		stage  string
+	}{
+		{name: "replacing without stage", status: model.CandidateStatusReplacing},
+		{name: "accepted cleanup failed", status: model.CandidateStatusAcceptedCleanupFailed},
+		{name: "downloading stage", status: model.CandidateStatusPending, stage: "downloading"},
+		{name: "detaching stage", status: model.CandidateStatusPending, stage: "detaching"},
+		{name: "terminal cleanup stage", status: model.CandidateStatusAccepted, stage: "terminal_cleanup"},
+		{name: "cleanup queued stage", status: model.CandidateStatusAccepted, stage: "cleanup_queued"},
+		{name: "cleanup active stage", status: model.CandidateStatusAccepted, stage: "cleanup_active"},
+		{name: "unknown non-empty stage", status: model.CandidateStatusAccepted, stage: "future_runtime_stage"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pkg := backupPackageWithCandidate(tc.status)
+			data, err := json.Marshal(pkg)
+			if err != nil {
+				t.Fatalf("marshal backup: %v", err)
+			}
+
+			var object map[string]any
+			if err := json.Unmarshal(data, &object); err != nil {
+				t.Fatalf("decode test package: %v", err)
+			}
+			candidates := object["episode_candidates"].([]any)
+			candidate := candidates[0].(map[string]any)
+			candidate["replacement_stage"] = tc.stage
+			candidate["replacement_download_id"] = float64(23)
+			candidate["old_download_id"] = float64(22)
+			candidate["staged_path"] = "/old/staged"
+			candidate["old_resource_path"] = "/old/resource"
+			candidate["rollback_path"] = "/old/rollback"
+			candidate["final_path"] = "/old/final"
+			data, err = json.Marshal(object)
+			if err != nil {
+				t.Fatalf("marshal malicious backup: %v", err)
+			}
+
+			db := newBackupTestDB(t)
+			if _, err := NewService(db).Import(data, SourceAutoRSS, StrategyOverwrite); err != nil {
+				t.Fatalf("import: %v", err)
+			}
+
+			var restored model.EpisodeResourceCandidate
+			if err := db.First(&restored).Error; err != nil {
+				t.Fatalf("load restored candidate: %v", err)
+			}
+			if restored.Status != model.CandidateStatusFailed {
+				t.Fatalf("candidate status = %q, want failed", restored.Status)
+			}
+			if !strings.Contains(restored.FailureReason, "restored_without_runtime_task") {
+				t.Fatalf("failure reason missing restore marker: %q", restored.FailureReason)
+			}
+			assertCandidateRuntimeCleared(t, restored)
+		})
+	}
+}
+
+func TestParsePackageAcceptsVersion10AndRejectsFutureVersions(t *testing.T) {
+	legacy := Package{
+		App:           "auto-rss",
+		SchemaVersion: "1.0",
+		Subscriptions: []SubscriptionRecord{{Subscription: model.Subscription{
+			Name: "Legacy Show", RssURL: "https://backup.test/legacy", Season: 1,
+		}}},
+	}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal legacy package: %v", err)
+	}
+	pkg, format, err := ParsePackage(data, SourceAutoRSS)
+	if err != nil {
+		t.Fatalf("parse 1.0 package: %v", err)
+	}
+	if format != SourceAutoRSS || pkg.SchemaVersion != "1.0" {
+		t.Fatalf("unexpected legacy parse result: format=%q package=%#v", format, pkg)
+	}
+	if len(pkg.Episodes) != 0 || len(pkg.EpisodeCandidates) != 0 {
+		t.Fatalf("legacy package should default episode state to empty: %#v", pkg)
+	}
+
+	legacy.SchemaVersion = "2.0"
+	data, err = json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal future package: %v", err)
+	}
+	if _, _, err := ParsePackage(data, SourceAutoRSS); err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("future package error = %v, want unsupported version", err)
+	}
+}
+
+func TestBackupImportEpisodeStrategiesAndIdempotency(t *testing.T) {
+	for _, strategy := range []string{StrategySkip, StrategyMerge, StrategyOverwrite} {
+		t.Run(strategy, func(t *testing.T) {
+			db := newBackupTestDB(t)
+			sub := seedBackupSubscription(t, db, "https://backup.test/rss", 1)
+			activeDownloadID := uint(77)
+			existingLedger := model.SubscriptionEpisode{
+				SubscriptionID:    sub.ID,
+				Episode:           3,
+				Status:            model.EpisodeStatusIgnored,
+				ActiveDownloadID:  &activeDownloadID,
+				ActiveTorrentHash: "old-hash",
+				ActiveTorrentURL:  "https://old.test/e03",
+				ActiveTitle:       "old title",
+				StatusSource:      model.EpisodeStatusSourceUser,
+			}
+			if err := db.Create(&existingLedger).Error; err != nil {
+				t.Fatalf("seed existing ledger: %v", err)
+			}
+			replacementDownloadID := uint(88)
+			existingCandidate := model.EpisodeResourceCandidate{
+				SubscriptionEpisodeID: existingLedger.ID,
+				ResourceKey:           "legacy-key",
+				TorrentHash:           "candidate-3",
+				TorrentURL:            "https://old.test/candidate/e03",
+				Title:                 "old candidate",
+				Status:                model.CandidateStatusAccepted,
+				ReplacementStage:      "done",
+				ReplacementDownloadID: &replacementDownloadID,
+				FinalPath:             "/old/final",
+			}
+			if err := db.Create(&existingCandidate).Error; err != nil {
+				t.Fatalf("seed existing candidate: %v", err)
+			}
+
+			pkg := backupPackageWithCandidate(model.CandidateStatusPending)
+			pkg.Episodes[0].Status = model.EpisodeStatusDownloaded
+			pkg.Episodes[0].ActiveTorrentHash = "new-hash"
+			pkg.Episodes[0].ActiveTorrentURL = "https://new.test/e03"
+			pkg.Episodes[0].ActiveTitle = "new title"
+			pkg.EpisodeCandidates[0].TorrentURL = "https://new.test/candidate/e03"
+			pkg.EpisodeCandidates[0].Title = "new candidate"
+			pkg.Episodes = append(pkg.Episodes, EpisodeRecord{
+				SubscriptionKey: "https://backup.test/rss|season:1",
+				Episode:         4,
+				Status:          model.EpisodeStatusMissing,
+				StatusSource:    model.EpisodeStatusSourceAutomatic,
+			})
+			pkg.EpisodeCandidates = append(pkg.EpisodeCandidates, CandidateRecord{
+				SubscriptionKey: "https://backup.test/rss|season:1",
+				Episode:         4,
+				TorrentURL:      "https://backup.test/candidate/e04",
+				Title:           "E04 candidate",
+				Status:          model.CandidateStatusPending,
+			})
+			data, err := json.Marshal(pkg)
+			if err != nil {
+				t.Fatalf("marshal package: %v", err)
+			}
+			service := NewService(db)
+			if _, err := service.Import(data, SourceAutoRSS, strategy); err != nil {
+				t.Fatalf("first import: %v", err)
+			}
+			if _, err := service.Import(data, SourceAutoRSS, strategy); err != nil {
+				t.Fatalf("idempotent second import: %v", err)
+			}
+
+			var ledger model.SubscriptionEpisode
+			if err := db.Where("subscription_id = ? AND episode = ?", sub.ID, 3).First(&ledger).Error; err != nil {
+				t.Fatalf("load episode 3: %v", err)
+			}
+			var candidate model.EpisodeResourceCandidate
+			if err := db.Where("subscription_episode_id = ?", ledger.ID).First(&candidate).Error; err != nil {
+				t.Fatalf("load episode 3 candidate: %v", err)
+			}
+			if strategy == StrategyOverwrite {
+				if ledger.Status != model.EpisodeStatusDownloaded || ledger.ActiveTorrentHash != "new-hash" || ledger.ActiveDownloadID != nil {
+					t.Fatalf("overwrite did not replace stable ledger state and clear runtime link: %#v", ledger)
+				}
+				if candidate.Status != model.CandidateStatusPending || candidate.Title != "new candidate" || candidate.ResourceKey != "hash:candidate-3" {
+					t.Fatalf("overwrite did not replace candidate stable state: %#v", candidate)
+				}
+				assertCandidateRuntimeCleared(t, candidate)
+			} else {
+				if ledger.Status != model.EpisodeStatusIgnored || ledger.ActiveTorrentHash != "old-hash" || ledger.ActiveDownloadID == nil {
+					t.Fatalf("%s changed existing ledger: %#v", strategy, ledger)
+				}
+				if candidate.Status != model.CandidateStatusAccepted || candidate.Title != "old candidate" || candidate.FinalPath != "/old/final" {
+					t.Fatalf("%s changed existing candidate: %#v", strategy, candidate)
+				}
+			}
+
+			var episodeCount, candidateCount int64
+			if err := db.Model(&model.SubscriptionEpisode{}).Count(&episodeCount).Error; err != nil {
+				t.Fatalf("count episodes: %v", err)
+			}
+			if err := db.Model(&model.EpisodeResourceCandidate{}).Count(&candidateCount).Error; err != nil {
+				t.Fatalf("count candidates: %v", err)
+			}
+			if episodeCount != 2 || candidateCount != 2 {
+				t.Fatalf("repeated import was not idempotent: episodes=%d candidates=%d", episodeCount, candidateCount)
+			}
+		})
+	}
+}
+
+func TestBackupImportRejectsInvalidEpisodeOwnershipInput(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Package)
+	}{
+		{
+			name: "subscription key collision",
+			mutate: func(pkg *Package) {
+				pkg.Subscriptions = append(pkg.Subscriptions, pkg.Subscriptions[0])
+			},
+		},
+		{
+			name: "episode missing subscription",
+			mutate: func(pkg *Package) {
+				pkg.Episodes[0].SubscriptionKey = "https://other.test/rss|season:1"
+			},
+		},
+		{
+			name: "invalid episode",
+			mutate: func(pkg *Package) {
+				pkg.Episodes[0].Episode = 0
+				pkg.EpisodeCandidates[0].Episode = 0
+			},
+		},
+		{
+			name: "invalid episode status",
+			mutate: func(pkg *Package) {
+				pkg.Episodes[0].Status = "owned"
+			},
+		},
+		{
+			name: "candidate missing episode",
+			mutate: func(pkg *Package) {
+				pkg.EpisodeCandidates[0].Episode = 999
+			},
+		},
+		{
+			name: "candidate missing resource identity",
+			mutate: func(pkg *Package) {
+				pkg.EpisodeCandidates[0].TorrentHash = ""
+				pkg.EpisodeCandidates[0].TorrentURL = ""
+			},
+		},
+		{
+			name: "invalid candidate status",
+			mutate: func(pkg *Package) {
+				pkg.EpisodeCandidates[0].Status = "running"
+			},
+		},
+		{
+			name: "candidate resource collision",
+			mutate: func(pkg *Package) {
+				pkg.EpisodeCandidates = append(pkg.EpisodeCandidates, pkg.EpisodeCandidates[0])
+				pkg.EpisodeCandidates[1].TorrentHash = strings.ToUpper(pkg.EpisodeCandidates[0].TorrentHash)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pkg := backupPackageWithCandidate(model.CandidateStatusPending)
+			tc.mutate(&pkg)
+			data, err := json.Marshal(pkg)
+			if err != nil {
+				t.Fatalf("marshal package: %v", err)
+			}
+			db := newBackupTestDB(t)
+			if _, err := NewService(db).Import(data, SourceAutoRSS, StrategyOverwrite); err == nil {
+				t.Fatal("invalid package import unexpectedly succeeded")
+			}
+			assertEpisodePackageTablesEmpty(t, db)
+		})
+	}
+}
+
+func TestBackupImportRollsBackWholePackageWhenCandidateWriteFails(t *testing.T) {
+	db := newBackupTestDB(t)
+	if err := db.Exec(`CREATE TRIGGER fail_candidate_insert
+		BEFORE INSERT ON episode_resource_candidates
+		BEGIN
+			SELECT RAISE(ABORT, 'candidate insert failed');
+		END`).Error; err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+	pkg := backupPackageWithCandidate(model.CandidateStatusPending)
+	data, err := json.Marshal(pkg)
+	if err != nil {
+		t.Fatalf("marshal package: %v", err)
+	}
+	if _, err := NewService(db).Import(data, SourceAutoRSS, StrategyOverwrite); err == nil {
+		t.Fatal("import unexpectedly succeeded")
+	}
+	assertEpisodePackageTablesEmpty(t, db)
+}
+
+func TestBackupExportRejectsOwnershipStateWithoutStableResourceIdentity(t *testing.T) {
+	db := newBackupTestDB(t)
+	sub := seedBackupSubscription(t, db, "https://backup.test/rss", 1)
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID: sub.ID,
+		Episode:        3,
+		Status:         model.EpisodeStatusDownloaded,
+		StatusSource:   model.EpisodeStatusSourceAutomatic,
+	}
+	if err := db.Create(&ledger).Error; err != nil {
+		t.Fatalf("seed episode: %v", err)
+	}
+	if err := db.Create(&model.EpisodeResourceCandidate{
+		SubscriptionEpisodeID: ledger.ID,
+		Title:                 "candidate without hash or URL",
+		Status:                model.CandidateStatusPending,
+	}).Error; err != nil {
+		t.Fatalf("seed invalid candidate: %v", err)
+	}
+
+	if _, err := NewService(db).Export(false); err == nil || !strings.Contains(err.Error(), "resource identity") {
+		t.Fatalf("export error = %v, want missing resource identity", err)
+	}
+}
+
+func seedBackupSubscription(t *testing.T, db *gorm.DB, rssURL string, season int) model.Subscription {
+	t.Helper()
+	sub := model.Subscription{Name: "Backup Show", RssURL: rssURL, Season: season, Enabled: true, Status: "active"}
+	if err := db.Create(&sub).Error; err != nil {
+		t.Fatalf("seed subscription: %v", err)
+	}
+	return sub
+}
+
+func backupPackageWithCandidate(status string) Package {
+	const subscriptionKey = "https://backup.test/rss|season:1"
+	return Package{
+		App:           "auto-rss",
+		SchemaVersion: "1.1",
+		Subscriptions: []SubscriptionRecord{{Subscription: model.Subscription{
+			Name: "Backup Show", RssURL: "https://backup.test/rss", Season: 1, Enabled: true, Status: "active",
+		}}},
+		Episodes: []EpisodeRecord{{
+			SubscriptionKey: subscriptionKey,
+			Episode:         3,
+			Status:          model.EpisodeStatusDownloaded,
+			StatusSource:    model.EpisodeStatusSourceAutomatic,
+		}},
+		EpisodeCandidates: []CandidateRecord{{
+			SubscriptionKey: subscriptionKey,
+			Episode:         3,
+			TorrentHash:     "candidate-3",
+			TorrentURL:      "https://backup.test/candidate/e03",
+			Title:           "E03 candidate",
+			Status:          status,
+			FailureReason:   "interrupted",
+		}},
+	}
+}
+
+func assertCandidateRuntimeCleared(t *testing.T, candidate model.EpisodeResourceCandidate) {
+	t.Helper()
+	if candidate.ReplacementStage != "" || candidate.StagedPath != "" || candidate.OldResourcePath != "" ||
+		candidate.RollbackPath != "" || candidate.FinalPath != "" || candidate.OldTorrentHash != "" ||
+		candidate.ReplacementDownloadID != nil || candidate.OldDownloadID != nil {
+		t.Fatalf("candidate runtime fields were restored: %#v", candidate)
+	}
+}
+
+func assertEpisodePackageTablesEmpty(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	for name, target := range map[string]any{
+		"subscriptions": &model.Subscription{},
+		"episodes":      &model.SubscriptionEpisode{},
+		"candidates":    &model.EpisodeResourceCandidate{},
+	} {
+		var count int64
+		if err := db.Model(target).Count(&count).Error; err != nil {
+			t.Fatalf("count %s: %v", name, err)
+		}
+		if count != 0 {
+			t.Fatalf("invalid/failed package left %d %s rows", count, name)
+		}
+	}
 }
 
 func TestExportRedactsSensitiveConfigAndNotificationSettings(t *testing.T) {
