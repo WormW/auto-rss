@@ -56,6 +56,7 @@ test('剧集管理新增交互目标保持至少 40px 点击区域', () => {
     /\.episode-filter-tabs :deep\(\.n-tabs-tab\)\s*\{[^}]*min-height:\s*40px;/s,
     /\.manual-episode-number :deep\(\.n-input\)\s*\{[^}]*min-height:\s*40px;/s,
     /\.manual-episode-number :deep\(\.n-input__prefix > \.n-button\),[\s\S]*?\.manual-episode-number :deep\(\.n-input__suffix > \.n-button\)\s*\{[^}]*min-width:\s*40px;[^}]*min-height:\s*40px;/s,
+    /\.manual-episode-input > :deep\(\.n-button\)\s*\{[^}]*min-height:\s*40px;/s,
     /\.candidate-select :deep\(\.n-base-selection\)\s*\{[^}]*min-height:\s*40px;/s,
     /\.selection-toolbar :deep\(\.n-checkbox\)\s*\{[^}]*min-height:\s*40px;/s,
     /\.error-retry-button\s*\{[^}]*min-width:\s*40px;[^}]*min-height:\s*40px;/s

@@ -1129,6 +1129,10 @@ function apiErrorMessage(error: any, fallback: string) {
   gap: 8px;
 }
 
+.manual-episode-input > :deep(.n-button) {
+  min-height: 40px;
+}
+
 .manual-episode-number :deep(.n-input) {
   min-height: 40px;
 }
