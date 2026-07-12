@@ -16,6 +16,13 @@ type EpisodeWithCandidateCount struct {
 	ActionRequiredCandidateCount int64 `json:"action_required_candidate_count" gorm:"column:action_required_candidate_count"`
 }
 
+const (
+	DefaultEpisodeCandidateLimit = 100
+	MaxEpisodeCandidateLimit     = 500
+	episodeStatusChunkSize       = 200
+	episodeStatusInsertBatchSize = 50
+)
+
 type EpisodeRepository interface {
 	RunInTransaction(fn func(*gorm.DB) error) error
 	ListBySubscription(subscriptionID uint) ([]model.SubscriptionEpisode, error)
@@ -33,7 +40,7 @@ type EpisodeRepository interface {
 	SetUserStatus(subscriptionID uint, episodes []int, status string) error
 	UpsertCandidate(episodeID uint, candidate *model.EpisodeResourceCandidate) (*model.EpisodeResourceCandidate, bool, error)
 	ListCandidates(episodeID uint) ([]model.EpisodeResourceCandidate, error)
-	ListCandidatesByScope(subscriptionID uint, episode int) ([]model.EpisodeResourceCandidate, error)
+	ListCandidatesByScope(subscriptionID uint, episode, offset, limit int) ([]model.EpisodeResourceCandidate, error)
 	KeepCandidate(subscriptionID uint, episode int, candidateID uint) (*model.EpisodeResourceCandidate, error)
 	UpdateCandidate(candidate *model.EpisodeResourceCandidate) error
 	ObserveEpisode(subscriptionID uint, episode int) (*model.SubscriptionEpisode, error)
@@ -44,6 +51,7 @@ type EpisodeRepository interface {
 }
 
 var ErrActiveDownloadMustBeResolved = errors.New("active download must be resolved")
+var ErrCandidateStateConflict = errors.New("candidate state conflict")
 
 type episodeRepository struct {
 	db *gorm.DB
@@ -255,33 +263,39 @@ func (r *episodeRepository) SetUserStatus(subscriptionID uint, episodes []int, s
 				StatusSource:   model.EpisodeStatusSourceUser,
 			})
 		}
-		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&entries).Error; err != nil {
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(&entries, episodeStatusInsertBatchSize).Error; err != nil {
 			return err
 		}
 
 		if status == model.EpisodeStatusMissing {
-			var activeCount int64
-			if err := tx.Model(&model.SubscriptionEpisode{}).
-				Joins("JOIN downloads ON downloads.id = subscription_episodes.active_download_id").
-				Where("subscription_episodes.subscription_id = ? AND subscription_episodes.episode IN ?", subscriptionID, episodes).
-				Where("downloads.status IN ?", []string{
-					model.DownloadStatusPending,
-					model.DownloadStatusDownloading,
-					model.DownloadStatusStalled,
-					model.DownloadStatusOrganizing,
-				}).Count(&activeCount).Error; err != nil {
-				return err
-			}
-			if activeCount > 0 {
-				return ErrActiveDownloadMustBeResolved
+			for start := 0; start < len(episodes); start += episodeStatusChunkSize {
+				end := min(start+episodeStatusChunkSize, len(episodes))
+				var activeCount int64
+				if err := tx.Model(&model.SubscriptionEpisode{}).
+					Joins("JOIN downloads ON downloads.id = subscription_episodes.active_download_id").
+					Where("subscription_episodes.subscription_id = ? AND subscription_episodes.episode IN ?", subscriptionID, episodes[start:end]).
+					Where("downloads.status IN ?", []string{
+						model.DownloadStatusPending,
+						model.DownloadStatusDownloading,
+						model.DownloadStatusStalled,
+						model.DownloadStatusOrganizing,
+					}).Count(&activeCount).Error; err != nil {
+					return err
+				}
+				if activeCount > 0 {
+					return ErrActiveDownloadMustBeResolved
+				}
 			}
 		}
 
 		updates := clearActiveDownloadUpdates(status, model.EpisodeStatusSourceUser)
-		if err := tx.Model(&model.SubscriptionEpisode{}).
-			Where("subscription_id = ? AND episode IN ?", subscriptionID, episodes).
-			Updates(updates).Error; err != nil {
-			return err
+		for start := 0; start < len(episodes); start += episodeStatusChunkSize {
+			end := min(start+episodeStatusChunkSize, len(episodes))
+			if err := tx.Model(&model.SubscriptionEpisode{}).
+				Where("subscription_id = ? AND episode IN ?", subscriptionID, episodes[start:end]).
+				Updates(updates).Error; err != nil {
+				return err
+			}
 		}
 		return r.RefreshSubscriptionProgressInTx(tx, subscriptionID)
 	})
@@ -333,64 +347,52 @@ func (r *episodeRepository) ListCandidates(episodeID uint) ([]model.EpisodeResou
 	return candidates, err
 }
 
-func (r *episodeRepository) ListCandidatesByScope(subscriptionID uint, episode int) ([]model.EpisodeResourceCandidate, error) {
+func (r *episodeRepository) ListCandidatesByScope(subscriptionID uint, episode, offset, limit int) ([]model.EpisodeResourceCandidate, error) {
+	if limit <= 0 {
+		limit = DefaultEpisodeCandidateLimit
+	}
+	if limit > MaxEpisodeCandidateLimit {
+		limit = MaxEpisodeCandidateLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	var candidates []model.EpisodeResourceCandidate
 	err := r.db.Model(&model.EpisodeResourceCandidate{}).
 		Joins("JOIN subscription_episodes ON subscription_episodes.id = episode_resource_candidates.subscription_episode_id").
 		Where("subscription_episodes.subscription_id = ? AND subscription_episodes.episode = ?", subscriptionID, episode).
 		Order("episode_resource_candidates.created_at ASC, episode_resource_candidates.id ASC").
+		Offset(offset).
+		Limit(limit).
 		Find(&candidates).Error
 	return candidates, err
 }
 
 func (r *episodeRepository) KeepCandidate(subscriptionID uint, episode int, candidateID uint) (*model.EpisodeResourceCandidate, error) {
+	scopedEpisodeIDs := r.db.Model(&model.SubscriptionEpisode{}).
+		Select("id").
+		Where("subscription_id = ? AND episode = ?", subscriptionID, episode)
+	result := r.db.Model(&model.EpisodeResourceCandidate{}).
+		Where("id = ? AND subscription_episode_id IN (?) AND status = ?", candidateID, scopedEpisodeIDs, model.CandidateStatusPending).
+		Update("status", model.CandidateStatusKeptExisting)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+
 	var candidate model.EpisodeResourceCandidate
-	err := r.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&model.EpisodeResourceCandidate{}).
-			Joins("JOIN subscription_episodes ON subscription_episodes.id = episode_resource_candidates.subscription_episode_id").
-			Where(
-				"subscription_episodes.subscription_id = ? AND subscription_episodes.episode = ? AND episode_resource_candidates.id = ?",
-				subscriptionID,
-				episode,
-				candidateID,
-			).First(&candidate).Error; err != nil {
-			return err
-		}
-		if candidate.Status == model.CandidateStatusKeptExisting {
-			return nil
-		}
-		if candidate.Status != model.CandidateStatusPending {
-			return fmt.Errorf("candidate %d cannot be kept from status %s", candidateID, candidate.Status)
-		}
-		scopedEpisodeIDs := tx.Model(&model.SubscriptionEpisode{}).
-			Select("id").
-			Where("subscription_id = ? AND episode = ?", subscriptionID, episode)
-		result := tx.Model(&model.EpisodeResourceCandidate{}).
-			Where("id = ? AND subscription_episode_id IN (?) AND status = ?", candidate.ID, scopedEpisodeIDs, model.CandidateStatusPending).
-			Update("status", model.CandidateStatusKeptExisting)
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			var current model.EpisodeResourceCandidate
-			if err := tx.Model(&model.EpisodeResourceCandidate{}).
-				Joins("JOIN subscription_episodes ON subscription_episodes.id = episode_resource_candidates.subscription_episode_id").
-				Where(
-					"subscription_episodes.subscription_id = ? AND subscription_episodes.episode = ? AND episode_resource_candidates.id = ?",
-					subscriptionID,
-					episode,
-					candidateID,
-				).First(&current).Error; err == nil && current.Status == model.CandidateStatusKeptExisting {
-				candidate = current
-				return nil
-			}
-			return fmt.Errorf("candidate %d changed while being kept", candidateID)
-		}
-		candidate.Status = model.CandidateStatusKeptExisting
-		return nil
-	})
+	err := r.db.Model(&model.EpisodeResourceCandidate{}).
+		Joins("JOIN subscription_episodes ON subscription_episodes.id = episode_resource_candidates.subscription_episode_id").
+		Where(
+			"subscription_episodes.subscription_id = ? AND subscription_episodes.episode = ? AND episode_resource_candidates.id = ?",
+			subscriptionID,
+			episode,
+			candidateID,
+		).First(&candidate).Error
 	if err != nil {
 		return nil, err
+	}
+	if candidate.Status != model.CandidateStatusKeptExisting {
+		return nil, fmt.Errorf("%w: candidate %d has status %s", ErrCandidateStateConflict, candidateID, candidate.Status)
 	}
 	return &candidate, nil
 }

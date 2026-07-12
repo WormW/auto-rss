@@ -29,6 +29,8 @@ type UpdateEpisodeStatusRequest struct {
 	Status   string `json:"status"`
 }
 
+const maxEpisodeStatusBatchSize = 500
+
 func NewEpisodeHandler(
 	subscriptionRepo repository.SubscriptionRepository,
 	episodeRepo repository.EpisodeRepository,
@@ -106,11 +108,15 @@ func (h *EpisodeHandler) ListCandidates(c *gin.Context) {
 	if !ok {
 		return
 	}
+	offset, limit, ok := parseCandidatePagination(c)
+	if !ok {
+		return
+	}
 	if _, err := h.episodeRepo.GetBySubscriptionAndEpisode(subscriptionID, episodeNumber); err != nil {
 		handleEpisodeLookupError(c, err, "Episode not found")
 		return
 	}
-	candidates, err := h.episodeRepo.ListCandidatesByScope(subscriptionID, episodeNumber)
+	candidates, err := h.episodeRepo.ListCandidatesByScope(subscriptionID, episodeNumber, offset, limit)
 	if err != nil {
 		episodeAPIError(c, http.StatusInternalServerError, "Failed to list episode candidates", "")
 		return
@@ -133,6 +139,10 @@ func (h *EpisodeHandler) KeepCandidate(c *gin.Context) {
 	}
 	candidate, err := h.episodeRepo.KeepCandidate(subscriptionID, episodeNumber, candidateID)
 	if err != nil {
+		if errors.Is(err, repository.ErrCandidateStateConflict) {
+			episodeAPIError(c, http.StatusConflict, "Candidate can only be kept while pending", "candidate_state_conflict")
+			return
+		}
 		handleEpisodeLookupError(c, err, "Candidate not found")
 		return
 	}
@@ -156,6 +166,9 @@ func validateStatusRequest(request UpdateEpisodeStatusRequest) error {
 	if len(request.Episodes) == 0 {
 		return errors.New("episodes must not be empty")
 	}
+	if len(request.Episodes) > maxEpisodeStatusBatchSize {
+		return fmt.Errorf("episodes must not contain more than %d items", maxEpisodeStatusBatchSize)
+	}
 	switch request.Status {
 	case model.EpisodeStatusMissing, model.EpisodeStatusMarkedDownloaded, model.EpisodeStatusIgnored:
 	default:
@@ -172,6 +185,28 @@ func validateStatusRequest(request UpdateEpisodeStatusRequest) error {
 		seen[episodeNumber] = struct{}{}
 	}
 	return nil
+}
+
+func parseCandidatePagination(c *gin.Context) (int, int, bool) {
+	limit := repository.DefaultEpisodeCandidateLimit
+	if rawLimit := c.Query("limit"); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed <= 0 || parsed > repository.MaxEpisodeCandidateLimit {
+			episodeAPIError(c, http.StatusBadRequest, fmt.Sprintf("limit must be between 1 and %d", repository.MaxEpisodeCandidateLimit), "")
+			return 0, 0, false
+		}
+		limit = parsed
+	}
+	offset := 0
+	if rawOffset := c.Query("offset"); rawOffset != "" {
+		parsed, err := strconv.Atoi(rawOffset)
+		if err != nil || parsed < 0 {
+			episodeAPIError(c, http.StatusBadRequest, "offset must be a non-negative integer", "")
+			return 0, 0, false
+		}
+		offset = parsed
+	}
+	return offset, limit, true
 }
 
 func parseEpisodeNumber(c *gin.Context) (int, bool) {

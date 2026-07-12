@@ -201,6 +201,24 @@ func TestEpisodeHandlerUpdateStatusValidation(t *testing.T) {
 	}
 }
 
+func TestEpisodeHandlerUpdateStatusRejectsOversizedBatchWithoutWriting(t *testing.T) {
+	db, router := setupEpisodeHandlerTest(t)
+	sub := seedEpisodeSubscription(t, db, model.MaxSubscriptionEpisodes)
+	episodes := make([]int, 501)
+	for index := range episodes {
+		episodes[index] = index + 1
+	}
+	body, err := json.Marshal(UpdateEpisodeStatusRequest{Episodes: episodes, Status: model.EpisodeStatusIgnored})
+	require.NoError(t, err)
+
+	recorder := performEpisodeRequest(router, http.MethodPut, fmt.Sprintf("/subscriptions/%d/episodes/status", sub.ID), string(body))
+	require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+
+	var count int64
+	require.NoError(t, db.Model(&model.SubscriptionEpisode{}).Where("subscription_id = ?", sub.ID).Count(&count).Error)
+	assert.Zero(t, count)
+}
+
 func TestEpisodeHandlerCandidateListAndKeepAreStrictlyScopedAndIdempotent(t *testing.T) {
 	db, router := setupEpisodeHandlerTest(t)
 	sub := seedEpisodeSubscription(t, db, 2)
@@ -252,9 +270,90 @@ func TestEpisodeHandlerCandidateListAndKeepAreStrictlyScopedAndIdempotent(t *tes
 	assert.Equal(t, model.CandidateStatusPending, untouched.Status)
 }
 
+func TestEpisodeHandlerKeepCandidateMapsStateConflicts(t *testing.T) {
+	db, router := setupEpisodeHandlerTest(t)
+	sub := seedEpisodeSubscription(t, db, 1)
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID: sub.ID, Episode: 1, Status: model.EpisodeStatusDownloaded, StatusSource: model.EpisodeStatusSourceAutomatic,
+	}
+	require.NoError(t, db.Create(&ledger).Error)
+
+	for _, status := range []string{
+		model.CandidateStatusFailed,
+		model.CandidateStatusReplacing,
+		model.CandidateStatusAccepted,
+	} {
+		t.Run(status, func(t *testing.T) {
+			candidate := model.EpisodeResourceCandidate{
+				SubscriptionEpisodeID: ledger.ID,
+				ResourceKey:           "hash:" + status,
+				Status:                status,
+			}
+			require.NoError(t, db.Create(&candidate).Error)
+			path := fmt.Sprintf("/subscriptions/%d/episodes/1/candidates/%d/keep", sub.ID, candidate.ID)
+
+			recorder := performEpisodeRequest(router, http.MethodPost, path, "")
+			require.Equal(t, http.StatusConflict, recorder.Code, recorder.Body.String())
+			response := decodeEpisodeResponse(t, recorder)
+			assert.Equal(t, "candidate_state_conflict", response.Reason)
+
+			var persisted model.EpisodeResourceCandidate
+			require.NoError(t, db.First(&persisted, candidate.ID).Error)
+			assert.Equal(t, status, persisted.Status)
+		})
+	}
+}
+
+func TestEpisodeHandlerListCandidatesAppliesBoundedPagination(t *testing.T) {
+	db, router := setupEpisodeHandlerTest(t)
+	sub := seedEpisodeSubscription(t, db, 1)
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID: sub.ID, Episode: 1, Status: model.EpisodeStatusDownloaded, StatusSource: model.EpisodeStatusSourceAutomatic,
+	}
+	require.NoError(t, db.Create(&ledger).Error)
+	candidates := make([]model.EpisodeResourceCandidate, 501)
+	for index := range candidates {
+		candidates[index] = model.EpisodeResourceCandidate{
+			SubscriptionEpisodeID: ledger.ID,
+			ResourceKey:           fmt.Sprintf("hash:%03d", index),
+			Status:                model.CandidateStatusPending,
+		}
+	}
+	require.NoError(t, db.CreateInBatches(&candidates, 100).Error)
+	path := fmt.Sprintf("/subscriptions/%d/episodes/1/candidates", sub.ID)
+
+	recorder := performEpisodeRequest(router, http.MethodGet, path, "")
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	response := decodeEpisodeResponse(t, recorder)
+	var listed []model.EpisodeResourceCandidate
+	require.NoError(t, json.Unmarshal(response.Data, &listed))
+	assert.Len(t, listed, 100)
+	assert.Equal(t, candidates[0].ID, listed[0].ID)
+
+	recorder = performEpisodeRequest(router, http.MethodGet, path+"?limit=500&offset=1", "")
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	response = decodeEpisodeResponse(t, recorder)
+	require.NoError(t, json.Unmarshal(response.Data, &listed))
+	assert.Len(t, listed, 500)
+	assert.Equal(t, candidates[1].ID, listed[0].ID)
+
+	for _, query := range []string{"?limit=0", "?limit=501", "?limit=bad", "?offset=-1", "?offset=bad"} {
+		recorder = performEpisodeRequest(router, http.MethodGet, path+query, "")
+		assert.Equal(t, http.StatusBadRequest, recorder.Code, query+": "+recorder.Body.String())
+	}
+}
+
 func TestEpisodeHandlerMapsUnknownResourcesMalformedIDsAndRepositoryErrors(t *testing.T) {
 	db, router := setupEpisodeHandlerTest(t)
 	sub := seedEpisodeSubscription(t, db, 1)
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID: sub.ID, Episode: 2, Status: model.EpisodeStatusDownloaded, StatusSource: model.EpisodeStatusSourceAutomatic,
+	}
+	require.NoError(t, db.Create(&ledger).Error)
+	candidate := model.EpisodeResourceCandidate{
+		SubscriptionEpisodeID: ledger.ID, ResourceKey: "hash:db-error", Status: model.CandidateStatusPending,
+	}
+	require.NoError(t, db.Create(&candidate).Error)
 
 	tests := []struct {
 		name   string
@@ -283,5 +382,7 @@ func TestEpisodeHandlerMapsUnknownResourcesMalformedIDsAndRepositoryErrors(t *te
 	require.NoError(t, err)
 	require.NoError(t, sqlDB.Close())
 	recorder := performEpisodeRequest(router, http.MethodGet, fmt.Sprintf("/subscriptions/%d/episodes", sub.ID), "")
+	assert.Equal(t, http.StatusInternalServerError, recorder.Code, recorder.Body.String())
+	recorder = performEpisodeRequest(router, http.MethodPost, fmt.Sprintf("/subscriptions/%d/episodes/2/candidates/%d/keep", sub.ID, candidate.ID), "")
 	assert.Equal(t, http.StatusInternalServerError, recorder.Code, recorder.Body.String())
 }

@@ -2,7 +2,9 @@ package repository
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -313,6 +315,107 @@ func TestEpisodeRepositoryEnsureRangeRejectsExcessiveTotal(t *testing.T) {
 	_, repo := setupEpisodeRepository(t)
 	err := repo.EnsureRange(1, 10001)
 	require.ErrorContains(t, err, "10000")
+}
+
+func TestEpisodeRepositorySetUserStatusChunksMaximumEpisodeRangeAtomically(t *testing.T) {
+	db, repo := setupEpisodeRepository(t)
+	sub := model.Subscription{Name: "large", TotalEpisodes: model.MaxSubscriptionEpisodes}
+	require.NoError(t, db.Create(&sub).Error)
+	episodes := make([]int, model.MaxSubscriptionEpisodes)
+	for index := range episodes {
+		episodes[index] = index + 1
+	}
+
+	download := model.Download{
+		SubscriptionID: sub.ID, Episode: model.MaxSubscriptionEpisodes - 1,
+		Title: "active", TorrentURL: "magnet:active-large-batch", TorrentHash: "active-large-batch",
+		Status: model.DownloadStatusDownloading,
+	}
+	require.NoError(t, db.Create(&download).Error)
+	active := model.SubscriptionEpisode{
+		SubscriptionID: sub.ID, Episode: model.MaxSubscriptionEpisodes - 1,
+		Status: model.EpisodeStatusDownloading, StatusSource: model.EpisodeStatusSourceAutomatic,
+		ActiveDownloadID: &download.ID,
+	}
+	require.NoError(t, db.Create(&active).Error)
+
+	err := repo.SetUserStatus(sub.ID, episodes, model.EpisodeStatusMissing)
+	require.ErrorIs(t, err, ErrActiveDownloadMustBeResolved)
+	var count int64
+	require.NoError(t, db.Model(&model.SubscriptionEpisode{}).Where("subscription_id = ?", sub.ID).Count(&count).Error)
+	assert.EqualValues(t, 1, count, "conflict must roll back every inserted chunk")
+
+	require.NoError(t, repo.SetUserStatus(sub.ID, episodes, model.EpisodeStatusIgnored))
+	require.NoError(t, db.Model(&model.SubscriptionEpisode{}).
+		Where("subscription_id = ? AND status = ?", sub.ID, model.EpisodeStatusIgnored).
+		Count(&count).Error)
+	assert.EqualValues(t, model.MaxSubscriptionEpisodes, count)
+}
+
+func TestEpisodeRepositoryKeepCandidateConcurrentWALRequestsAreIdempotent(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "episode-keep.db")
+	dsn := databasePath + "?_journal_mode=WAL&_busy_timeout=5000"
+	open := func() *gorm.DB {
+		db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+		require.NoError(t, err)
+		return db
+	}
+	dbOne := open()
+	dbTwo := open()
+	require.NoError(t, dbOne.AutoMigrate(
+		&model.Subscription{},
+		&model.Download{},
+		&model.SubscriptionEpisode{},
+		&model.EpisodeResourceCandidate{},
+	))
+	sub := model.Subscription{Name: "concurrent"}
+	require.NoError(t, dbOne.Create(&sub).Error)
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID: sub.ID, Episode: 1, Status: model.EpisodeStatusDownloaded, StatusSource: model.EpisodeStatusSourceAutomatic,
+	}
+	require.NoError(t, dbOne.Create(&ledger).Error)
+	candidate := model.EpisodeResourceCandidate{
+		SubscriptionEpisodeID: ledger.ID, ResourceKey: "hash:concurrent", Status: model.CandidateStatusPending,
+	}
+	require.NoError(t, dbOne.Create(&candidate).Error)
+
+	reachedUpdate := make(chan struct{}, 2)
+	releaseUpdates := make(chan struct{})
+	registerBarrier := func(db *gorm.DB, name string) {
+		require.NoError(t, db.Callback().Update().Before("gorm:update").Register(name, func(*gorm.DB) {
+			reachedUpdate <- struct{}{}
+			<-releaseUpdates
+		}))
+	}
+	registerBarrier(dbOne, "test:keep_candidate_barrier_one")
+	registerBarrier(dbTwo, "test:keep_candidate_barrier_two")
+
+	repositories := []EpisodeRepository{NewEpisodeRepository(dbOne), NewEpisodeRepository(dbTwo)}
+	errorsByCall := make([]error, len(repositories))
+	var waitGroup sync.WaitGroup
+	for index, repo := range repositories {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			_, errorsByCall[index] = repo.KeepCandidate(sub.ID, ledger.Episode, candidate.ID)
+		}()
+	}
+	for range repositories {
+		select {
+		case <-reachedUpdate:
+		case <-time.After(5 * time.Second):
+			t.Fatal("both keep requests did not reach the conditional update")
+		}
+	}
+	close(releaseUpdates)
+	waitGroup.Wait()
+	for _, err := range errorsByCall {
+		require.NoError(t, err)
+	}
+
+	var persisted model.EpisodeResourceCandidate
+	require.NoError(t, dbOne.First(&persisted, candidate.ID).Error)
+	assert.Equal(t, model.CandidateStatusKeptExisting, persisted.Status)
 }
 
 func TestEpisodeRepositoryEnsureRangeOnlyInsertsMissingEpisodes(t *testing.T) {
