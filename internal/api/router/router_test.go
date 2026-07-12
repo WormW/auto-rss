@@ -52,6 +52,8 @@ func newTestDB(t *testing.T) *gorm.DB {
 	}
 	if err := db.AutoMigrate(
 		&model.Subscription{},
+		&model.SubscriptionFeed{},
+		&model.SubscriptionFeedSeenItem{},
 		&model.SubscriptionTag{},
 		&model.SubscriptionTagRelation{},
 		&model.Download{},
@@ -69,6 +71,29 @@ func newTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("failed to migrate sqlite db: %v", err)
 	}
 	return db
+}
+
+func TestSetupRegistersSubscriptionFeedRoutes(t *testing.T) {
+	router, _, _ := setupRouterForTestWithConfig(t, false, nil)
+	want := map[string]bool{
+		http.MethodGet + " /api/v1/subscriptions/:id/feeds":                  false,
+		http.MethodPost + " /api/v1/subscriptions/:id/feeds":                 false,
+		http.MethodPut + " /api/v1/subscriptions/:id/feeds/:feedId":          false,
+		http.MethodDelete + " /api/v1/subscriptions/:id/feeds/:feedId":       false,
+		http.MethodPost + " /api/v1/subscriptions/:id/feeds/preview":         false,
+		http.MethodPost + " /api/v1/subscriptions/:id/feeds/:feedId/preview": false,
+	}
+	for _, route := range router.Routes() {
+		key := route.Method + " " + route.Path
+		if _, ok := want[key]; ok {
+			want[key] = true
+		}
+	}
+	for route, registered := range want {
+		if !registered {
+			t.Errorf("subscription feed route not registered: %s", route)
+		}
+	}
 }
 
 func TestSetupRegistersEpisodeLedgerManagementRoutes(t *testing.T) {

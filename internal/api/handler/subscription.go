@@ -26,6 +26,7 @@ import (
 	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/WormW/auto-rss/internal/service/scheduler"
 	"github.com/WormW/auto-rss/internal/service/subscription"
+	"github.com/WormW/auto-rss/internal/service/subscriptionfeed"
 	"github.com/WormW/auto-rss/internal/service/task"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -48,7 +49,17 @@ type SubscriptionHandler struct {
 	bangumiEnricher      bangumi.Enricher
 	batchImporter        subscription.BatchImporter
 	collectionDownloader subscription.CollectionDownloader
+	feedRepo             repository.SubscriptionFeedRepository
+	feedService          *subscriptionfeed.Service
+	creator              subscription.Creator
 }
+
+type subscriptionWriteRequest struct {
+	model.Subscription
+	Feeds []subscriptionfeed.Input `json:"feeds"`
+}
+
+var errAmbiguousSubscriptionFeeds = errors.New("subscription feed update is ambiguous")
 
 type SubscriptionPreviewRequest struct {
 	ID                 uint   `json:"id"`
@@ -144,6 +155,31 @@ func NewSubscriptionHandler(
 		batchImporter:        batchImporter,
 		collectionDownloader: collectionDownloader,
 	}
+}
+
+func NewSubscriptionHandlerWithFeeds(
+	repo repository.SubscriptionRepository,
+	downloadRepo repository.DownloadRepository,
+	configRepo repository.ConfigRepository,
+	qbClient downloader.QBittorrentClient,
+	downloadPath string,
+	episodeRepo repository.EpisodeRepository,
+	feedRepo repository.SubscriptionFeedRepository,
+	feedService *subscriptionfeed.Service,
+	creator subscription.Creator,
+) *SubscriptionHandler {
+	handler := NewSubscriptionHandler(repo, downloadRepo, configRepo, qbClient, downloadPath, episodeRepo)
+	handler.feedRepo = feedRepo
+	handler.feedService = feedService
+	handler.creator = creator
+	handler.batchImporter = subscription.NewBatchImporter(
+		handler.mikanService,
+		handler.bangumiEnricher,
+		repo,
+		configRepo,
+		creator,
+	)
+	return handler
 }
 
 func (h *SubscriptionHandler) resolveDownloadPath(subscriptionName string) string {
@@ -311,6 +347,68 @@ func normalizeSubscriptionSource(subscription *model.Subscription) {
 	if subscription.SourceType == "calendar" {
 		subscription.SourceType = "manual"
 	}
+}
+
+func (h *SubscriptionHandler) proxyLegacyFeedUpdate(
+	ctx context.Context,
+	subscription *model.Subscription,
+	updates map[string]interface{},
+) (bool, error) {
+	if h.feedRepo == nil || h.feedService == nil {
+		return false, nil
+	}
+	_, rssUpdated := updates["rss_url"]
+	_, fansubUpdated := updates["fansub"]
+	_, offsetUpdated := updates["episode_offset"]
+	if !rssUpdated && !fansubUpdated && !offsetUpdated {
+		return false, nil
+	}
+
+	feeds, err := h.feedRepo.ListBySubscription(subscription.ID)
+	if err != nil {
+		return false, err
+	}
+	if len(feeds) != 1 {
+		return false, errAmbiguousSubscriptionFeeds
+	}
+	feed := feeds[0]
+	input := subscriptionfeed.Input{
+		Name:          feed.Name,
+		Fansub:        feed.Fansub,
+		RSSURL:        feed.RSSURL,
+		EpisodeOffset: feed.EpisodeOffset,
+		Enabled:       feed.Enabled,
+	}
+	if value, exists := updates["rss_url"]; exists {
+		rssURL, ok := value.(string)
+		if !ok {
+			return false, subscriptionfeed.ErrInvalidURL
+		}
+		input.RSSURL = rssURL
+	}
+	if value, exists := updates["fansub"]; exists {
+		fansub, ok := value.(string)
+		if !ok {
+			return false, errors.New("fansub must be a string")
+		}
+		input.Fansub = fansub
+	}
+	if value, exists := updates["episode_offset"]; exists {
+		offset, ok := value.(float64)
+		if !ok || math.Trunc(offset) != offset || offset < 0 || offset > float64(int(^uint(0)>>1)) {
+			return false, subscriptionfeed.ErrNegativeOffset
+		}
+		input.EpisodeOffset = int(offset)
+	}
+
+	updated, err := h.feedService.Update(ctx, feed.ID, input)
+	if err != nil {
+		return false, err
+	}
+	subscription.RssURL = updated.RSSURL
+	subscription.Fansub = updated.Fansub
+	subscription.EpisodeOffset = updated.EpisodeOffset
+	return true, nil
 }
 
 func validSubscriptionEpisodeTotal(total int) bool {
@@ -582,8 +680,8 @@ func (h *SubscriptionHandler) Preview(c *gin.Context) {
 
 // Create 创建订阅
 func (h *SubscriptionHandler) Create(c *gin.Context) {
-	var subscription model.Subscription
-	if err := c.ShouldBindJSON(&subscription); err != nil {
+	var request subscriptionWriteRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
 		logger.Warn("Invalid subscription create request",
 			"error", err.Error(),
 			"client_ip", c.ClientIP())
@@ -593,6 +691,7 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		})
 		return
 	}
+	subscription := request.Subscription
 	if !validSubscriptionEpisodeTotal(subscription.TotalEpisodes) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    400,
@@ -606,8 +705,25 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		"rss_url", subscription.RssURL,
 		"client_ip", c.ClientIP())
 
-	normalizeSubscriptionSource(&subscription)
-	subscription.RSSBaselinePending = subscription.RssURL != ""
+	feedInputs := append([]subscriptionfeed.Input(nil), request.Feeds...)
+	if len(feedInputs) == 0 && strings.TrimSpace(subscription.RssURL) != "" && h.creator != nil {
+		feedInputs = []subscriptionfeed.Input{{
+			Name:          subscription.Fansub,
+			Fansub:        subscription.Fansub,
+			RSSURL:        subscription.RssURL,
+			EpisodeOffset: max(subscription.EpisodeOffset, 0),
+			Enabled:       true,
+		}}
+	}
+	if len(feedInputs) > 0 {
+		subscription.CollectionTorrent = strings.TrimSpace(subscription.CollectionTorrent)
+		if strings.TrimSpace(subscription.SourceType) == "" || subscription.SourceType == "calendar" {
+			subscription.SourceType = "manual"
+		}
+	} else {
+		normalizeSubscriptionSource(&subscription)
+		subscription.RSSBaselinePending = subscription.RssURL != ""
+	}
 
 	// 自动获取Bangumi数据
 	h.enrichWithBangumi(&subscription)
@@ -616,7 +732,7 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 	// Keep Subscription.Name as the series title; Season carries the season number.
 	subscription.Name, subscription.Season = utils.NormalizeMediaTitleAndSeason(subscription.Name, subscription.Season)
 
-	if subscription.RssURL != "" {
+	if h.creator == nil && subscription.RssURL != "" {
 		existing, err := h.repo.GetByRSSURLAndSeason(subscription.RssURL, subscription.Season)
 		if err == nil {
 			c.JSON(http.StatusConflict, gin.H{
@@ -640,7 +756,9 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 	}
 
 	var createErr error
-	if h.episodeRepo != nil {
+	if h.creator != nil {
+		createErr = h.creator.Create(c.Request.Context(), &subscription, feedInputs)
+	} else if h.episodeRepo != nil {
 		createErr = h.episodeRepo.RunInTransaction(func(tx *gorm.DB) error {
 			if err := h.repo.CreateInTx(tx, &subscription); err != nil {
 				return err
@@ -654,6 +772,10 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		createErr = h.repo.Create(&subscription)
 	}
 	if createErr != nil {
+		if h.creator != nil {
+			feedError(c, createErr)
+			return
+		}
 		logger.Error("Failed to create subscription",
 			"name", subscription.Name,
 			"error", createErr.Error())
@@ -671,7 +793,9 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		"has_cover", subscription.BangumiCoverLocal != "")
 
 	// 如果提供了合集种子地址，自动触发下载
-	go h.downloadCollectionTorrent(&subscription)
+	if subscription.CollectionTorrent != "" {
+		go h.downloadCollectionTorrent(&subscription)
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
@@ -737,6 +861,18 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 		}
 		totalEpisodesUpdated = true
 	}
+	legacyFeedUpdated, legacyFeedErr := h.proxyLegacyFeedUpdate(c.Request.Context(), existing, updates)
+	if legacyFeedErr != nil {
+		if errors.Is(legacyFeedErr, errAmbiguousSubscriptionFeeds) {
+			c.JSON(http.StatusConflict, gin.H{
+				"code":    409,
+				"message": "subscription has multiple feeds; use feed API",
+			})
+		} else {
+			feedError(c, legacyFeedErr)
+		}
+		return
+	}
 
 	logger.Info("Updating subscription",
 		"id", id,
@@ -748,11 +884,11 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 		existing.Name = name
 	}
 	rssURLUpdated := false
-	if rssURL, ok := updates["rss_url"].(string); ok {
+	if rssURL, ok := updates["rss_url"].(string); ok && !legacyFeedUpdated {
 		rssURLUpdated = true
 		existing.RssURL = strings.TrimSpace(rssURL)
 	}
-	if fansub, ok := updates["fansub"].(string); ok {
+	if fansub, ok := updates["fansub"].(string); ok && !legacyFeedUpdated {
 		existing.Fansub = fansub
 	}
 	if language, ok := updates["language"].(string); ok {
@@ -770,7 +906,7 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 	if totalEpisodesUpdated {
 		existing.TotalEpisodes = requestedTotalEpisodes
 	}
-	if epOffset, ok := updates["episode_offset"].(float64); ok {
+	if epOffset, ok := updates["episode_offset"].(float64); ok && !legacyFeedUpdated {
 		existing.EpisodeOffset = int(epOffset)
 	}
 	if filterRules, ok := updates["filter_rules"].(string); ok {
@@ -820,7 +956,7 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 	}
 
 	normalizeSubscriptionSource(existing)
-	if rssURLUpdated && existing.RssURL != originalRSSURL {
+	if !legacyFeedUpdated && rssURLUpdated && existing.RssURL != originalRSSURL {
 		existing.RSSBaselinePending = existing.RssURL != ""
 	}
 	shouldDownloadCollection = shouldDownloadCollection && !existing.IsCalendarOnly()
@@ -856,6 +992,9 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 			"message": "Failed to update subscription",
 		})
 		return
+	}
+	if legacyFeedUpdated && h.episodeService != nil {
+		_ = h.episodeService.RefreshSubscriptionProgress(existing.ID)
 	}
 
 	logger.Info("Subscription updated successfully",

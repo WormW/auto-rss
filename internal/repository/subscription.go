@@ -13,6 +13,7 @@ import (
 type SubscriptionWithStats struct {
 	model.Subscription
 	DownloadingCount int64 `json:"downloading_count" gorm:"column:downloading_count"`
+	FeedCount        int64 `json:"feed_count" gorm:"column:feed_count"`
 }
 
 // SubscriptionStatistics 订阅统计信息
@@ -215,6 +216,7 @@ func (r *subscriptionRepository) GetSubscriptionsWithDownloadCount() ([]Subscrip
 		Select(
 			"subscriptions.*",
 			"COUNT(CASE WHEN downloads.status = 'downloading' THEN 1 END) as downloading_count",
+			"(SELECT COUNT(*) FROM subscription_feeds sf WHERE sf.subscription_id = subscriptions.id) AS feed_count",
 		).
 		Joins("LEFT JOIN downloads ON downloads.subscription_id = subscriptions.id").
 		Group("subscriptions.id").

@@ -33,6 +33,8 @@ import (
 	"github.com/WormW/auto-rss/internal/service/notification"
 	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/WormW/auto-rss/internal/service/scheduler"
+	"github.com/WormW/auto-rss/internal/service/subscription"
+	"github.com/WormW/auto-rss/internal/service/subscriptionfeed"
 	"github.com/WormW/auto-rss/internal/webui"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -104,9 +106,12 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 
 	// 初始化仓储
 	subscriptionRepo := repository.NewSubscriptionRepository(db)
+	feedRepo := repository.NewSubscriptionFeedRepository(db)
 	downloadRepo := repository.NewDownloadRepository(db)
 	episodeRepo := repository.NewEpisodeRepository(db)
 	episodeService := episode.NewService(episodeRepo)
+	feedService := subscriptionfeed.NewService(db, feedRepo, rssParser)
+	subscriptionCreator := subscription.NewCreator(db, feedService, episodeRepo)
 	configRepo := repository.NewConfigRepository(db)
 	rssSourceRepo := repository.NewRSSSourceRepository(db)
 	logRepo := repository.NewLogRepository(db)
@@ -159,7 +164,18 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	jwtService := auth.NewJWTService(cfg, refreshTokenRepo)
 
 	// 初始化处理器
-	subscriptionHandler := handler.NewSubscriptionHandler(subscriptionRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath, episodeRepo)
+	subscriptionHandler := handler.NewSubscriptionHandlerWithFeeds(
+		subscriptionRepo,
+		downloadRepo,
+		configRepo,
+		qbClient,
+		cfg.DownloadPath,
+		episodeRepo,
+		feedRepo,
+		feedService,
+		subscriptionCreator,
+	)
+	feedHandler := handler.NewSubscriptionFeedHandler(feedRepo, feedService, episodeService)
 	subscriptionDiagnosticsHandler := handler.NewSubscriptionDiagnosticsHandler(subscriptionRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath, episodeService)
 	downloadHandler := handler.NewDownloadHandler(downloadRepo, qbClient, configRepo, episodeService)
 	downloadHistoryHandler := handler.NewDownloadHistoryHandler(downloadRepo)
@@ -235,6 +251,7 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			subscriptions.GET("/:id", subscriptionHandler.GetByID)
 			subscriptions.PUT("/:id", subscriptionHandler.Update)
 			subscriptions.DELETE("/:id", subscriptionHandler.Delete)
+			handler.RegisterSubscriptionFeedRoutes(subscriptions, feedHandler)
 			subscriptions.GET("/:id/episodes", episodeHandler.List)
 			subscriptions.PUT("/:id/episodes/status", episodeHandler.UpdateStatus)
 			subscriptions.GET("/:id/episodes/:episode/candidates", episodeHandler.ListCandidates)

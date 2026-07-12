@@ -14,7 +14,7 @@ func TestSubscriptionRepository_GetSubscriptionsWithDownloadCount(t *testing.T) 
 	if err != nil {
 		t.Fatalf("failed to open test DB: %v", err)
 	}
-	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}); err != nil {
+	if err := db.AutoMigrate(&model.Subscription{}, &model.SubscriptionFeed{}, &model.Download{}); err != nil {
 		t.Fatalf("failed to migrate test DB: %v", err)
 	}
 	repo := NewSubscriptionRepository(db)
@@ -174,5 +174,48 @@ func TestSubscriptionRepository_GetStatisticsUsesEpisodeOffset(t *testing.T) {
 	}
 	if stats.CompletedCount != 2 {
 		t.Fatalf("CompletedCount = %d, want 2", stats.CompletedCount)
+	}
+}
+
+func TestSubscriptionStatsReturnsFeedCountWithoutMultiplyingDownloads(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("failed to open test DB: %v", err)
+	}
+	if err := db.AutoMigrate(&model.Subscription{}, &model.SubscriptionFeed{}, &model.Download{}); err != nil {
+		t.Fatalf("failed to migrate test DB: %v", err)
+	}
+	repo := NewSubscriptionRepository(db)
+	sub := model.Subscription{Name: "Anime"}
+	if err := db.Create(&sub).Error; err != nil {
+		t.Fatalf("failed to create subscription: %v", err)
+	}
+	feeds := []model.SubscriptionFeed{
+		{SubscriptionID: sub.ID, Name: "A", RSSURL: "https://a.test/rss", RSSURLNormalized: "https://a.test/rss"},
+		{SubscriptionID: sub.ID, Name: "B", RSSURL: "https://b.test/rss", RSSURLNormalized: "https://b.test/rss"},
+	}
+	if err := db.Create(&feeds).Error; err != nil {
+		t.Fatalf("failed to create feeds: %v", err)
+	}
+	downloads := []model.Download{
+		{SubscriptionID: sub.ID, Title: "E01", TorrentURL: "https://x/1", TorrentHash: "feed-count-h1", Status: model.DownloadStatusDownloading},
+		{SubscriptionID: sub.ID, Title: "E02", TorrentURL: "https://x/2", TorrentHash: "feed-count-h2", Status: model.DownloadStatusDownloading},
+	}
+	if err := db.Create(&downloads).Error; err != nil {
+		t.Fatalf("failed to create downloads: %v", err)
+	}
+
+	rows, err := repo.GetSubscriptionsWithDownloadCount()
+	if err != nil {
+		t.Fatalf("GetSubscriptionsWithDownloadCount() error = %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("row count = %d, want 1", len(rows))
+	}
+	if rows[0].FeedCount != 2 {
+		t.Fatalf("feed count = %d, want 2", rows[0].FeedCount)
+	}
+	if rows[0].DownloadingCount != 2 {
+		t.Fatalf("downloading count = %d, want 2", rows[0].DownloadingCount)
 	}
 }

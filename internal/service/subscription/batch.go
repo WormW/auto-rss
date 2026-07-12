@@ -1,6 +1,7 @@
 package subscription
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/WormW/auto-rss/internal/model"
@@ -8,6 +9,7 @@ import (
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/mikan"
+	"github.com/WormW/auto-rss/internal/service/subscriptionfeed"
 )
 
 // ImportItem 批量导入项
@@ -39,11 +41,11 @@ type batchImporter struct {
 	bangumiEnricher  bangumi.Enricher
 	subscriptionRepo subscriptionRepository
 	configRepo       repository.ConfigRepository
+	creator          Creator
 }
 
 type subscriptionRepository interface {
 	List(offset, limit int) ([]model.Subscription, int64, error)
-	GetByRSSURLAndSeason(rssURL string, season int) (*model.Subscription, error)
 	Create(subscription *model.Subscription) error
 	Update(subscription *model.Subscription) error
 }
@@ -53,12 +55,18 @@ func NewBatchImporter(
 	bangumiEnricher bangumi.Enricher,
 	subscriptionRepo subscriptionRepository,
 	configRepo repository.ConfigRepository,
+	creators ...Creator,
 ) BatchImporter {
+	var creator Creator
+	if len(creators) > 0 {
+		creator = creators[0]
+	}
 	return &batchImporter{
 		mikanService:     mikanService,
 		bangumiEnricher:  bangumiEnricher,
 		subscriptionRepo: subscriptionRepo,
 		configRepo:       configRepo,
+		creator:          creator,
 	}
 }
 
@@ -190,22 +198,21 @@ func (b *batchImporter) Import(items []ImportItem) ([]ImportResult, error) {
 			logger.Warn("Failed to enrich subscription with Bangumi data", "title", item.Title, "error", err)
 		}
 
-		// 创建前数据库层面最终确认（防并发）
-		if subscription.RssURL != "" {
-			if _, dupErr := b.subscriptionRepo.GetByRSSURLAndSeason(subscription.RssURL, subscription.Season); dupErr == nil {
-				result.Skipped = true
-				result.Success = true
-				result.Message = "创建前检测到已存在,跳过"
-				results = append(results, result)
-				existingKeys[key] = true
-				continue
-			}
+		var createErr error
+		if b.creator != nil {
+			createErr = b.creator.Create(context.Background(), subscription, []subscriptionfeed.Input{{
+				Name:    selectedGroup.Name,
+				Fansub:  selectedGroup.Name,
+				RSSURL:  rssURL,
+				Enabled: true,
+			}})
+		} else {
+			createErr = b.subscriptionRepo.Create(subscription)
 		}
-
-		if err := b.subscriptionRepo.Create(subscription); err != nil {
-			result.Message = "创建订阅失败: " + err.Error()
+		if createErr != nil {
+			result.Message = "创建订阅失败: " + createErr.Error()
 			results = append(results, result)
-			logger.Error("Failed to create subscription", "title", item.Title, "error", err)
+			logger.Error("Failed to create subscription", "title", item.Title, "error", createErr)
 			continue
 		}
 
