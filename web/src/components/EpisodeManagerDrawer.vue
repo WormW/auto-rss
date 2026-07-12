@@ -610,6 +610,10 @@ const comparisonRows = computed<ComparisonRow[]>(() => {
   const candidateHash = summarizeHash(candidate.torrent_hash)
   const currentURL = displayValue(current.active_torrent_url)
   const candidateURL = displayValue(candidate.torrent_url)
+  const sourceFeed = candidate.source_feed_name || '未记录'
+  const sourceFansub = candidate.source_fansub || candidate.fansub || '未记录'
+  const relativeEpisode = current.episode
+  const originalEpisode = relativeEpisode + (candidate.source_episode_offset || 0)
 
   return [
     {
@@ -623,8 +627,29 @@ const comparisonRows = computed<ComparisonRow[]>(() => {
       key: 'fansub',
       label: '字幕组',
       current: currentFansub,
-      candidate: difference.fansub,
-      different: normalizedValuesDiffer(props.subscription?.fansub, candidate.fansub)
+      candidate: sourceFansub,
+      different: normalizedValuesDiffer(props.subscription?.fansub, sourceFansub)
+    },
+    {
+      key: 'source_feed',
+      label: '来源 feed',
+      current: '旧记录未保存来源',
+      candidate: sourceFeed,
+      different: true
+    },
+    {
+      key: 'original_episode',
+      label: '原始集数',
+      current: String(relativeEpisode),
+      candidate: String(originalEpisode),
+      different: originalEpisode !== relativeEpisode
+    },
+    {
+      key: 'relative_episode',
+      label: '相对集数',
+      current: String(relativeEpisode),
+      candidate: String(relativeEpisode),
+      different: false
     },
     {
       key: 'language',

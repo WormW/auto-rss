@@ -1,4 +1,5 @@
 import axios, { type AxiosError, type InternalAxiosRequestConfig } from 'axios'
+import type { SubscriptionFeedInput } from './subscription-feed'
 import {
   clearAuthTokens,
   getAccessToken,
@@ -154,6 +155,7 @@ export interface Subscription {
   bangumi_season?: number
   // 下载统计字段
   downloading_count?: number
+  feed_count?: number
   // 开播信息
   air_date?: string
   air_year?: number
@@ -284,6 +286,18 @@ export interface SubscriptionDiagnostics {
   name: string
   enabled: boolean
   checked_at: string
+  feeds: Array<{
+    subscription_feed_id: number
+    name: string
+    fansub: string
+    rss_url: string
+    status: 'healthy' | 'unhealthy' | 'dead' | 'unknown'
+    response_time_ms: number
+    error_message?: string
+    last_post_date?: string
+    last_success_at?: string
+    last_error?: string
+  }>
   summary: {
     overall: DiagnosticStatus
     healthy: number
@@ -478,7 +492,7 @@ export const subscriptionApi = {
     api.get(`/subscriptions/${id}/diagnostics`),
   retryFailed: (id: number) =>
     api.post(`/subscriptions/${id}/diagnostics/retry-failed`),
-  create: (data: Partial<Subscription>) =>
+  create: (data: Partial<Subscription> & { feeds?: SubscriptionFeedInput[] }) =>
     api.post('/subscriptions', data),
   preview: (data: Partial<Subscription> & { id?: number; limit?: number }) =>
     api.post('/subscriptions/preview', data),

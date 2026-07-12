@@ -42,6 +42,8 @@ type FeedHealthCheckResult struct {
 	ResponseTime       int64        `json:"response_time_ms"`
 	ErrorMessage       string       `json:"error_message,omitempty"`
 	LastPostDate       *time.Time   `json:"last_post_date,omitempty"`
+	LastSuccessAt      *time.Time   `json:"last_success_at,omitempty"`
+	LastError          string       `json:"last_error,omitempty"`
 }
 
 // HealthCheckResult 健康检查结果
@@ -136,6 +138,8 @@ func (c *RSSHealthChecker) checkFeed(ctx context.Context, feed *model.Subscripti
 		Fansub:             feed.Fansub,
 		RSSURL:             feed.RSSURL,
 		Status:             HealthStatusUnknown,
+		LastSuccessAt:      feed.LastSuccessAt,
+		LastError:          feed.LastError,
 	}
 	if feed.RSSURL == "" {
 		result.ErrorMessage = "RSS URL is empty"

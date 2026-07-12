@@ -29,12 +29,17 @@ func NewSubscriptionFeedHandler(
 }
 
 func registerSubscriptionFeedRoutes(group *gin.RouterGroup, handler *SubscriptionFeedHandler) {
+	group.POST("/feeds/preview", handler.PreviewDetached)
 	group.GET("/:id/feeds", handler.List)
 	group.POST("/:id/feeds", handler.Create)
 	group.PUT("/:id/feeds/:feedId", handler.Update)
 	group.DELETE("/:id/feeds/:feedId", handler.Delete)
 	group.POST("/:id/feeds/preview", handler.PreviewNew)
 	group.POST("/:id/feeds/:feedId/preview", handler.PreviewExisting)
+}
+
+func (h *SubscriptionFeedHandler) PreviewDetached(c *gin.Context) {
+	h.preview(c)
 }
 
 func RegisterSubscriptionFeedRoutes(group *gin.RouterGroup, handler *SubscriptionFeedHandler) {

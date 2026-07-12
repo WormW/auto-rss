@@ -66,6 +66,10 @@ export interface SubscriptionEpisode {
 export interface EpisodeResourceCandidate {
   id: number
   subscription_episode_id: number
+  subscription_feed_id: number | null
+  source_feed_name: string
+  source_fansub: string
+  source_episode_offset: number
   resource_key: string
   torrent_hash: string
   torrent_url: string

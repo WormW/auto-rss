@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/stretchr/testify/assert"
@@ -14,9 +15,10 @@ import (
 func TestCheckSubscriptionFeedsReportsHealthyWhenOneFeedWorks(t *testing.T) {
 	checker, server := newFeedHealthFixture(t)
 	sub := model.Subscription{ID: 1, Name: "Anime"}
+	lastSuccess := time.Now().UTC().Add(-time.Hour)
 	feeds := []model.SubscriptionFeed{
 		{ID: 10, SubscriptionID: 1, Name: "A", RSSURL: server.URL + "/dead", Enabled: true},
-		{ID: 11, SubscriptionID: 1, Name: "B", RSSURL: server.URL + "/healthy", Enabled: true},
+		{ID: 11, SubscriptionID: 1, Name: "B", RSSURL: server.URL + "/healthy", Enabled: true, LastSuccessAt: &lastSuccess, LastError: "previous timeout"},
 	}
 
 	result := checker.CheckSubscriptionFeeds(context.Background(), &sub, feeds)
@@ -25,6 +27,8 @@ func TestCheckSubscriptionFeedsReportsHealthyWhenOneFeedWorks(t *testing.T) {
 	require.Len(t, result.Feeds, 2)
 	assert.Equal(t, HealthStatusDead, result.Feeds[0].Status)
 	assert.Equal(t, HealthStatusHealthy, result.Feeds[1].Status)
+	assert.Equal(t, &lastSuccess, result.Feeds[1].LastSuccessAt)
+	assert.Equal(t, "previous timeout", result.Feeds[1].LastError)
 }
 
 func TestCheckSubscriptionFeedsIsDeadOnlyWhenAllEnabledFeedsAreDead(t *testing.T) {

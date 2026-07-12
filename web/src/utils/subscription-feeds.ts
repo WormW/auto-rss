@@ -15,6 +15,11 @@ export function normalizeFeedURLForComparison(raw: string): string {
   return parsed.toString()
 }
 
+export function hasDuplicateFeedURLs(feeds: SubscriptionFeedInput[]): boolean {
+  const urls = feeds.map((feed) => normalizeFeedURLForComparison(feed.rss_url))
+  return new Set(urls).size !== urls.length
+}
+
 function changed(before: SubscriptionFeedInput, after: SubscriptionFeedInput): boolean {
   return before.name !== after.name ||
     (before.fansub || '') !== (after.fansub || '') ||

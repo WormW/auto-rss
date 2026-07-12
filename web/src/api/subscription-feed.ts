@@ -24,11 +24,29 @@ export interface SubscriptionFeedInput {
   enabled: boolean
 }
 
+export interface SubscriptionFeedPreviewItem {
+  title: string
+  original_episode: number
+  episode_offset: number
+  relative_episode: number
+  valid: boolean
+  invalid_reason: string
+}
+
+export interface SubscriptionFeedPreview {
+  items: SubscriptionFeedPreviewItem[]
+  parsed_items: number
+  valid_items: number
+  warning?: string
+}
+
 export const subscriptionFeedApi = {
   list: (subscriptionId: number) => api.get(`/subscriptions/${subscriptionId}/feeds`),
-  preview: (subscriptionId: number, input: SubscriptionFeedInput, feedId?: number) =>
+  preview: (subscriptionId: number | undefined, input: SubscriptionFeedInput, feedId?: number) =>
     api.post(
-      feedId
+      subscriptionId === undefined
+        ? '/subscriptions/feeds/preview'
+        : feedId
         ? `/subscriptions/${subscriptionId}/feeds/${feedId}/preview`
         : `/subscriptions/${subscriptionId}/feeds/preview`,
       input

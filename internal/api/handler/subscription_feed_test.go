@@ -160,6 +160,15 @@ func TestFeedPreviewAndCRUDRoutes(t *testing.T) {
 	assert.Equal(t, http.StatusOK, created.Code, created.Body.String())
 }
 
+func TestFeedPreviewSupportsUnsavedSubscription(t *testing.T) {
+	fx := newSubscriptionFeedHandlerFixture(t)
+
+	preview := fx.postJSON("/subscriptions/feeds/preview", `{"rss_url":"https://a.test/rss","episode_offset":100}`)
+
+	assert.Equal(t, http.StatusOK, preview.Code, preview.Body.String())
+	assert.Contains(t, preview.Body.String(), `"relative_episode":1`)
+}
+
 func TestCreateAllowsSameFeedURLInDifferentSubscriptions(t *testing.T) {
 	fx := newSubscriptionFeedHandlerFixture(t)
 	first := fx.postJSON("/subscriptions", `{"name":"Anime A","season":1,"feeds":[{"name":"A","rss_url":"https://shared.test/rss","episode_offset":0,"enabled":true}]}`)
