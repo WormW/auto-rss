@@ -36,6 +36,13 @@ export interface CandidateDifferenceDescription {
   sourceRSSURL: string
 }
 
+export interface PaginatedItems<T> {
+  items: T[]
+  page: number
+  pageCount: number
+  total: number
+}
+
 const UNKNOWN_VALUE = '未知'
 
 const statusLabels: Record<EpisodeStatus, string> = {
@@ -73,6 +80,52 @@ const describeField = (
 }
 
 export const episodeStatusLabel = (status: EpisodeStatus): string => statusLabels[status]
+
+export const safeExternalURL = (value?: string | null): string | undefined => {
+  const normalized = normalizeValue(value)
+  if (!normalized) return undefined
+  try {
+    const parsed = new URL(normalized)
+    return ['http:', 'https:', 'magnet:'].includes(parsed.protocol.toLowerCase())
+      ? normalized
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+export const paginateItems = <T>(items: T[], requestedPage: number, requestedPageSize: number): PaginatedItems<T> => {
+  const pageSize = Math.max(1, Math.floor(requestedPageSize) || 1)
+  const pageCount = Math.max(1, Math.ceil(items.length / pageSize))
+  const page = Math.min(pageCount, Math.max(1, Math.floor(requestedPage) || 1))
+  const offset = (page - 1) * pageSize
+  return {
+    items: items.slice(offset, offset + pageSize),
+    page,
+    pageCount,
+    total: items.length
+  }
+}
+
+export const appendUniqueById = <T extends { id: number }>(current: T[], incoming: T[]): T[] => {
+  const merged = [...current]
+  const indexById = new Map(merged.map((item, index) => [item.id, index]))
+  for (const item of incoming) {
+    const existingIndex = indexById.get(item.id)
+    if (existingIndex == null) {
+      indexById.set(item.id, merged.length)
+      merged.push(item)
+    } else {
+      merged[existingIndex] = item
+    }
+  }
+  return merged
+}
+
+export const normalizedValuesDiffer = (
+  current?: string | null,
+  candidate?: string | null
+): boolean => normalizeValue(current) !== normalizeValue(candidate)
 
 export const episodeStatusType = (status: EpisodeStatus): EpisodeStatusTagType => statusTypes[status]
 

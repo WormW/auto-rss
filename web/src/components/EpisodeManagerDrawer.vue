@@ -92,12 +92,12 @@
 
         <section class="selection-toolbar" aria-label="批量操作">
           <n-checkbox
-            :checked="allVisibleSelected"
-            :indeterminate="someVisibleSelected"
-            :disabled="visibleEpisodes.length === 0"
-            @update:checked="toggleAllVisible"
+            :checked="allPageSelected"
+            :indeterminate="somePageSelected"
+            :disabled="currentPageEpisodes.length === 0"
+            @update:checked="toggleCurrentPage"
           >
-            选择当前筛选
+            选择当前页
           </n-checkbox>
           <span class="selection-count numeric">已选择 {{ selectedEpisodeNumbers.length }} 集</span>
           <div class="batch-actions">
@@ -139,9 +139,9 @@
         </section>
 
         <n-spin :show="loading" class="episode-grid-loading">
-          <div v-if="visibleEpisodes.length > 0" class="episode-grid" aria-live="polite">
+          <div v-if="visibleEpisodes.length > 0" class="episode-grid">
             <div
-              v-for="item in visibleEpisodes"
+              v-for="item in currentPageEpisodes"
               :key="item.episode"
               class="episode-cell"
               :class="[
@@ -181,8 +181,20 @@
             </div>
           </div>
 
+          <div v-if="episodePageCount > 1" class="episode-pagination">
+            <span class="page-status" role="status" aria-live="polite">
+              第 {{ normalizedEpisodePage }} / {{ episodePageCount }} 页
+            </span>
+            <n-pagination
+              :page="normalizedEpisodePage"
+              :page-count="episodePageCount"
+              :page-slot="5"
+              @update:page="episodePage = $event"
+            />
+          </div>
+
           <n-empty
-            v-else-if="!loading && !loadError"
+            v-if="visibleEpisodes.length === 0 && !loading && !loadError"
             :description="episodes.length === 0 ? '尚无剧集记录' : '当前筛选没有剧集'"
             class="episode-empty"
           >
@@ -234,6 +246,16 @@
           />
         </div>
 
+        <div v-if="candidateHasMore" class="candidate-load-more">
+          <n-button
+            :loading="candidateLoadingMore"
+            :disabled="candidateLoadingMore"
+            @click="loadMoreCandidates"
+          >
+            加载更多候选
+          </n-button>
+        </div>
+
         <div class="resource-comparison" role="table" aria-label="现有资源与候选资源比较">
           <div class="comparison-head" role="row">
             <span role="columnheader">字段</span>
@@ -254,7 +276,7 @@
               class="comparison-value"
               :href="row.linkCurrent || undefined"
               :target="row.linkCurrent ? '_blank' : undefined"
-              :rel="row.linkCurrent ? 'noreferrer' : undefined"
+              :rel="row.linkCurrent ? 'noopener noreferrer' : undefined"
               :title="row.currentTitle"
             >
               {{ row.current }}
@@ -265,7 +287,7 @@
               class="comparison-value candidate-value"
               :href="row.linkCandidate || undefined"
               :target="row.linkCandidate ? '_blank' : undefined"
-              :rel="row.linkCandidate ? 'noreferrer' : undefined"
+              :rel="row.linkCandidate ? 'noopener noreferrer' : undefined"
               :title="row.candidateTitle"
             >
               {{ row.candidate }}
@@ -338,7 +360,7 @@
           v-if="availableCandidateActions.includes('retry_cleanup')"
           type="warning"
           :loading="candidateActionLoading === 'cleanup'"
-          :disabled="Boolean(candidateActionLoading)"
+          :disabled="Boolean(candidateActionLoading) || replacementTaskRunning"
           @click="retryCleanup"
         >
           重试清理
@@ -360,6 +382,7 @@ import {
   NIcon,
   NInputNumber,
   NModal,
+  NPagination,
   NProgress,
   NSelect,
   NSpin,
@@ -391,12 +414,16 @@ import {
   type Task
 } from '@/api'
 import {
+  appendUniqueById,
   candidateAvailableActions,
   continuousOwnedEpisode,
   describeCandidateDifference,
   episodeStatusLabel,
   filterEpisodes,
+  normalizedValuesDiffer,
+  paginateItems,
   planEpisodeStatusUpdate,
+  safeExternalURL,
   type EpisodeFilter
 } from '@/utils/episode-ledger'
 
@@ -421,6 +448,9 @@ interface ComparisonRow {
   candidateTitle?: string
 }
 
+const EPISODE_PAGE_SIZE = 120
+const CANDIDATE_PAGE_SIZE = 100
+
 const props = defineProps<{
   show: boolean
   subscription: Subscription | null
@@ -428,6 +458,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:show': [value: boolean]
+  changed: []
 }>()
 
 const dialog = useDialog()
@@ -438,6 +469,7 @@ const loading = ref(false)
 const loadError = ref('')
 const operationNotice = ref<OperationNotice | null>(null)
 const activeFilter = ref<EpisodeFilter>('all')
+const episodePage = ref(1)
 const selectedEpisodeNumbers = ref<number[]>([])
 const localEpisodeNumbers = ref<number[]>([])
 const manualEpisodeNumber = ref<number | null>(null)
@@ -445,14 +477,21 @@ const updatingStatus = ref<EditableEpisodeStatus | ''>('')
 
 const candidateModalOpen = ref(false)
 const candidateLoading = ref(false)
+const candidateLoadingMore = ref(false)
 const candidateError = ref('')
+const candidateHasMore = ref(false)
+const candidateOffset = ref(0)
 const candidates = ref<EpisodeResourceCandidate[]>([])
 const selectedEpisode = ref<SubscriptionEpisode | null>(null)
 const selectedCandidateId = ref<number | null>(null)
 const candidateActionLoading = ref<'keep' | 'replace' | 'cleanup' | ''>('')
 const replacementTask = ref<Task | null>(null)
 const activeTaskId = ref('')
-let taskPollTimer: ReturnType<typeof setInterval> | null = null
+let episodeRequestGeneration = 0
+let candidateRequestGeneration = 0
+let taskPollGeneration = 0
+let taskPollTimer: ReturnType<typeof setTimeout> | null = null
+let taskPollScopeKey = ''
 
 const candidateModalStyle = {
   width: 'min(920px, calc(100vw - 24px))',
@@ -474,9 +513,12 @@ const pendingCandidateCount = computed(() => episodes.value.reduce(
 const candidateEpisodeCount = computed(() => episodes.value.filter(
   item => item.action_required_candidate_count > 0
 ).length)
+const episodeNumberSet = computed(() => new Set(episodes.value.map(item => item.episode)))
+const selectedEpisodeSet = computed(() => new Set(selectedEpisodeNumbers.value))
+const localEpisodeSet = computed(() => new Set(localEpisodeNumbers.value))
 
 const localEpisodes = computed<DisplayEpisode[]>(() => localEpisodeNumbers.value
-  .filter(number => !episodes.value.some(item => item.episode === number))
+  .filter(number => !episodeNumberSet.value.has(number))
   .map(number => ({
     id: -number,
     subscription_id: props.subscription?.id || 0,
@@ -501,9 +543,13 @@ const visibleEpisodes = computed<DisplayEpisode[]>(() => {
     .sort((left, right) => left.episode - right.episode)
 })
 
-const visibleEpisodeNumbers = computed(() => visibleEpisodes.value.map(item => item.episode))
-const allVisibleSelected = computed(() => visibleEpisodeNumbers.value.length > 0 && visibleEpisodeNumbers.value.every(isSelected))
-const someVisibleSelected = computed(() => !allVisibleSelected.value && visibleEpisodeNumbers.value.some(isSelected))
+const paginatedEpisodes = computed(() => paginateItems(visibleEpisodes.value, episodePage.value, EPISODE_PAGE_SIZE))
+const currentPageEpisodes = computed(() => paginatedEpisodes.value.items)
+const normalizedEpisodePage = computed(() => paginatedEpisodes.value.page)
+const episodePageCount = computed(() => paginatedEpisodes.value.pageCount)
+const currentPageEpisodeNumbers = computed(() => currentPageEpisodes.value.map(item => item.episode))
+const allPageSelected = computed(() => currentPageEpisodeNumbers.value.length > 0 && currentPageEpisodeNumbers.value.every(isSelected))
+const somePageSelected = computed(() => !allPageSelected.value && currentPageEpisodeNumbers.value.some(isSelected))
 const restorePlan = computed(() => planEpisodeStatusUpdate(
   episodes.value,
   selectedEpisodeNumbers.value,
@@ -525,6 +571,13 @@ const candidateDifference = computed(() => {
 const availableCandidateActions = computed(() => selectedCandidate.value
   ? candidateAvailableActions(selectedCandidate.value.status)
   : [])
+const replacementTaskRunning = computed(() => (
+  replacementTask.value?.status === 'pending' || replacementTask.value?.status === 'running'
+))
+const selectedCandidateScopeKey = computed(() => {
+  if (!props.subscription || !selectedEpisode.value || selectedCandidateId.value == null) return ''
+  return `${props.subscription.id}:${selectedEpisode.value.episode}:${selectedCandidateId.value}`
+})
 
 const comparisonRows = computed<ComparisonRow[]>(() => {
   const current = selectedEpisode.value
@@ -554,14 +607,14 @@ const comparisonRows = computed<ComparisonRow[]>(() => {
       label: '字幕组',
       current: currentFansub,
       candidate: difference.fansub,
-      different: currentFansub !== difference.fansub
+      different: normalizedValuesDiffer(props.subscription?.fansub, candidate.fansub)
     },
     {
       key: 'language',
       label: '语言',
       current: currentLanguage,
       candidate: difference.language,
-      different: currentLanguage !== difference.language
+      different: normalizedValuesDiffer(props.subscription?.language, candidate.language)
     },
     {
       key: 'time',
@@ -585,8 +638,8 @@ const comparisonRows = computed<ComparisonRow[]>(() => {
       current: currentURL,
       candidate: candidateURL,
       different: difference.url.different,
-      linkCurrent: current.active_torrent_url || undefined,
-      linkCandidate: candidate.torrent_url || undefined
+      linkCurrent: safeExternalURL(current.active_torrent_url),
+      linkCandidate: safeExternalURL(candidate.torrent_url)
     }
   ]
 })
@@ -594,7 +647,11 @@ const comparisonRows = computed<ComparisonRow[]>(() => {
 watch(
   () => [props.show, props.subscription?.id] as const,
   ([show, subscriptionId], previous) => {
-    if (!show || !subscriptionId) return
+    if (!show || !subscriptionId) {
+      invalidateEpisodeRequests()
+      closeCandidateModal()
+      return
+    }
     if (!previous || previous[1] !== subscriptionId) {
       resetDrawerState()
     }
@@ -603,22 +660,44 @@ watch(
   { immediate: true }
 )
 
-watch(selectedCandidate, candidate => {
+watch(activeFilter, () => {
+  episodePage.value = 1
+})
+
+watch(() => visibleEpisodes.value.length, () => {
+  episodePage.value = paginateItems(visibleEpisodes.value, episodePage.value, EPISODE_PAGE_SIZE).page
+})
+
+watch(selectedCandidateScopeKey, scopeKey => {
+  candidateActionLoading.value = ''
   replacementTask.value = null
   activeTaskId.value = ''
   stopTaskPolling()
-  if (candidate?.status === 'replacing') {
-    void pollReplacementTask()
+  if (scopeKey && selectedCandidate.value?.status === 'replacing') {
+    startTaskPolling()
   }
 })
 
-onBeforeUnmount(stopTaskPolling)
+watch(() => selectedCandidate.value?.status, status => {
+  if (status === 'replacing' && selectedCandidateScopeKey.value && !replacementTaskRunning.value) {
+    startTaskPolling()
+  } else if (status && status !== 'replacing' && !activeTaskId.value && !replacementTaskRunning.value) {
+    stopTaskPolling()
+  }
+})
+
+onBeforeUnmount(() => {
+  invalidateEpisodeRequests()
+  closeCandidateModal()
+})
 
 function resetDrawerState() {
+  invalidateEpisodeRequests()
   episodes.value = []
   loadError.value = ''
   operationNotice.value = null
   activeFilter.value = 'all'
+  episodePage.value = 1
   selectedEpisodeNumbers.value = []
   localEpisodeNumbers.value = []
   manualEpisodeNumber.value = null
@@ -626,18 +705,25 @@ function resetDrawerState() {
 }
 
 function handleDrawerVisibility(value: boolean) {
+  if (!value) {
+    invalidateEpisodeRequests()
+    closeCandidateModal()
+  }
   emit('update:show', value)
 }
 
 async function loadEpisodes() {
-  if (!props.subscription) return
+  const subscriptionId = props.subscription?.id
+  if (!subscriptionId || !props.show) return
+  const generation = ++episodeRequestGeneration
   loading.value = true
   loadError.value = ''
   try {
-    const response = await episodeApi.list(props.subscription.id)
+    const response = await episodeApi.list(subscriptionId)
+    if (!episodeRequestIsCurrent(generation, subscriptionId)) return
     episodes.value = response.data || []
     localEpisodeNumbers.value = localEpisodeNumbers.value.filter(number => (
-      !episodes.value.some(item => item.episode === number)
+      !episodeNumberSet.value.has(number)
     ))
     if (selectedEpisode.value) {
       selectedEpisode.value = episodes.value.find(
@@ -645,10 +731,21 @@ async function loadEpisodes() {
       ) || selectedEpisode.value
     }
   } catch (error: any) {
+    if (!episodeRequestIsCurrent(generation, subscriptionId)) return
     loadError.value = apiErrorMessage(error, '加载剧集记录失败')
   } finally {
-    loading.value = false
+    if (episodeRequestIsCurrent(generation, subscriptionId)) loading.value = false
   }
+}
+
+function invalidateEpisodeRequests() {
+  episodeRequestGeneration++
+  loading.value = false
+}
+
+function episodeRequestIsCurrent(generation: number, subscriptionId: number) {
+  return generation === episodeRequestGeneration &&
+    props.show && props.subscription?.id === subscriptionId
 }
 
 function statusCount(status: EpisodeStatus) {
@@ -660,11 +757,11 @@ function episodeCellStatus(item: DisplayEpisode) {
 }
 
 function isLocalEpisode(episodeNumber: number) {
-  return localEpisodeNumbers.value.includes(episodeNumber)
+  return localEpisodeSet.value.has(episodeNumber)
 }
 
 function isSelected(episodeNumber: number) {
-  return selectedEpisodeNumbers.value.includes(episodeNumber)
+  return selectedEpisodeSet.value.has(episodeNumber)
 }
 
 function setEpisodeSelected(episodeNumber: number, checked: boolean) {
@@ -681,12 +778,12 @@ function toggleEpisode(episodeNumber: number) {
   setEpisodeSelected(episodeNumber, !isSelected(episodeNumber))
 }
 
-function toggleAllVisible(checked: boolean) {
-  const visible = new Set(visibleEpisodeNumbers.value)
+function toggleCurrentPage(checked: boolean) {
+  const visible = new Set(currentPageEpisodeNumbers.value)
   if (checked) {
     selectedEpisodeNumbers.value = [...new Set([
       ...selectedEpisodeNumbers.value,
-      ...visibleEpisodeNumbers.value
+      ...currentPageEpisodeNumbers.value
     ])].sort((a, b) => a - b)
   } else {
     selectedEpisodeNumbers.value = selectedEpisodeNumbers.value.filter(number => !visible.has(number))
@@ -699,11 +796,13 @@ function addManualEpisode() {
     operationNotice.value = { type: 'warning', text: '集数必须是 1 到 10000 之间的整数。' }
     return
   }
-  if (!episodes.value.some(item => item.episode === value) && !localEpisodeNumbers.value.includes(value)) {
+  if (!episodeNumberSet.value.has(value) && !localEpisodeSet.value.has(value)) {
     localEpisodeNumbers.value = [...localEpisodeNumbers.value, value].sort((a, b) => a - b)
   }
   setEpisodeSelected(value, true)
   activeFilter.value = 'all'
+  const visibleIndex = visibleEpisodes.value.findIndex(item => item.episode === value)
+  episodePage.value = visibleIndex >= 0 ? Math.floor(visibleIndex / EPISODE_PAGE_SIZE) + 1 : 1
   operationNotice.value = { type: 'info', text: `已选择第 ${value} 集，可继续执行批量状态操作。` }
   manualEpisodeNumber.value = null
 }
@@ -735,6 +834,7 @@ async function applyStatus(status: EditableEpisodeStatus) {
           text: `已更新 ${plan.eligible.length} 集，另有 ${skipped} 集未变更${plan.blocked.length ? '（活动下载中的集数已跳过）' : ''}。`
         }
       : { type: 'success', text: `已更新 ${plan.eligible.length} 集。` }
+    emit('changed')
     await loadEpisodes()
   } catch (error: any) {
     operationNotice.value = { type: 'error', text: apiErrorMessage(error, '批量更新失败') }
@@ -746,34 +846,72 @@ async function applyStatus(status: EditableEpisodeStatus) {
 async function openCandidates(episode: SubscriptionEpisode) {
   selectedEpisode.value = episode
   candidateModalOpen.value = true
-  await loadCandidates(episode.episode)
+  await loadCandidates(episode.episode, false)
 }
 
-async function loadCandidates(episodeNumber: number) {
-  if (!props.subscription) return
-  candidateLoading.value = true
-  candidateError.value = ''
+async function loadCandidates(episodeNumber: number, append: boolean) {
+  const subscriptionId = props.subscription?.id
+  if (!subscriptionId || !props.show || !candidateModalOpen.value || selectedEpisode.value?.episode !== episodeNumber) return
+  if (append && (candidateLoadingMore.value || !candidateHasMore.value)) return
+  const generation = ++candidateRequestGeneration
+  const offset = append ? candidateOffset.value : 0
+  if (append) {
+    candidateLoadingMore.value = true
+  } else {
+    candidateLoading.value = true
+    candidateError.value = ''
+    candidateOffset.value = 0
+    candidates.value = []
+  }
   try {
-    const response = await episodeApi.listCandidates(props.subscription.id, episodeNumber, { limit: 100 })
-    candidates.value = response.data || []
+    const response = await episodeApi.listCandidates(subscriptionId, episodeNumber, {
+      limit: CANDIDATE_PAGE_SIZE,
+      offset
+    })
+    if (!candidateRequestIsCurrent(generation, subscriptionId, episodeNumber)) return
+    const batch = response.data || []
+    candidates.value = append ? appendUniqueById(candidates.value, batch) : batch
+    candidateOffset.value = append ? candidateOffset.value + batch.length : batch.length
+    candidateHasMore.value = batch.length === CANDIDATE_PAGE_SIZE
     const actionable = candidates.value.find(candidate => candidateAvailableActions(candidate.status).length > 0)
     const selectionExists = candidates.value.some(candidate => candidate.id === selectedCandidateId.value)
     if (!selectionExists) {
       selectedCandidateId.value = actionable?.id || candidates.value[0]?.id || null
     }
   } catch (error: any) {
-    candidates.value = []
-    selectedCandidateId.value = null
-    candidateError.value = apiErrorMessage(error, '加载资源候选失败')
+    if (!candidateRequestIsCurrent(generation, subscriptionId, episodeNumber)) return
+    if (append) {
+      message.error(apiErrorMessage(error, '加载更多资源候选失败'))
+    } else {
+      candidates.value = []
+      selectedCandidateId.value = null
+      candidateHasMore.value = false
+      candidateError.value = apiErrorMessage(error, '加载资源候选失败')
+    }
   } finally {
-    candidateLoading.value = false
+    if (candidateRequestIsCurrent(generation, subscriptionId, episodeNumber)) {
+      candidateLoading.value = false
+      candidateLoadingMore.value = false
+    }
   }
 }
 
 function reloadSelectedCandidates() {
   if (selectedEpisode.value) {
-    void loadCandidates(selectedEpisode.value.episode)
+    void loadCandidates(selectedEpisode.value.episode, false)
   }
+}
+
+function loadMoreCandidates() {
+  if (selectedEpisode.value) {
+    void loadCandidates(selectedEpisode.value.episode, true)
+  }
+}
+
+function candidateRequestIsCurrent(generation: number, subscriptionId: number, episodeNumber: number) {
+  return generation === candidateRequestGeneration &&
+    props.show && props.subscription?.id === subscriptionId && candidateModalOpen.value &&
+    selectedEpisode.value?.episode === episodeNumber
 }
 
 function handleCandidateModalVisibility(value: boolean) {
@@ -782,8 +920,13 @@ function handleCandidateModalVisibility(value: boolean) {
 }
 
 function closeCandidateModal() {
+  candidateRequestGeneration++
   candidateModalOpen.value = false
+  candidateLoading.value = false
+  candidateLoadingMore.value = false
   candidateError.value = ''
+  candidateHasMore.value = false
+  candidateOffset.value = 0
   candidates.value = []
   selectedCandidateId.value = null
   selectedEpisode.value = null
@@ -799,12 +942,14 @@ async function keepExisting() {
   candidateActionLoading.value = 'keep'
   try {
     await episodeApi.keepExisting(scope.subscriptionId, scope.episode, scope.candidateId)
+    if (!candidateScopeIsCurrent(scope)) return
     message.success('已保留现有资源')
-    await Promise.all([loadEpisodes(), loadCandidates(scope.episode)])
+    emit('changed')
+    await Promise.all([loadEpisodes(), loadCandidates(scope.episode, false)])
   } catch (error: any) {
-    message.error(apiErrorMessage(error, '保留现有资源失败'))
+    if (candidateScopeIsCurrent(scope)) message.error(apiErrorMessage(error, '保留现有资源失败'))
   } finally {
-    candidateActionLoading.value = ''
+    if (candidateScopeIsCurrent(scope)) candidateActionLoading.value = ''
   }
 }
 
@@ -833,6 +978,7 @@ async function startReplacement() {
   candidateActionLoading.value = 'replace'
   try {
     const response = await episodeApi.replace(scope.subscriptionId, scope.episode, scope.candidateId)
+    if (!candidateScopeIsCurrent(scope)) return false
     activeTaskId.value = response.data.task_id
     replacementTask.value = {
       id: response.data.task_id,
@@ -844,14 +990,15 @@ async function startReplacement() {
       message: '任务已启动'
     }
     message.success('替换任务已启动')
-    await loadCandidates(scope.episode)
+    await loadCandidates(scope.episode, false)
+    if (!candidateScopeIsCurrent(scope)) return false
     startTaskPolling()
     return true
   } catch (error: any) {
-    message.error(apiErrorMessage(error, '启动替换任务失败'))
+    if (candidateScopeIsCurrent(scope)) message.error(apiErrorMessage(error, '启动替换任务失败'))
     return false
   } finally {
-    candidateActionLoading.value = ''
+    if (candidateScopeIsCurrent(scope)) candidateActionLoading.value = ''
   }
 }
 
@@ -861,6 +1008,7 @@ async function retryCleanup() {
   candidateActionLoading.value = 'cleanup'
   try {
     const response = await episodeApi.retryCleanup(scope.subscriptionId, scope.episode, scope.candidateId)
+    if (!candidateScopeIsCurrent(scope)) return
     activeTaskId.value = response.data.task_id
     replacementTask.value = {
       id: response.data.task_id,
@@ -872,12 +1020,13 @@ async function retryCleanup() {
       message: '清理任务已启动'
     }
     message.success('清理任务已启动')
-    await loadCandidates(scope.episode)
+    await loadCandidates(scope.episode, false)
+    if (!candidateScopeIsCurrent(scope)) return
     startTaskPolling()
   } catch (error: any) {
-    message.error(apiErrorMessage(error, '启动清理重试失败'))
+    if (candidateScopeIsCurrent(scope)) message.error(apiErrorMessage(error, '启动清理重试失败'))
   } finally {
-    candidateActionLoading.value = ''
+    if (candidateScopeIsCurrent(scope)) candidateActionLoading.value = ''
   }
 }
 
@@ -890,24 +1039,35 @@ function candidateScope() {
   }
 }
 
+function candidateScopeIsCurrent(scope: NonNullable<ReturnType<typeof candidateScope>>) {
+  return props.show && candidateModalOpen.value && props.subscription?.id === scope.subscriptionId &&
+    selectedEpisode.value?.episode === scope.episode && selectedCandidateId.value === scope.candidateId
+}
+
 function startTaskPolling() {
+  const scope = candidateScope()
+  if (!scope) return
+  if (taskPollScopeKey === selectedCandidateScopeKey.value) return
   stopTaskPolling()
-  void pollReplacementTask()
-  taskPollTimer = setInterval(() => void pollReplacementTask(), 2000)
+  taskPollScopeKey = selectedCandidateScopeKey.value
+  const generation = taskPollGeneration
+  void pollReplacementTask(generation, scope)
 }
 
 function stopTaskPolling() {
+  taskPollGeneration++
+  taskPollScopeKey = ''
   if (taskPollTimer) {
-    clearInterval(taskPollTimer)
+    clearTimeout(taskPollTimer)
     taskPollTimer = null
   }
 }
 
-async function pollReplacementTask() {
-  if (!props.subscription || !candidateModalOpen.value) {
-    stopTaskPolling()
-    return
-  }
+async function pollReplacementTask(
+  generation: number,
+  scope: NonNullable<ReturnType<typeof candidateScope>>
+) {
+  if (!taskPollIsCurrent(generation, scope)) return
   try {
     const [currentResponse, historyResponse] = await Promise.all([
       taskApi.getCurrent(),
@@ -915,9 +1075,11 @@ async function pollReplacementTask() {
     ])
     const current = (currentResponse as any).data?.current as Task | null
     const history = ((historyResponse as any).data || []) as Task[]
-    let task = activeTaskId.value
-      ? [current, ...history].find(item => item?.id === activeTaskId.value) || null
-      : current?.type === 'replacement' && current.subscription_id === props.subscription.id
+    if (!taskPollIsCurrent(generation, scope)) return
+    const taskId = activeTaskId.value
+    const task = taskId
+      ? [current, ...history].find(item => item?.id === taskId) || null
+      : current?.type === 'replacement' && current.subscription_id === scope.subscriptionId
         ? current
         : null
 
@@ -929,17 +1091,36 @@ async function pollReplacementTask() {
       if (task.status === 'completed') message.success('资源候选任务已完成')
       else if (task.status === 'failed') message.error(task.error || '资源候选任务失败')
       else message.warning('资源候选任务已取消')
-      const episodeNumber = selectedEpisode.value?.episode
+      emit('changed')
       await loadEpisodes()
-      if (episodeNumber) await loadCandidates(episodeNumber)
+      await loadCandidates(scope.episode, false)
       return
     }
-    if (!taskPollTimer && selectedCandidate.value?.status === 'replacing') {
-      taskPollTimer = setInterval(() => void pollReplacementTask(), 2000)
+
+    if (!task && selectedCandidate.value && selectedCandidate.value.status !== 'replacing') {
+      replacementTask.value = null
+      activeTaskId.value = ''
+      stopTaskPolling()
+      return
     }
   } catch (error) {
+    if (!taskPollIsCurrent(generation, scope)) return
     console.error('Failed to poll replacement task:', error)
   }
+
+  if (taskPollIsCurrent(generation, scope)) {
+    taskPollTimer = setTimeout(() => {
+      taskPollTimer = null
+      void pollReplacementTask(generation, scope)
+    }, 2000)
+  }
+}
+
+function taskPollIsCurrent(
+  generation: number,
+  scope: NonNullable<ReturnType<typeof candidateScope>>
+) {
+  return generation === taskPollGeneration && candidateScopeIsCurrent(scope)
 }
 
 function candidateStatusLabel(status: CandidateStatus) {
@@ -1195,6 +1376,25 @@ function apiErrorMessage(error: any, fallback: string) {
   align-items: start;
 }
 
+.episode-pagination {
+  margin-top: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.page-status {
+  color: #6b7280;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.episode-pagination :deep(.n-pagination-item) {
+  min-width: 40px;
+  min-height: 40px;
+}
+
 .episode-cell {
   position: relative;
   min-width: 0;
@@ -1368,6 +1568,16 @@ function apiErrorMessage(error: any, fallback: string) {
   --n-height: 40px !important;
 }
 
+.candidate-load-more {
+  margin-bottom: 12px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.candidate-load-more :deep(.n-button) {
+  min-height: 40px;
+}
+
 .resource-comparison {
   overflow: hidden;
   border-radius: 8px;
@@ -1520,6 +1730,11 @@ a.comparison-value {
     grid-row: 2;
   }
 
+  .episode-pagination {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
   .episode-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 8px;
@@ -1531,7 +1746,15 @@ a.comparison-value {
   }
 
   .comparison-head > :last-child {
-    display: none;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
 
   .candidate-value {

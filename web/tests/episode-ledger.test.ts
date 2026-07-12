@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import type { EpisodeResourceCandidate, SubscriptionEpisode } from '../src/api/episode.ts'
 import {
+  appendUniqueById,
   candidateAvailableActions,
   canRestoreMissing,
   continuousOwnedEpisode,
@@ -10,8 +11,11 @@ import {
   episodeStatusLabel,
   episodeStatusType,
   filterEpisodes,
+  normalizedValuesDiffer,
+  paginateItems,
   planEpisodeStatusUpdate,
-  isEpisodeOwned
+  isEpisodeOwned,
+  safeExternalURL
 } from '../src/utils/episode-ledger.ts'
 
 const episode = (overrides: Partial<SubscriptionEpisode> = {}): SubscriptionEpisode => ({
@@ -196,4 +200,50 @@ test('候选状态只暴露后端允许的操作', () => {
   assert.deepEqual(candidateAvailableActions('accepted_cleanup_failed'), ['retry_cleanup'])
   assert.deepEqual(candidateAvailableActions('accepted'), [])
   assert.deepEqual(candidateAvailableActions('kept_existing'), [])
+})
+
+test('资源外链只允许 http、https 和 magnet scheme', () => {
+  assert.equal(safeExternalURL(' https://example.com/a '), 'https://example.com/a')
+  assert.equal(safeExternalURL('HTTP://example.com/a'), 'HTTP://example.com/a')
+  assert.equal(safeExternalURL('magnet:?xt=urn:btih:abc'), 'magnet:?xt=urn:btih:abc')
+  assert.equal(safeExternalURL('javascript:alert(1)'), undefined)
+  assert.equal(safeExternalURL('data:text/html,test'), undefined)
+  assert.equal(safeExternalURL('file:///tmp/a'), undefined)
+  assert.equal(safeExternalURL('//example.com/a'), undefined)
+  assert.equal(safeExternalURL('/relative'), undefined)
+  assert.equal(safeExternalURL(''), undefined)
+})
+
+test('一万集分页只返回当前页并将越界页码收敛到有效范围', () => {
+  const episodes = Array.from({ length: 10_000 }, (_, index) => index + 1)
+  const middle = paginateItems(episodes, 2, 120)
+  assert.equal(middle.page, 2)
+  assert.equal(middle.pageCount, 84)
+  assert.equal(middle.items.length, 120)
+  assert.equal(middle.items[0], 121)
+  assert.equal(middle.items.at(-1), 240)
+
+  const clamped = paginateItems(episodes, 999, 120)
+  assert.equal(clamped.page, 84)
+  assert.equal(clamped.items.length, 40)
+  assert.equal(clamped.items[0], 9961)
+  assert.equal(clamped.items.at(-1), 10_000)
+})
+
+test('候选加载更多按 ID 去重、更新旧项并保持顺序', () => {
+  const merged = appendUniqueById(
+    [{ id: 1, value: 'a' }, { id: 2, value: 'old' }],
+    [{ id: 2, value: 'new' }, { id: 3, value: 'c' }]
+  )
+  assert.deepEqual(merged, [
+    { id: 1, value: 'a' },
+    { id: 2, value: 'new' },
+    { id: 3, value: 'c' }
+  ])
+})
+
+test('字幕组和语言差异使用原始值 trim 后比较', () => {
+  assert.equal(normalizedValuesDiffer(' Group ', 'Group'), false)
+  assert.equal(normalizedValuesDiffer('', null), false)
+  assert.equal(normalizedValuesDiffer('CHS', 'CHT'), true)
 })

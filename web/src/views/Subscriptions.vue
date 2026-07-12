@@ -536,6 +536,7 @@
     <EpisodeManagerDrawer
       v-model:show="showEpisodeManager"
       :subscription="episodeManagerSub"
+      @changed="loadSubscriptions"
     />
 
     <!-- 偏移量快速编辑弹窗 -->

@@ -59,10 +59,27 @@ test('剧集管理新增交互目标保持至少 40px 点击区域', () => {
     /\.manual-episode-input > :deep\(\.n-button\)\s*\{[^}]*min-height:\s*40px;/s,
     /\.candidate-select :deep\(\.n-base-selection\)\s*\{[^}]*min-height:\s*40px;/s,
     /\.selection-toolbar :deep\(\.n-checkbox\)\s*\{[^}]*min-height:\s*40px;/s,
-    /\.error-retry-button\s*\{[^}]*min-width:\s*40px;[^}]*min-height:\s*40px;/s
+    /\.error-retry-button\s*\{[^}]*min-width:\s*40px;[^}]*min-height:\s*40px;/s,
+    /\.episode-pagination :deep\(\.n-pagination-item\)\s*\{[^}]*min-width:\s*40px;[^}]*min-height:\s*40px;/s,
+    /\.candidate-load-more :deep\(\.n-button\)\s*\{[^}]*min-height:\s*40px;/s
   ]
 
   for (const rule of fortyPixelRules) {
     assert.match(drawer, rule)
   }
+})
+
+test('候选分页和任务轮询在刷新及切换 scope 时保持隔离', () => {
+  const drawer = readFileSync(
+    new URL('../src/components/EpisodeManagerDrawer.vue', import.meta.url),
+    'utf8'
+  )
+
+  assert.match(drawer, /const candidateOffset = ref\(0\)/)
+  assert.match(drawer, /const offset = append \? candidateOffset\.value : 0/)
+  assert.match(drawer, /candidateOffset\.value = append \? candidateOffset\.value \+ batch\.length : batch\.length/)
+  assert.match(drawer, /watch\(selectedCandidateScopeKey,[\s\S]*?candidateActionLoading\.value = ''/)
+  assert.match(drawer, /if \(taskPollScopeKey === selectedCandidateScopeKey\.value\) return/)
+  assert.match(drawer, /if \(!task && selectedCandidate\.value && selectedCandidate\.value\.status !== 'replacing'\)/)
+  assert.match(drawer, /await episodeApi\.keepExisting[\s\S]*?emit\('changed'\)[\s\S]*?await Promise\.all/)
 })
