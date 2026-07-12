@@ -7,6 +7,11 @@ export type EpisodeStatus =
   | 'marked_downloaded'
   | 'ignored'
 
+export type EditableEpisodeStatus = Extract<
+  EpisodeStatus,
+  'missing' | 'marked_downloaded' | 'ignored'
+>
+
 export type EpisodeStatusSource = 'automatic' | 'user' | 'migration'
 
 export type CandidateStatus =
@@ -90,7 +95,7 @@ export interface EpisodeCandidateListParams {
 
 export interface EpisodeStatusUpdateResult {
   episodes: number[]
-  status: EpisodeStatus
+  status: EditableEpisodeStatus
 }
 
 export interface EpisodeTaskResult {
@@ -106,7 +111,7 @@ export const episodeApi = {
     >(
       `/subscriptions/${subscriptionId}/episodes`
     ),
-  updateStatus: (subscriptionId: number, episodes: number[], status: EpisodeStatus) =>
+  updateStatus: (subscriptionId: number, episodes: number[], status: EditableEpisodeStatus) =>
     api.put<
       EpisodeApiResponse<EpisodeStatusUpdateResult>,
       EpisodeApiResponse<EpisodeStatusUpdateResult>
