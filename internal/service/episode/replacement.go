@@ -20,6 +20,7 @@ const (
 	ReplacementStageQueued          = "queued"
 	ReplacementStageDownloading     = "downloading"
 	ReplacementStageDownloadCleanup = "download_cleanup"
+	ReplacementStageTerminalCleanup = "terminal_cleanup"
 	ReplacementStageDetaching       = "detaching"
 	ReplacementStageStaged          = "staged"
 	ReplacementStageOldBackedUp     = "old_backed_up"
@@ -218,6 +219,9 @@ func (s *ReplacementService) advance(ctx context.Context, candidate *model.Episo
 			return s.cleanup(ctx, candidate)
 		}
 		return s.recordUnknownStage(candidate)
+	}
+	if candidate.Status == model.CandidateStatusReplacing && candidate.ReplacementStage == ReplacementStageTerminalCleanup {
+		return s.cleanupTerminalFailure(candidate)
 	}
 	_, oldDownload, err := s.loadResources(candidate)
 	if err != nil {
@@ -797,36 +801,83 @@ func (s *ReplacementService) compensateSwitchFailure(candidate *model.EpisodeRes
 }
 
 func (s *ReplacementService) recordFailure(candidate *model.EpisodeResourceCandidate, cause error) error {
-	var cleanupErr error
-	if candidate.StagedPath != "" && s.files.Exists(candidate.StagedPath) {
-		cleanupErr = s.files.Remove(candidate.StagedPath)
+	if candidate == nil {
+		return errors.Join(cause, errors.New("replacement candidate is required"))
 	}
-	if cleanupErr == nil && candidate.ReplacementDownloadID != nil &&
-		(candidate.OldResourcePath == "" || s.files.Exists(candidate.OldResourcePath)) &&
-		(candidate.RollbackPath == "" || !s.files.Exists(candidate.RollbackPath)) {
-		download, loadErr := s.downloads.GetByID(*candidate.ReplacementDownloadID)
-		if loadErr == nil {
-			if download.ReplacementTorrentOwned {
-				cleanupErr = errors.New("replacement torrent is still owned during terminal failure")
-			} else {
-				cleanupErr = s.discardFailedReplacementDownload(candidate, download)
-			}
-		} else if !errors.Is(loadErr, gorm.ErrRecordNotFound) {
-			cleanupErr = loadErr
-		}
-	}
-	if cleanupErr != nil {
+	if (candidate.OldResourcePath != "" && !s.files.Exists(candidate.OldResourcePath)) ||
+		(candidate.RollbackPath != "" && s.files.Exists(candidate.RollbackPath)) {
+		checkpointErr := errors.New("terminal failure cleanup requires the old resource restored at final path")
 		candidate.Status = model.CandidateStatusReplacing
-		candidate.FailureReason = errors.Join(cause, cleanupErr).Error()
+		candidate.FailureReason = errors.Join(cause, checkpointErr).Error()
 		if err := s.episodes.UpdateCandidate(candidate); err != nil {
-			return errors.Join(cause, cleanupErr, err)
+			return errors.Join(cause, checkpointErr, err)
 		}
-		return errors.Join(cause, cleanupErr)
+		return errors.Join(cause, checkpointErr)
+	}
+	candidate.Status = model.CandidateStatusReplacing
+	candidate.ReplacementStage = ReplacementStageTerminalCleanup
+	candidate.FailureReason = cause.Error()
+	if err := s.episodes.UpdateCandidate(candidate); err != nil {
+		return errors.Join(cause, err)
+	}
+	return s.cleanupTerminalFailureWithCause(candidate, cause)
+}
+
+func (s *ReplacementService) cleanupTerminalFailure(candidate *model.EpisodeResourceCandidate) error {
+	cause := errors.New(candidate.FailureReason)
+	if strings.TrimSpace(candidate.FailureReason) == "" {
+		cause = errors.New("replacement failed before terminal cleanup")
+	}
+	return s.cleanupTerminalFailureWithCause(candidate, cause)
+}
+
+func (s *ReplacementService) cleanupTerminalFailureWithCause(candidate *model.EpisodeResourceCandidate, cause error) error {
+	if candidate.Status != model.CandidateStatusReplacing || candidate.ReplacementStage != ReplacementStageTerminalCleanup {
+		return errors.Join(cause, errors.New("terminal failure cleanup checkpoint changed"))
+	}
+	if (candidate.OldResourcePath != "" && !s.files.Exists(candidate.OldResourcePath)) ||
+		(candidate.RollbackPath != "" && s.files.Exists(candidate.RollbackPath)) {
+		return s.persistTerminalCleanupFailure(candidate, cause, errors.New("terminal cleanup old resource checkpoint is no longer valid"))
+	}
+	if candidate.StagedPath != "" && s.files.Exists(candidate.StagedPath) {
+		if err := s.files.Remove(candidate.StagedPath); err != nil {
+			return s.persistTerminalCleanupFailure(candidate, cause, fmt.Errorf("remove unadopted staged resource: %w", err))
+		}
+	}
+	if candidate.ReplacementDownloadID != nil {
+		download, err := s.downloads.GetByID(*candidate.ReplacementDownloadID)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			candidate.ReplacementDownloadID = nil
+		} else if err != nil {
+			return s.persistTerminalCleanupFailure(candidate, cause, fmt.Errorf("load unadopted replacement download: %w", err))
+		} else if download.ReplacementTorrentOwned {
+			return s.persistTerminalCleanupFailure(candidate, cause, errors.New("replacement torrent is still owned during terminal cleanup"))
+		} else if err := s.discardFailedReplacementDownload(candidate, download); err != nil {
+			return s.persistTerminalCleanupFailure(candidate, cause, fmt.Errorf("discard unadopted replacement download: %w", err))
+		}
 	}
 	candidate.Status = model.CandidateStatusFailed
+	candidate.ReplacementStage = ""
+	candidate.ReplacementDownloadID = nil
+	candidate.StagedPath = ""
+	candidate.OldDownloadID = nil
+	candidate.OldTorrentHash = ""
+	candidate.OldResourcePath = ""
+	candidate.RollbackPath = ""
 	candidate.FailureReason = cause.Error()
 	if err := s.episodes.UpdateCandidate(candidate); err != nil {
 		return errors.Join(cause, err)
 	}
 	return cause
+}
+
+func (s *ReplacementService) persistTerminalCleanupFailure(candidate *model.EpisodeResourceCandidate, cause, cleanupErr error) error {
+	joined := errors.Join(cause, cleanupErr)
+	candidate.Status = model.CandidateStatusReplacing
+	candidate.ReplacementStage = ReplacementStageTerminalCleanup
+	candidate.FailureReason = joined.Error()
+	if err := s.episodes.UpdateCandidate(candidate); err != nil {
+		return errors.Join(joined, err)
+	}
+	return joined
 }

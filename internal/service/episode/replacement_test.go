@@ -220,11 +220,13 @@ func (c *fakeTorrentController) RemoveTorrentTask(hash string) error {
 }
 
 type fakeFilePromoter struct {
-	fx          *replacementFixture
-	delegate    FilePromoter
-	failPromote error
-	failRestore error
-	afterMove   func(source, destination string)
+	fx                     *replacementFixture
+	delegate               FilePromoter
+	failPromote            error
+	failRestore            error
+	failStagedRemove       error
+	crashAfterStagedRemove error
+	afterMove              func(source, destination string)
 }
 
 func (p *fakeFilePromoter) Move(source, destination string) error {
@@ -246,7 +248,15 @@ func (p *fakeFilePromoter) Move(source, destination string) error {
 }
 func (p *fakeFilePromoter) Remove(path string) error {
 	p.fx.record("remove_rollback")
-	return p.delegate.Remove(path)
+	isStaged := strings.Contains(path, string(filepath.Separator)+".auto-rss-replacements"+string(filepath.Separator))
+	if isStaged && p.failStagedRemove != nil {
+		return p.failStagedRemove
+	}
+	err := p.delegate.Remove(path)
+	if err == nil && isStaged && p.crashAfterStagedRemove != nil {
+		return p.crashAfterStagedRemove
+	}
+	return err
 }
 func (p *fakeFilePromoter) Exists(path string) bool { return p.delegate.Exists(path) }
 
@@ -568,6 +578,146 @@ func TestReplacementDatabaseSwitchFailureRestoresFilesAndOldTask(t *testing.T) {
 	assert.Equal(t, fx.old.ID, *fx.loadLedger().ActiveDownloadID)
 	assert.Equal(t, model.CandidateStatusFailed, fx.loadCandidate(candidate.ID).Status)
 	assert.Contains(t, fx.controller.resumed, fx.old.TorrentHash)
+}
+
+func assertReplacementStillUsesOldResource(t *testing.T, fx *replacementFixture, oldPath string, qb *replacementQBClient) {
+	t.Helper()
+	content, err := os.ReadFile(oldPath)
+	require.NoError(t, err)
+	assert.Equal(t, "old-content", string(content))
+	ledger := fx.loadLedger()
+	require.NotNil(t, ledger.ActiveDownloadID)
+	assert.Equal(t, fx.old.ID, *ledger.ActiveDownloadID)
+	assert.NotContains(t, qb.deleted, fx.old.TorrentHash)
+}
+
+func TestReplacementSwitchCompensationCrashAfterStagedDeleteRecoversTerminalCleanup(t *testing.T) {
+	fx := newReplacementFixture(t)
+	oldPath := fx.writeOldFile("old-content")
+	candidate := fx.seedPendingCandidate(oldPath)
+	require.NoError(t, fx.db.Exec(`CREATE TRIGGER fail_terminal_switch
+		BEFORE UPDATE OF active_download_id ON subscription_episodes
+		WHEN NEW.active_download_id <> OLD.active_download_id
+		BEGIN SELECT RAISE(ABORT, 'injected terminal switch failure'); END;`).Error)
+	qb := &replacementQBClient{hash: candidate.TorrentHash, fileName: "downloaded.mkv"}
+	production := NewQBReplacementDownloader(fx.db, fx.downloads, repository.NewConfigRepository(fx.db), qb, "", fx.root)
+	service := NewReplacementService(fx.db, fx.repo, fx.downloads, fx.subs, production, qb, fx.promoter)
+	fx.promoter.crashAfterStagedRemove = errors.New("crash after staged delete")
+
+	err := service.Replace(context.Background(), candidate.ID)
+
+	require.ErrorContains(t, err, "injected terminal switch failure")
+	require.ErrorContains(t, err, "crash after staged delete")
+	checkpoint := fx.loadCandidate(candidate.ID)
+	assert.Equal(t, model.CandidateStatusReplacing, checkpoint.Status)
+	assert.Equal(t, ReplacementStageTerminalCleanup, checkpoint.ReplacementStage)
+	assert.Contains(t, checkpoint.FailureReason, "injected terminal switch failure")
+	assert.NoFileExists(t, checkpoint.StagedPath)
+	assertReplacementStillUsesOldResource(t, fx, oldPath, qb)
+
+	fx.promoter.crashAfterStagedRemove = nil
+	require.NoError(t, fx.db.Exec("DROP TRIGGER fail_terminal_switch").Error)
+	require.ErrorContains(t, service.RecoverIncomplete(context.Background()), "injected terminal switch failure")
+	assert.Equal(t, model.CandidateStatusFailed, fx.loadCandidate(candidate.ID).Status)
+	assertReplacementStillUsesOldResource(t, fx, oldPath, qb)
+}
+
+func TestReplacementPromoteFailureCrashAfterStagedDeleteRecoversTerminalCleanup(t *testing.T) {
+	fx := newReplacementFixture(t)
+	oldPath := fx.writeOldFile("old-content")
+	candidate := fx.seedPendingCandidate(oldPath)
+	qb := &replacementQBClient{hash: candidate.TorrentHash, fileName: "downloaded.mkv"}
+	production := NewQBReplacementDownloader(fx.db, fx.downloads, repository.NewConfigRepository(fx.db), qb, "", fx.root)
+	service := NewReplacementService(fx.db, fx.repo, fx.downloads, fx.subs, production, qb, fx.promoter)
+	fx.promoter.failPromote = errors.New("promote failed")
+	fx.promoter.crashAfterStagedRemove = errors.New("crash after staged delete")
+
+	err := service.Replace(context.Background(), candidate.ID)
+
+	require.ErrorContains(t, err, "promote failed")
+	require.ErrorContains(t, err, "crash after staged delete")
+	checkpoint := fx.loadCandidate(candidate.ID)
+	assert.Equal(t, model.CandidateStatusReplacing, checkpoint.Status)
+	assert.Equal(t, ReplacementStageTerminalCleanup, checkpoint.ReplacementStage)
+	assert.Contains(t, checkpoint.FailureReason, "promote failed")
+	assert.NoFileExists(t, checkpoint.StagedPath)
+	assertReplacementStillUsesOldResource(t, fx, oldPath, qb)
+
+	fx.promoter.failPromote = nil
+	fx.promoter.crashAfterStagedRemove = nil
+	require.ErrorContains(t, service.RecoverIncomplete(context.Background()), "promote failed")
+	assert.Equal(t, model.CandidateStatusFailed, fx.loadCandidate(candidate.ID).Status)
+	assertReplacementStillUsesOldResource(t, fx, oldPath, qb)
+}
+
+func TestReplacementTerminalCleanupKeepsCheckpointWhenDownloadDiscardFails(t *testing.T) {
+	fx := newReplacementFixture(t)
+	oldPath := fx.writeOldFile("old-content")
+	candidate := fx.seedPendingCandidate(oldPath)
+	require.NoError(t, fx.db.Exec(`CREATE TRIGGER fail_terminal_download_discard
+		BEFORE DELETE ON downloads WHEN OLD.purpose = 'replacement'
+		BEGIN SELECT RAISE(ABORT, 'injected terminal discard failure'); END;`).Error)
+	qb := &replacementQBClient{hash: candidate.TorrentHash, fileName: "downloaded.mkv"}
+	production := NewQBReplacementDownloader(fx.db, fx.downloads, repository.NewConfigRepository(fx.db), qb, "", fx.root)
+	service := NewReplacementService(fx.db, fx.repo, fx.downloads, fx.subs, production, qb, fx.promoter)
+	fx.promoter.failPromote = errors.New("promote failed")
+
+	err := service.Replace(context.Background(), candidate.ID)
+
+	require.ErrorContains(t, err, "promote failed")
+	require.ErrorContains(t, err, "injected terminal discard failure")
+	checkpoint := fx.loadCandidate(candidate.ID)
+	assert.Equal(t, model.CandidateStatusReplacing, checkpoint.Status)
+	assert.Equal(t, ReplacementStageTerminalCleanup, checkpoint.ReplacementStage)
+	require.NotNil(t, checkpoint.ReplacementDownloadID)
+	assert.NoFileExists(t, checkpoint.StagedPath)
+	assertReplacementStillUsesOldResource(t, fx, oldPath, qb)
+	require.ErrorContains(t, service.RecoverIncomplete(context.Background()), "injected terminal discard failure")
+	assert.Equal(t, ReplacementStageTerminalCleanup, fx.loadCandidate(candidate.ID).ReplacementStage)
+
+	require.NoError(t, fx.db.Exec("DROP TRIGGER fail_terminal_download_discard").Error)
+	fx.promoter.failPromote = nil
+	require.ErrorContains(t, service.RecoverIncomplete(context.Background()), "promote failed")
+	completed := fx.loadCandidate(candidate.ID)
+	assert.Equal(t, model.CandidateStatusFailed, completed.Status)
+	assert.Empty(t, completed.ReplacementStage)
+	assert.Nil(t, completed.ReplacementDownloadID)
+	assert.Empty(t, completed.StagedPath)
+	assert.Nil(t, completed.OldDownloadID)
+	assert.Empty(t, completed.OldTorrentHash)
+	assert.Empty(t, completed.OldResourcePath)
+	assert.Empty(t, completed.RollbackPath)
+	assert.Contains(t, completed.FailureReason, "promote failed")
+	assertReplacementStillUsesOldResource(t, fx, oldPath, qb)
+}
+
+func TestReplacementTerminalCleanupKeepsCheckpointWhenStagedDeleteFails(t *testing.T) {
+	fx := newReplacementFixture(t)
+	oldPath := fx.writeOldFile("old-content")
+	candidate := fx.seedPendingCandidate(oldPath)
+	qb := &replacementQBClient{hash: candidate.TorrentHash, fileName: "downloaded.mkv"}
+	production := NewQBReplacementDownloader(fx.db, fx.downloads, repository.NewConfigRepository(fx.db), qb, "", fx.root)
+	service := NewReplacementService(fx.db, fx.repo, fx.downloads, fx.subs, production, qb, fx.promoter)
+	fx.promoter.failPromote = errors.New("promote failed")
+	fx.promoter.failStagedRemove = errors.New("staged delete failed")
+
+	err := service.Replace(context.Background(), candidate.ID)
+
+	require.ErrorContains(t, err, "promote failed")
+	require.ErrorContains(t, err, "staged delete failed")
+	checkpoint := fx.loadCandidate(candidate.ID)
+	assert.Equal(t, model.CandidateStatusReplacing, checkpoint.Status)
+	assert.Equal(t, ReplacementStageTerminalCleanup, checkpoint.ReplacementStage)
+	assert.FileExists(t, checkpoint.StagedPath)
+	assertReplacementStillUsesOldResource(t, fx, oldPath, qb)
+	require.ErrorContains(t, service.RecoverIncomplete(context.Background()), "staged delete failed")
+	assert.Equal(t, ReplacementStageTerminalCleanup, fx.loadCandidate(candidate.ID).ReplacementStage)
+
+	fx.promoter.failPromote = nil
+	fx.promoter.failStagedRemove = nil
+	require.ErrorContains(t, service.RecoverIncomplete(context.Background()), "promote failed")
+	assert.Equal(t, model.CandidateStatusFailed, fx.loadCandidate(candidate.ID).Status)
+	assertReplacementStillUsesOldResource(t, fx, oldPath, qb)
 }
 
 func TestReplacementRollbackRestoreFailurePreservesRecoverableEvidence(t *testing.T) {
