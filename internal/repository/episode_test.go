@@ -344,6 +344,40 @@ func TestEpisodeRepositoryRefreshProgressIgnoresUnobservedRangePlaceholders(t *t
 	assert.Equal(t, 3, sub.RelativeLatestEpisode())
 }
 
+func TestEpisodeRepositoryRefreshProgressPreservesBangumiLatestEpisode(t *testing.T) {
+	db, repo := setupEpisodeRepository(t)
+	sub := model.Subscription{
+		ID:                   1,
+		Name:                 "airing",
+		TotalEpisodes:        12,
+		EpisodeOffset:        100,
+		BangumiLatestEpisode: 4,
+	}
+	require.NoError(t, db.Create(&sub).Error)
+	require.NoError(t, repo.EnsureRange(sub.ID, sub.TotalEpisodes))
+
+	feed := model.SubscriptionFeed{
+		SubscriptionID:   sub.ID,
+		Name:             "default",
+		RSSURL:           "https://example.test/feed",
+		RSSURLNormalized: "https://example.test/feed",
+		EpisodeOffset:    100,
+		Enabled:          true,
+	}
+	require.NoError(t, db.Create(&feed).Error)
+	require.NoError(t, db.Create(&model.SubscriptionFeedSeenItem{
+		SubscriptionFeedID: feed.ID,
+		ResourceKey:        "hash:episode-3",
+		OriginalEpisode:    103,
+		FirstSeenAt:        time.Now(),
+	}).Error)
+
+	require.NoError(t, repo.RefreshSubscriptionProgress(sub.ID))
+	require.NoError(t, db.First(&sub, sub.ID).Error)
+	assert.Equal(t, 104, sub.LatestEpisode)
+	assert.Equal(t, 4, sub.RelativeLatestEpisode())
+}
+
 func TestEpisodeRepositoryEnsureRangeRejectsExcessiveTotal(t *testing.T) {
 	_, repo := setupEpisodeRepository(t)
 	err := repo.EnsureRange(1, 10001)

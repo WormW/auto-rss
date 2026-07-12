@@ -186,19 +186,23 @@ func (e *enricher) populateSubscription(subscription *model.Subscription, subjec
 				"total_episodes", subject.TotalEps,
 				"latest_episode", subscription.LatestEpisode)
 		} else {
-			// Bangumi 的 episode sort 可能是累计集数（跨季），不能直接作为本季 latest_episode
-			if latestEp > subject.TotalEps+subscription.EpisodeOffset {
+			relativeLatest, valid := normalizeBangumiLatestEpisode(
+				latestEp,
+				subject.TotalEps,
+				subscription.EpisodeOffset,
+			)
+			if !valid {
 				logger.Warn("Bangumi episode sort appears cumulative, not using as latest episode",
 					"subscription_name", subscription.Name,
 					"latest_episode", latestEp,
 					"total_episodes", subject.TotalEps,
 					"episode_offset", subscription.EpisodeOffset)
-				// 保持原有 latest_episode 不变，由 RSS 提供准确的本季集数
 			} else {
-				subscription.LatestEpisode = latestEp
+				applyBangumiLatestEpisode(subscription, relativeLatest)
 				logger.Info("Got latest episode from Bangumi API",
 					"subscription_name", subscription.Name,
-					"latest_episode", latestEp)
+					"latest_episode", latestEp,
+					"relative_latest_episode", relativeLatest)
 			}
 		}
 	}
@@ -239,4 +243,37 @@ func applyBangumiWeekday(subscription *model.Subscription, airWeekday int, overw
 	if overwrite || subscription.AirDay == "" {
 		subscription.AirDay = weekday
 	}
+}
+
+func normalizeBangumiLatestEpisode(latestEpisode, totalEpisodes, episodeOffset int) (int, bool) {
+	if latestEpisode <= 0 {
+		return 0, false
+	}
+	if episodeOffset < 0 {
+		episodeOffset = 0
+	}
+
+	relativeEpisode := latestEpisode
+	if totalEpisodes > 0 && latestEpisode > totalEpisodes {
+		relativeEpisode = latestEpisode - episodeOffset
+	}
+	if relativeEpisode <= 0 || (totalEpisodes > 0 && relativeEpisode > totalEpisodes) {
+		return 0, false
+	}
+	return relativeEpisode, true
+}
+
+func applyBangumiLatestEpisode(subscription *model.Subscription, relativeEpisode int) {
+	subscription.BangumiLatestEpisode = relativeEpisode
+	if relativeEpisode <= subscription.RelativeLatestEpisode() {
+		return
+	}
+	subscription.LatestEpisode = rawEpisodeWithOffset(relativeEpisode, subscription.EpisodeOffset)
+}
+
+func rawEpisodeWithOffset(relativeEpisode, offset int) int {
+	if offset < 0 {
+		offset = 0
+	}
+	return relativeEpisode + offset
 }

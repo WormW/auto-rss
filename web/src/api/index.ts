@@ -153,6 +153,7 @@ export interface Subscription {
   bangumi_cover_local?: string
   bangumi_rank?: number
   bangumi_season?: number
+  bangumi_latest_episode?: number
   // 下载统计字段
   downloading_count?: number
   feed_count?: number

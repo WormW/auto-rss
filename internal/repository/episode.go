@@ -555,7 +555,10 @@ func (r *episodeRepository) RefreshSubscriptionProgressInTx(tx *gorm.DB, subscri
 	}
 
 	continuousOwned := 0
-	latest := 0
+	latest := subscription.BangumiLatestEpisode
+	if latest < 0 || (subscription.TotalEpisodes > 0 && latest > subscription.TotalEpisodes) {
+		latest = 0
+	}
 	for _, episode := range episodes {
 		if episodeCountsAsDiscovered(episode) && episode.Episode > latest {
 			latest = episode.Episode

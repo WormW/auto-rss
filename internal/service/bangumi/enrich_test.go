@@ -119,6 +119,42 @@ func TestEnricher_ForceRefreshUpdatesWeekday(t *testing.T) {
 	assert.Equal(t, "5", sub.UpdateDay)
 }
 
+func TestEnricher_ForceRefreshPersistsBangumiLatestEpisodeWithOffset(t *testing.T) {
+	bgService := NewBangumiService()
+	bgService.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{
+			"id": 638151,
+			"type": 2,
+			"name": "Offset Anime",
+			"eps": 12
+		}`
+		if r.URL.Path == "/v0/episodes" {
+			body = `{
+				"total": 1,
+				"data": [{"id": 1, "type": 0, "sort": 4, "airdate": "2020-01-01"}]
+			}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	})}
+	enricher := NewEnricher(bgService, NewImageService(t.TempDir()), &mockConfigRepo{})
+	sub := &model.Subscription{
+		ID:            1,
+		Name:          "Offset Anime",
+		BangumiID:     638151,
+		EpisodeOffset: 100,
+		LatestEpisode: 103,
+	}
+
+	require.NoError(t, enricher.Enrich(sub, true))
+	assert.Equal(t, 4, sub.BangumiLatestEpisode)
+	assert.Equal(t, 104, sub.LatestEpisode)
+	assert.Equal(t, 4, sub.RelativeLatestEpisode())
+}
+
 func TestEnricher_NoBangumiID(t *testing.T) {
 	bgService := NewBangumiService()
 	imgService := NewImageService("./test_covers")
