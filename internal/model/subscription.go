@@ -16,17 +16,18 @@ type Subscription struct {
 	LastCheckTime   *time.Time `json:"last_check_time"`
 
 	// 新增字段 - 参考ani-rss
-	Fansub         string     `json:"fansub" gorm:"type:varchar(100)"`    // 字幕组名称
-	Language       string     `json:"language" gorm:"type:varchar(10)"`   // 字幕语言 (CHS, CHT, etc.)
-	UpdateDay      string     `json:"update_day" gorm:"type:varchar(10)"` // 更新星期 (0-6)
-	TotalEpisodes  int        `json:"total_episodes" gorm:"default:0"`    // 总集数 (0表示未知)
-	CurrentEpisode int        `json:"current_episode" gorm:"default:0"`   // 当前集数（已收集的集数）
-	LatestEpisode  int        `json:"latest_episode" gorm:"default:0"`    // 最新更新的集数（从RSS/番剧源获取）
-	EpisodeOffset  int        `json:"episode_offset" gorm:"default:0"`    // 集数偏移
-	FilterRules    string     `json:"filter_rules" gorm:"type:text"`      // 过滤规则
-	Enabled        bool       `json:"enabled" gorm:"default:true;index"`  // 是否启用
-	LastDownloadAt *time.Time `json:"last_download_at"`                   // 最后下载时间
-	LastRSSPubTime *time.Time `json:"last_rss_pub_time"`                  // RSS增量水位线（仅接受更大的发布时间）
+	Fansub             string     `json:"fansub" gorm:"type:varchar(100)"`                 // 字幕组名称
+	Language           string     `json:"language" gorm:"type:varchar(10)"`                // 字幕语言 (CHS, CHT, etc.)
+	UpdateDay          string     `json:"update_day" gorm:"type:varchar(10)"`              // 更新星期 (0-6)
+	TotalEpisodes      int        `json:"total_episodes" gorm:"default:0"`                 // 总集数 (0表示未知)
+	CurrentEpisode     int        `json:"current_episode" gorm:"default:0"`                // 当前集数（已收集的集数）
+	LatestEpisode      int        `json:"latest_episode" gorm:"default:0"`                 // 最新更新的集数（从RSS/番剧源获取）
+	EpisodeOffset      int        `json:"episode_offset" gorm:"default:0"`                 // 集数偏移
+	RSSBaselinePending bool       `json:"rss_baseline_pending" gorm:"default:false;index"` // RSS换源安全基线待重建
+	FilterRules        string     `json:"filter_rules" gorm:"type:text"`                   // 过滤规则
+	Enabled            bool       `json:"enabled" gorm:"default:true;index"`               // 是否启用
+	LastDownloadAt     *time.Time `json:"last_download_at"`                                // 最后下载时间
+	LastRSSPubTime     *time.Time `json:"last_rss_pub_time"`                               // RSS增量水位线（仅接受更大的发布时间）
 
 	// Bangumi相关字段
 	BangumiID         int     `json:"bangumi_id" gorm:"index"`                      // Bangumi条目ID
