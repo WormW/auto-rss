@@ -1,14 +1,22 @@
 package bangumi
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
 
 // mockConfigRepo 模拟配置仓库
 type mockConfigRepo struct {
@@ -78,6 +86,37 @@ func TestEnricher_ForceRefresh(t *testing.T) {
 	err := enricher.Enrich(sub, true)
 	// 由于 Bangumi API 可能不可用，我们不断言错误
 	_ = err
+}
+
+func TestEnricher_ForceRefreshUpdatesWeekday(t *testing.T) {
+	bgService := NewBangumiService()
+	bgService.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		require.Equal(t, "/v0/subjects/638151", r.URL.Path)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{
+			"id": 638151,
+			"type": 2,
+			"name": "Friday Anime",
+			"infobox": [
+				{"key": "放送星期", "value": "星期五"}
+			]
+		}`)),
+		}, nil
+	})}
+	enricher := NewEnricher(bgService, NewImageService(t.TempDir()), &mockConfigRepo{})
+	sub := &model.Subscription{
+		ID:        1,
+		Name:      "Friday Anime",
+		BangumiID: 638151,
+		AirDay:    "0",
+		UpdateDay: "0",
+	}
+
+	require.NoError(t, enricher.Enrich(sub, true))
+	assert.Equal(t, "5", sub.AirDay)
+	assert.Equal(t, "5", sub.UpdateDay)
 }
 
 func TestEnricher_NoBangumiID(t *testing.T) {

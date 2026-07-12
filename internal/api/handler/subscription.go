@@ -901,6 +901,11 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 	}
 	if updateDay, ok := updates["update_day"].(string); ok {
 		existing.UpdateDay = updateDay
+		existing.AirDay = updateDay
+	}
+	if airDay, ok := updates["air_day"].(string); ok {
+		existing.AirDay = airDay
+		existing.UpdateDay = airDay
 	}
 	if season, ok := updates["season"].(float64); ok {
 		existing.Season = int(season)

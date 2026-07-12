@@ -95,6 +95,9 @@ func (e *enricher) Enrich(subscription *model.Subscription, force bool) error {
 
 	// 填充Bangumi数据
 	e.populateSubscription(subscription, subject)
+	if force {
+		applyBangumiWeekday(subscription, subject.AirWeekday, true)
+	}
 
 	return nil
 }
@@ -200,14 +203,7 @@ func (e *enricher) populateSubscription(subscription *model.Subscription, subjec
 		}
 	}
 
-	// 如果更新日期为空，尝试从Bangumi获取
-	if subscription.UpdateDay == "" && subject.AirWeekday >= 0 {
-		subscription.UpdateDay = strconv.Itoa(subject.AirWeekday)
-	}
-	// 同步填充追番日历使用的 AirDay（Smart Fetch 和日历服务均依赖此字段）
-	if subscription.AirDay == "" && subject.AirWeekday >= 0 {
-		subscription.AirDay = strconv.Itoa(subject.AirWeekday)
-	}
+	applyBangumiWeekday(subscription, subject.AirWeekday, false)
 
 	// 提取开播日期和年份
 	if subject.AirDate != "" {
@@ -229,4 +225,18 @@ func (e *enricher) populateSubscription(subscription *model.Subscription, subjec
 		"air_date", subscription.AirDate,
 		"air_year", subscription.AirYear,
 		"has_cover", subscription.BangumiCoverLocal != "")
+}
+
+func applyBangumiWeekday(subscription *model.Subscription, airWeekday int, overwrite bool) {
+	if airWeekday < 0 {
+		return
+	}
+
+	weekday := strconv.Itoa(airWeekday)
+	if overwrite || subscription.UpdateDay == "" {
+		subscription.UpdateDay = weekday
+	}
+	if overwrite || subscription.AirDay == "" {
+		subscription.AirDay = weekday
+	}
 }

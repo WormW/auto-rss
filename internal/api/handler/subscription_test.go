@@ -740,6 +740,81 @@ func TestSubscriptionHandler_Create(t *testing.T) {
 	}
 }
 
+func TestSubscriptionHandler_UpdateAirDayKeepsWeekdayFieldsInSync(t *testing.T) {
+	existing := &model.Subscription{
+		ID:                1,
+		Name:              "Friday Anime",
+		Season:            2,
+		AirDay:            "0",
+		UpdateDay:         "0",
+		BangumiID:         638151,
+		BangumiCoverLocal: "covers/638151.jpg",
+	}
+	var updated *model.Subscription
+	mockRepo := &mockSubscriptionRepo{
+		getByIDFunc: func(id uint) (*model.Subscription, error) {
+			require.Equal(t, uint(1), id)
+			return existing, nil
+		},
+		updateFunc: func(subscription *model.Subscription) error {
+			updated = subscription
+			return nil
+		},
+	}
+	handler := NewSubscriptionHandler(mockRepo, nil, nil, nil, "")
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.PUT("/subscriptions/:id", handler.Update)
+
+	req := httptest.NewRequest(http.MethodPut, "/subscriptions/1", bytes.NewBufferString(`{"air_day":"5"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NotNil(t, updated)
+	assert.Equal(t, "5", updated.AirDay)
+	assert.Equal(t, "5", updated.UpdateDay)
+}
+
+func TestSubscriptionHandler_UpdateLegacyUpdateDayKeepsWeekdayFieldsInSync(t *testing.T) {
+	existing := &model.Subscription{
+		ID:                1,
+		Name:              "Friday Anime",
+		Season:            2,
+		AirDay:            "0",
+		UpdateDay:         "0",
+		BangumiID:         638151,
+		BangumiCoverLocal: "covers/638151.jpg",
+	}
+	var updated *model.Subscription
+	mockRepo := &mockSubscriptionRepo{
+		getByIDFunc: func(id uint) (*model.Subscription, error) {
+			return existing, nil
+		},
+		updateFunc: func(subscription *model.Subscription) error {
+			updated = subscription
+			return nil
+		},
+	}
+	handler := NewSubscriptionHandler(mockRepo, nil, nil, nil, "")
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.PUT("/subscriptions/:id", handler.Update)
+
+	req := httptest.NewRequest(http.MethodPut, "/subscriptions/1", bytes.NewBufferString(`{"update_day":"5"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NotNil(t, updated)
+	assert.Equal(t, "5", updated.AirDay)
+	assert.Equal(t, "5", updated.UpdateDay)
+}
+
 func TestSubscriptionHandler_CollectEpisodesSkipsCalendarOnly(t *testing.T) {
 	parser := &mockRSSParser{}
 	handler := NewSubscriptionHandler(&mockSubscriptionRepo{}, &mockDownloadRepo{}, nil, nil, "")
