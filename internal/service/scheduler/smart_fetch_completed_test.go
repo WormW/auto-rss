@@ -58,7 +58,7 @@ func TestEvaluateSubscriptionTreatsEmptyLedgerAsAllMissingWithoutWriting(t *test
 	require.NoError(t, db.Create(&sub).Error)
 	filter := NewSmartFetchFilter(repository.NewDownloadRepository(db), episodeRepo)
 
-	status, _ := filter.EvaluateSubscription(&sub)
+	status, _ := filter.EvaluateSubscription(&sub, false)
 
 	assert.Equal(t, []int{1, 2, 3}, status.MissingEpisodes)
 	assert.True(t, status.ShouldFetch)
@@ -100,7 +100,7 @@ func TestEvaluateSubscriptionFetchesConservativelyWhenLedgerUnavailable(t *testi
 				CurrentEpisode: 3,
 				CompletedAt:    &completedAt,
 				AirDay:         "1",
-			})
+			}, false)
 
 			assert.True(t, status.ShouldFetch)
 			assert.Equal(t, "episode_ledger_unavailable", status.FetchReason)
@@ -244,7 +244,7 @@ func TestEvaluateSubscription_CompletedStopDays(t *testing.T) {
 				tt.expectReason = "completed_30_days_ago_stop_checking"
 			}
 
-			status, _ := filter.EvaluateSubscription(tt.sub)
+			status, _ := filter.EvaluateSubscription(tt.sub, false)
 			assert.Equal(t, tt.expectFetch, status.ShouldFetch, "ShouldFetch mismatch")
 			if tt.expectReason != "" {
 				assert.Contains(t, status.FetchReason, tt.expectReason[:20], "FetchReason should contain expected text")
@@ -278,7 +278,7 @@ func TestEvaluateSubscription_CompletedStopDaysZero(t *testing.T) {
 		AirDay:         "1",
 	}
 
-	status, _ := filter.EvaluateSubscription(sub)
+	status, _ := filter.EvaluateSubscription(sub, false)
 	// 即使完结100天，因为 CompletedStopDays=0，所以不会停止检查
 	// 但是会根据其他逻辑（如在活跃窗口等）决定是否拉取
 	// 这里主要看 Reason 不包含 "stop_checking"
@@ -297,7 +297,7 @@ func TestEvaluateSubscription_ClearsStaleCompletedAtForOffsetSubscription(t *tes
 		AirDay:         "1",
 	}
 
-	status, needsUpdate := filter.EvaluateSubscription(sub)
+	status, needsUpdate := filter.EvaluateSubscription(sub, false)
 
 	assert.False(t, status.IsCompleted)
 	assert.True(t, needsUpdate)
@@ -319,7 +319,7 @@ func TestEvaluateSubscription_SmartFetchGlobalDisabled(t *testing.T) {
 		TotalEpisodes:  12,
 		CurrentEpisode: 12,
 		AirDay:         "1",
-	})
+	}, false)
 
 	assert.True(t, status.ShouldFetch)
 	assert.False(t, status.SmartFetchEnabled)
@@ -338,7 +338,7 @@ func TestEvaluateSubscription_SubscriptionOverrideNever(t *testing.T) {
 		CurrentEpisode:     12,
 		AirDay:             "1",
 		SmartFetchOverride: "never",
-	})
+	}, false)
 
 	assert.True(t, status.ShouldFetch)
 	assert.False(t, status.SmartFetchEnabled)
@@ -355,7 +355,7 @@ func TestEvaluateSubscription_CalendarOnlySkipsRSSFetch(t *testing.T) {
 		AirDay:     "3",
 		AirTime:    "23:30",
 		Enabled:    true,
-	})
+	}, false)
 
 	assert.False(t, needsUpdate)
 	assert.False(t, status.ShouldFetch)

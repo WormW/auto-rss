@@ -40,8 +40,8 @@ import (
 	"gorm.io/gorm"
 )
 
-var newScheduler = func(db *gorm.DB, subscriptionRepo repository.SubscriptionRepository, downloadRepo repository.DownloadRepository, configRepo repository.ConfigRepository, rssInterval string, rssParser rss.Parser, qbClient downloader.QBittorrentClient, episodeService *episode.Service) scheduler.Scheduler {
-	return scheduler.NewScheduler(db, subscriptionRepo, downloadRepo, configRepo, rssInterval, rssParser, qbClient, episodeService)
+var newScheduler = func(db *gorm.DB, subscriptionRepo repository.SubscriptionRepository, feedRepo repository.SubscriptionFeedRepository, downloadRepo repository.DownloadRepository, configRepo repository.ConfigRepository, rssInterval string, rssParser rss.Parser, qbClient downloader.QBittorrentClient, episodeService *episode.Service) scheduler.Scheduler {
+	return scheduler.NewScheduler(db, subscriptionRepo, feedRepo, downloadRepo, configRepo, rssInterval, rssParser, qbClient, episodeService)
 }
 
 type setupDependencies struct {
@@ -131,7 +131,7 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	}
 
 	// 初始化调度器
-	rssScheduler := newScheduler(db, subscriptionRepo, downloadRepo, configRepo, cfg.RSSInterval, rssParser, qbClient, episodeService)
+	rssScheduler := newScheduler(db, subscriptionRepo, feedRepo, downloadRepo, configRepo, cfg.RSSInterval, rssParser, qbClient, episodeService)
 
 	// 初始化通知服务
 	notificationSvc := notification.NewService(db)
@@ -174,6 +174,7 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		feedRepo,
 		feedService,
 		subscriptionCreator,
+		rssScheduler,
 	)
 	feedHandler := handler.NewSubscriptionFeedHandler(feedRepo, feedService, episodeService)
 	subscriptionDiagnosticsHandler := handler.NewSubscriptionDiagnosticsHandler(subscriptionRepo, downloadRepo, configRepo, qbClient, cfg.DownloadPath, episodeService)

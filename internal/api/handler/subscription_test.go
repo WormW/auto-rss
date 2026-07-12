@@ -14,11 +14,36 @@ import (
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/rss"
+	"github.com/WormW/auto-rss/internal/service/scheduler"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
+
+type fakeSubscriptionCollector struct {
+	summary        scheduler.CollectSummary
+	err            error
+	subscriptionID uint
+	calls          int
+}
+
+func (f *fakeSubscriptionCollector) CollectSubscription(_ context.Context, subscriptionID uint) (scheduler.CollectSummary, error) {
+	f.calls++
+	f.subscriptionID = subscriptionID
+	return f.summary, f.err
+}
+
+func TestCollectEpisodesDelegatesToMultiFeedCollector(t *testing.T) {
+	collector := &fakeSubscriptionCollector{summary: scheduler.CollectSummary{
+		FeedsChecked: 2, DownloadsCreated: 1, CandidatesCreated: 1,
+	}}
+	handler := &SubscriptionHandler{collector: collector}
+	err := handler.doCollectEpisodes(context.Background(), nil, &model.Subscription{ID: 7, Name: "Anime"})
+	require.NoError(t, err)
+	assert.Equal(t, uint(7), collector.subscriptionID)
+	assert.Equal(t, 1, collector.calls)
+}
 
 // mockSubscriptionRepo is a mock implementation of SubscriptionRepository for testing
 type mockSubscriptionRepo struct {
@@ -373,6 +398,34 @@ func TestSubscriptionHandler_ListSmartFetchStatus(t *testing.T) {
 	assert.True(t, resp.Data.List[0].ShouldFetch)
 	assert.Equal(t, "smart_fetch_disabled", resp.Data.List[0].Reason)
 	assert.NotEmpty(t, resp.Data.List[0].Explanation)
+}
+
+func TestSubscriptionHandler_ListSmartFetchStatusUsesPendingFeed(t *testing.T) {
+	fx := newEpisodeCollectionFixture(t)
+	sub := fx.createSubscription(t, nil)
+	feeds, err := fx.feedRepo.ListBySubscription(sub.ID)
+	require.NoError(t, err)
+	require.Len(t, feeds, 1)
+	feeds[0].BaselinePending = true
+	require.NoError(t, fx.feedRepo.Update(&feeds[0]))
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/subscriptions/smart-fetch/status", fx.handler.ListSmartFetchStatus)
+	req := httptest.NewRequest(http.MethodGet, "/subscriptions/smart-fetch/status", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var resp struct {
+		Data struct {
+			List []SubscriptionSmartFetchStatus `json:"list"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Data.List, 1)
+	assert.True(t, resp.Data.List[0].ShouldFetch)
+	assert.Equal(t, "feed_baseline_pending", resp.Data.List[0].Reason)
 }
 
 func TestSubscriptionHandler_PreviewAppliesRules(t *testing.T) {

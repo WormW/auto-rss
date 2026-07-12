@@ -52,6 +52,7 @@ type SubscriptionHandler struct {
 	feedRepo             repository.SubscriptionFeedRepository
 	feedService          *subscriptionfeed.Service
 	creator              subscription.Creator
+	collector            scheduler.SubscriptionCollector
 }
 
 type subscriptionWriteRequest struct {
@@ -167,11 +168,15 @@ func NewSubscriptionHandlerWithFeeds(
 	feedRepo repository.SubscriptionFeedRepository,
 	feedService *subscriptionfeed.Service,
 	creator subscription.Creator,
+	collectors ...scheduler.SubscriptionCollector,
 ) *SubscriptionHandler {
 	handler := NewSubscriptionHandler(repo, downloadRepo, configRepo, qbClient, downloadPath, episodeRepo)
 	handler.feedRepo = feedRepo
 	handler.feedService = feedService
 	handler.creator = creator
+	if len(collectors) > 0 {
+		handler.collector = collectors[0]
+	}
 	handler.batchImporter = subscription.NewBatchImporter(
 		handler.mikanService,
 		handler.bangumiEnricher,
@@ -1310,11 +1315,32 @@ func (h *SubscriptionHandler) ListSmartFetchStatus(c *gin.Context) {
 
 	filter := scheduler.NewSmartFetchFilter(h.downloadRepo, h.episodeRepo)
 	filter.LoadConfigFromDB(h.configRepo)
+	pendingFeeds := make(map[uint]bool)
+	if h.feedRepo != nil {
+		subscriptionIDs := make([]uint, 0, len(subscriptionsWithStats))
+		for i := range subscriptionsWithStats {
+			subscriptionIDs = append(subscriptionIDs, subscriptionsWithStats[i].ID)
+		}
+		feeds, err := h.feedRepo.ListEnabledBySubscriptionIDs(subscriptionIDs)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"code":    500,
+				"message": "Failed to get subscription feeds",
+			})
+			return
+		}
+		for _, feed := range feeds {
+			if feed.BaselinePending {
+				pendingFeeds[feed.SubscriptionID] = true
+			}
+		}
+	}
 	now := time.Now()
 	items := make([]SubscriptionSmartFetchStatus, 0, len(subscriptionsWithStats))
 
 	for i := range subscriptionsWithStats {
-		status, _ := filter.EvaluateSubscription(&subscriptionsWithStats[i].Subscription)
+		subscription := &subscriptionsWithStats[i].Subscription
+		status, _ := filter.EvaluateSubscription(subscription, pendingFeeds[subscription.ID])
 		items = append(items, smartFetchStatusResponse(status, now))
 	}
 
@@ -1417,10 +1443,10 @@ func (h *SubscriptionHandler) CollectEpisodes(c *gin.Context) {
 		})
 		return
 	}
-	if h.episodeService == nil {
+	if h.collector == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
-			"message": "Episode service is unavailable",
+			"message": "Subscription feed collector is unavailable",
 		})
 		return
 	}
@@ -1452,255 +1478,24 @@ func (h *SubscriptionHandler) CollectEpisodes(c *gin.Context) {
 // doCollectEpisodes 执行采集任务的核心逻辑
 func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Task, subscription *model.Subscription) error {
 	manager := task.GetManager()
-	id := subscription.ID
 
 	if subscription.IsCalendarOnly() {
-		manager.SetResult(gin.H{
-			"collected":       0,
-			"candidates":      0,
-			"deleted":         0,
-			"total_rss_items": 0,
-			"skipped_reason":  "calendar_only",
-		})
+		manager.SetResult(scheduler.CollectSummary{})
 		return nil
 	}
-	if h.episodeService == nil || h.episodeRepo == nil {
-		return errors.New("episode service is required for manual collection")
+	if h.collector == nil {
+		return errors.New("subscription feed collector is required for manual collection")
 	}
-	if h.downloadRepo == nil {
-		return errors.New("download repository is required for manual collection")
-	}
-
-	select {
-	case <-ctx.Done():
+	if err := ctx.Err(); err != nil {
 		return ctx.Err()
-	default:
 	}
-
-	manager.UpdateProgress(5, "设置代理...")
-	h.setProxy()
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-
-	manager.UpdateProgress(10, "获取RSS订阅...")
-	items, err := h.rssParser.FetchAndParse(subscription.RssURL)
+	manager.UpdateProgress(10, "采集订阅源...")
+	summary, err := h.collector.CollectSubscription(ctx, subscription.ID)
 	if err != nil {
-		logger.Error("Failed to fetch RSS feed",
-			"subscription_id", id,
-			"rss_url", subscription.RssURL,
-			"error", err.Error())
-		return fmt.Errorf("获取RSS失败: %s", err.Error())
-	}
-
-	logger.Info("RSS feed fetched successfully",
-		"subscription_id", id,
-		"items_count", len(items))
-
-	collectedCount := 0
-	candidateCount := 0
-	maxPubTime := subscription.LastRSSPubTime
-	var committedSubscription model.Subscription
-	stagedDownloads := make([]model.Download, 0)
-	manager.UpdateProgress(25, "分析RSS条目...")
-	snapshotUpdatedAt := subscription.UpdatedAt
-	err = h.episodeRepo.RunInTransaction(func(tx *gorm.DB) error {
-		var snapshot model.Subscription
-		snapshotErr := tx.Where(
-			"id = ? AND rss_url = ? AND updated_at = ?",
-			id,
-			subscription.RssURL,
-			snapshotUpdatedAt,
-		).First(&snapshot).Error
-		if errors.Is(snapshotErr, gorm.ErrRecordNotFound) {
-			return fmt.Errorf("RSS source changed while manual collection was running")
-		}
-		if snapshotErr != nil {
-			return fmt.Errorf("failed to validate RSS source snapshot: %w", snapshotErr)
-		}
-
-		txEpisodeRepo := repository.NewEpisodeRepository(tx)
-		txEpisodeService := episode.NewService(txEpisodeRepo)
-		processedEpisodes := make(map[int]bool)
-		totalItems := len(items)
-
-		for index, item := range items {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if totalItems > 0 {
-				processedItems := index + 1
-				progress := 25 + (processedItems * 60 / totalItems)
-				manager.UpdateProgress(progress, fmt.Sprintf("处理第 %d/%d 个条目...", processedItems, totalItems))
-			}
-			if !item.PubTime.IsZero() && subscription.LastRSSPubTime != nil && !item.PubTime.After(*subscription.LastRSSPubTime) {
-				continue
-			}
-
-			offset := subscription.EpisodeOffset
-			relativeEpisode := item.Episode
-			if offset > 0 {
-				relativeEpisode = item.Episode - offset
-				if relativeEpisode <= 0 {
-					logger.Debug("Skipping episode before offset",
-						"episode", item.Episode,
-						"offset", offset,
-						"relative_episode", relativeEpisode,
-						"title", item.Title)
-					continue
-				}
-			}
-			if subscription.TotalEpisodes > 0 && relativeEpisode > subscription.TotalEpisodes {
-				logger.Debug("Skipping episode beyond total",
-					"episode", item.Episode,
-					"relative_episode", relativeEpisode,
-					"total_episodes", subscription.TotalEpisodes,
-					"title", item.Title)
-				continue
-			}
-
-			if _, err := txEpisodeService.ObserveRSSItem(subscription, relativeEpisode); err != nil {
-				return fmt.Errorf("failed to observe episode %d: %w", item.Episode, err)
-			}
-			terminal := func() {
-				if !item.PubTime.IsZero() && (maxPubTime == nil || item.PubTime.After(*maxPubTime)) {
-					pubCopy := item.PubTime
-					maxPubTime = &pubCopy
-				}
-			}
-
-			if matched, reason := matchesSubscriptionFilters(subscription, item.Title); !matched {
-				logger.Debug("Skipping RSS item based on subscription filters",
-					"subscription_id", id,
-					"title", item.Title,
-					"reason", reason)
-				terminal()
-				continue
-			}
-			minSizeBytes := scheduler.MinTorrentSizeBytes(h.configRepo)
-			if scheduler.ShouldSkipSmallTorrent(&item, minSizeBytes) {
-				logger.Info("Skipping small torrent from manual collection",
-					"subscription", subscription.Name,
-					"subscription_id", id,
-					"episode", item.Episode,
-					"title", item.Title,
-					"torrent_url", item.TorrentURL,
-					"reason", scheduler.SmallTorrentSkipMessage(&item, minSizeBytes),
-					"size_bytes", item.SizeBytes,
-					"min_size_bytes", minSizeBytes,
-					"trigger_context", "manual_collect")
-				terminal()
-				continue
-			}
-			if strings.TrimSpace(item.TorrentURL) == "" && strings.TrimSpace(item.TorrentHash) != "" {
-				terminal()
-				continue
-			}
-			if processedEpisodes[item.Episode] {
-				logger.Debug("Skipping older version in RSS feed", "episode", item.Episode, "title", item.Title)
-				terminal()
-				continue
-			}
-
-			resource := model.EpisodeResource{Hash: item.TorrentHash, URL: item.TorrentURL, Title: item.Title}
-			decision, err := txEpisodeService.EvaluateRSSItem(ctx, subscription, episode.RSSResource{
-				OriginalEpisode: item.Episode,
-				RelativeEpisode: relativeEpisode,
-				Resource:        resource,
-				Fansub:          item.Fansub,
-				Language:        string(item.Language),
-				PubTime:         item.PubTime,
-				SourceRSSURL:    subscription.RssURL,
-			}, false)
-			if err != nil {
-				return fmt.Errorf("failed to evaluate episode %d: %w", item.Episode, err)
-			}
-
-			switch decision.Action {
-			case episode.DecisionDownload:
-				download := &model.Download{
-					SubscriptionID: id,
-					Title:          item.Title,
-					Episode:        item.Episode,
-					Fansub:         item.Fansub,
-					Language:       string(item.Language),
-					TorrentURL:     item.TorrentURL,
-					TorrentHash:    item.TorrentHash,
-					Status:         model.DownloadStatusPending,
-					Purpose:        model.DownloadPurposeNormal,
-				}
-				if err := h.downloadRepo.CreateInTx(tx, download); err != nil {
-					return fmt.Errorf("failed to create episode %d download: %w", item.Episode, err)
-				}
-				if err := txEpisodeService.AttachDownloadInTx(tx, decision.EpisodeID, download.ID); err != nil {
-					return fmt.Errorf("failed to attach episode %d download: %w", item.Episode, err)
-				}
-				collectedCount++
-				stagedDownloads = append(stagedDownloads, *download)
-			case episode.DecisionCandidate:
-				candidateCount++
-			}
-			if episodeDecisionClosesItem(decision.Action, decision.Reason) {
-				processedEpisodes[item.Episode] = true
-			}
-			terminal()
-		}
-
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		manager.UpdateProgress(90, "更新集数信息...")
-		if err := h.repo.UpdateRSSWatermarkInTx(tx, id, subscription.RssURL, snapshotUpdatedAt, maxPubTime); err != nil {
-			return fmt.Errorf("failed to complete RSS source snapshot: %w", err)
-		}
-		if err := txEpisodeRepo.RefreshSubscriptionProgressInTx(tx, id); err != nil {
-			return fmt.Errorf("failed to refresh subscription progress: %w", err)
-		}
-		if err := tx.Select("updated_at", "last_rss_pub_time").First(&committedSubscription, id).Error; err != nil {
-			return fmt.Errorf("failed to read committed subscription state: %w", err)
-		}
-		return nil
-	})
-	if err != nil {
-		logger.Error("Manual episode collection rolled back",
-			"subscription_id", id,
-			"error", err)
 		return fmt.Errorf("manual episode collection failed: %w", err)
 	}
-	subscription.UpdatedAt = committedSubscription.UpdatedAt
-	if committedSubscription.LastRSSPubTime != nil {
-		pubCopy := *committedSubscription.LastRSSPubTime
-		subscription.LastRSSPubTime = &pubCopy
-	} else {
-		subscription.LastRSSPubTime = nil
-	}
-	for _, download := range stagedDownloads {
-		logger.Info("Download outbox task created",
-			"subscription_id", id,
-			"download_id", download.ID,
-			"episode", download.Episode,
-			"title", download.Title,
-			"trigger_context", "manual_collect")
-	}
-
-	logger.Info("Episode collection completed",
-		"subscription_id", id,
-		"new_downloads", collectedCount,
-		"candidates", candidateCount,
-		"deleted_old_tasks", 0,
-		"total_rss_items", len(items),
-		"last_rss_pub_time", subscription.LastRSSPubTime)
-
-	manager.SetResult(gin.H{
-		"collected":       collectedCount,
-		"candidates":      candidateCount,
-		"deleted":         0,
-		"total_rss_items": len(items),
-	})
-
+	manager.UpdateProgress(100, "采集完成")
+	manager.SetResult(summary)
 	return nil
 }
 

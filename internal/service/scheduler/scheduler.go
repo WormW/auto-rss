@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 
 // Scheduler 调度器接口
 type Scheduler interface {
+	SubscriptionCollector
 	// Start 启动调度器
 	Start() error
 	// Stop 停止调度器
@@ -31,10 +33,32 @@ type Scheduler interface {
 	RunRSSCheckNow() error
 }
 
+type CollectSummary struct {
+	FeedsChecked      int `json:"feeds_checked"`
+	ItemsScanned      int `json:"items_scanned"`
+	DownloadsCreated  int `json:"downloads_created"`
+	CandidatesCreated int `json:"candidates_created"`
+	FeedErrors        int `json:"feed_errors"`
+}
+
+type SubscriptionCollector interface {
+	CollectSubscription(ctx context.Context, subscriptionID uint) (CollectSummary, error)
+}
+
+const maxConcurrentFeedChecks = 4
+
+type feedFetchResult struct {
+	Feed      model.SubscriptionFeed
+	Items     []rss.RSSItem
+	CheckedAt time.Time
+	Err       error
+}
+
 type scheduler struct {
 	db               *gorm.DB
 	cron             *cron.Cron
 	subscriptionRepo repository.SubscriptionRepository
+	feedRepo         repository.SubscriptionFeedRepository
 	downloadRepo     repository.DownloadRepository
 	configRepo       repository.ConfigRepository
 	rssCheckInterval string
@@ -49,6 +73,7 @@ type scheduler struct {
 func NewScheduler(
 	db *gorm.DB,
 	subscriptionRepo repository.SubscriptionRepository,
+	feedRepo repository.SubscriptionFeedRepository,
 	downloadRepo repository.DownloadRepository,
 	configRepo repository.ConfigRepository,
 	rssCheckInterval string,
@@ -60,6 +85,7 @@ func NewScheduler(
 		db:               db,
 		cron:             cron.New(),
 		subscriptionRepo: subscriptionRepo,
+		feedRepo:         feedRepo,
 		downloadRepo:     downloadRepo,
 		configRepo:       configRepo,
 		rssCheckInterval: rssCheckInterval,
@@ -132,16 +158,34 @@ func (s *scheduler) checkRSSFeeds() {
 		}
 	}
 
-	// 获取所有激活的订阅
+	// 获取所有激活的订阅及其启用 feed。
 	subscriptions, err := s.subscriptionRepo.GetActiveSubscriptions()
 	if err != nil {
 		logger.Error("Failed to get active subscriptions", "error", err)
 		return
 	}
 
-	// 使用智能过滤器评估每个订阅
+	subscriptionIDs := make([]uint, 0, len(subscriptions))
+	for _, subscription := range subscriptions {
+		subscriptionIDs = append(subscriptionIDs, subscription.ID)
+	}
+	feeds, err := s.feedRepo.ListEnabledBySubscriptionIDs(subscriptionIDs)
+	if err != nil {
+		logger.Error("Failed to list enabled subscription feeds", "error", err)
+		return
+	}
+	feedsBySubscription := make(map[uint][]model.SubscriptionFeed)
+	pendingFeeds := make(map[uint]bool)
+	for _, feed := range feeds {
+		feedsBySubscription[feed.SubscriptionID] = append(feedsBySubscription[feed.SubscriptionID], feed)
+		if feed.BaselinePending {
+			pendingFeeds[feed.SubscriptionID] = true
+		}
+	}
+
+	// 使用智能过滤器评估每个订阅。
 	s.smartFetchFilter.LoadConfigFromDB(s.configRepo)
-	fetchStatuses, needsUpdateIndexes := s.smartFetchFilter.FilterSubscriptions(subscriptions)
+	fetchStatuses, needsUpdateIndexes := s.smartFetchFilter.FilterSubscriptions(subscriptions, pendingFeeds)
 
 	// 保存需要更新的订阅（如刚完结的订阅需要更新 CompletedAt）
 	for _, idx := range needsUpdateIndexes {
@@ -169,243 +213,25 @@ func (s *scheduler) checkRSSFeeds() {
 			"list", summary["with_missing"].([]string))
 	}
 
-	// 过滤出需要拉取的订阅
-	var subscriptionsToFetch []model.Subscription
 	for _, status := range fetchStatuses {
-		if status.ShouldFetch {
-			subscriptionsToFetch = append(subscriptionsToFetch, *status.Subscription)
-		} else {
+		if !status.ShouldFetch {
 			logger.Debug("Skipping subscription based on smart fetch strategy",
 				"subscription", status.Subscription.Name,
 				"reason", status.FetchReason,
 				"next_fetch_in", status.NextFetchInterval)
-		}
-	}
-
-	logger.Info("Checking RSS feeds", "total", len(subscriptions), "will_fetch", len(subscriptionsToFetch))
-
-	// 构建订阅ID到拉取状态的映射，用于日志
-	fetchStatusMap := make(map[uint]*SubscriptionFetchStatus)
-	for i := range fetchStatuses {
-		if fetchStatuses[i].ShouldFetch {
-			fetchStatusMap[fetchStatuses[i].Subscription.ID] = &fetchStatuses[i]
-		}
-	}
-
-	for _, sub := range subscriptionsToFetch {
-		// 解析 RSS Feed
-		items, err := s.rssParser.FetchAndParse(sub.RssURL)
-		if err != nil {
-			logger.Error("Failed to parse RSS feed",
-				"subscription", sub.Name,
-				"url", sub.RssURL,
-				"error", err)
 			continue
 		}
-
-		// 获取该订阅的拉取原因
-		fetchReason := ""
-		if status, ok := fetchStatusMap[sub.ID]; ok {
-			fetchReason = status.FetchReason
-		}
-
-		logger.Info("Parsed RSS feed",
-			"subscription", sub.Name,
-			"items", len(items),
-			"fetch_reason", fetchReason)
-
-		if sub.RSSBaselinePending {
-			if err := s.reconcileRSSBaseline(&sub, items); err != nil {
-				logger.Error("Failed to reconcile RSS source baseline",
-					"subscription", sub.Name,
-					"subscription_id", sub.ID,
-					"error", err)
-			}
+		subscriptionFeeds := feedsBySubscription[status.Subscription.ID]
+		if len(subscriptionFeeds) == 0 {
+			logger.Debug("Skipping subscription without enabled feeds",
+				"subscription_id", status.Subscription.ID,
+				"subscription", status.Subscription.Name)
 			continue
 		}
-
-		// 首次启用时间水位线时，优先按“已存在下载记录”回推到对应的最新 pubDate，避免误跳过后续新集。
-		if sub.LastRSSPubTime == nil {
-			bootstrapFromExisting := false
-			existingDownloads, err := s.downloadRepo.ListBySubscriptionID(sub.ID)
-			if err == nil && len(existingDownloads) > 0 {
-				existingHashes := make(map[string]struct{}, len(existingDownloads))
-				for _, d := range existingDownloads {
-					if d.TorrentHash != "" {
-						existingHashes[d.TorrentHash] = struct{}{}
-					}
-				}
-
-				for _, item := range items {
-					if item.PubTime.IsZero() {
-						continue
-					}
-					if _, ok := existingHashes[item.TorrentHash]; !ok {
-						continue
-					}
-					if sub.LastRSSPubTime == nil || item.PubTime.After(*sub.LastRSSPubTime) {
-						pubCopy := item.PubTime
-						sub.LastRSSPubTime = &pubCopy
-						bootstrapFromExisting = true
-					}
-				}
-
-				if bootstrapFromExisting {
-					now := time.Now()
-					sub.LastCheckTime = &now
-					s.subscriptionRepo.Update(&sub)
-					logger.Info("Bootstrapped last_rss_pub_time from existing downloads",
-						"subscription", sub.Name,
-						"last_rss_pub_time", sub.LastRSSPubTime,
-						"existing_downloads", len(existingDownloads))
-				}
-			}
-
-			// 没有历史下载时，按当前 RSS 最新发布时间初始化，避免历史回灌。
-			if sub.LastRSSPubTime == nil {
-				for _, item := range items {
-					if !item.PubTime.IsZero() {
-						pubCopy := item.PubTime
-						sub.LastRSSPubTime = &pubCopy
-						now := time.Now()
-						sub.LastCheckTime = &now
-						s.subscriptionRepo.Update(&sub)
-						logger.Info("Initialized last_rss_pub_time for subscription",
-							"subscription", sub.Name,
-							"last_rss_pub_time", sub.LastRSSPubTime)
-						break
-					}
-				}
-				if sub.LastRSSPubTime != nil {
-					continue
-				}
-			}
-		}
-
-		maxPubTime := sub.LastRSSPubTime
-		retryableProcessingFailure := false
-		for _, item := range items {
-			if !item.PubTime.IsZero() {
-				if maxPubTime == nil || item.PubTime.After(*maxPubTime) {
-					pubCopy := item.PubTime
-					maxPubTime = &pubCopy
-				}
-				if sub.LastRSSPubTime != nil && !item.PubTime.After(*sub.LastRSSPubTime) {
-					continue
-				}
-			}
-
-			// 只处理订阅创建时间之后发布的条目（定时检查不收集历史种子）
-			if !item.PubTime.IsZero() && item.PubTime.Before(sub.CreatedAt) {
-				logger.Debug("Skipping item published before subscription creation",
-					"subscription", sub.Name,
-					"item_title", item.Title,
-					"pub_time", item.PubTime,
-					"created_at", sub.CreatedAt)
-				continue
-			}
-
-			// 计算相对集数（考虑偏移）
-			relativeEpisode := sub.RelativeEpisode(item.Episode)
-			if relativeEpisode <= 0 {
-				logger.Debug("Skipping episode before offset",
-					"subscription", sub.Name,
-					"episode", item.Episode,
-					"offset", sub.EpisodeOffset,
-					"relative_episode", relativeEpisode)
-				continue
-			}
-
-			// 如果设置了总集数，只收集在范围内的
-			if sub.TotalEpisodes > 0 && relativeEpisode > sub.TotalEpisodes {
-				logger.Debug("Skipping episode beyond total",
-					"subscription", sub.Name,
-					"episode", item.Episode,
-					"relative_episode", relativeEpisode,
-					"total_episodes", sub.TotalEpisodes)
-				continue
-			}
-
-			if s.episodeService == nil {
-				logger.Error("Skipping RSS item because episode service is unavailable",
-					"subscription_id", sub.ID,
-					"episode", item.Episode)
-				continue
-			}
-
-			if _, err := s.episodeService.ObserveRSSItem(&sub, relativeEpisode); err != nil {
-				retryableProcessingFailure = true
-				logger.Error("Failed to observe RSS episode",
-					"subscription_id", sub.ID,
-					"episode", item.Episode,
-					"error", err)
-				continue
-			}
-
-			// 被资源过滤器拒绝的条目也已经贡献 latest known episode。
-			if !s.matchesFilter(&sub, item.Title) {
-				continue
-			}
-
-			langFilter := NewLanguageFilter(s.downloadRepo)
-			allowed, skipReason := langFilter.CheckLanguageAllow(&sub, item.Language)
-			if !allowed {
-				logger.Debug("Skipping download based on language policy",
-					"subscription", sub.Name,
-					"episode", item.Episode,
-					"title", item.Title,
-					"language", item.Language,
-					"reason", skipReason)
-				continue
-			}
-
-			preflight := s.downloadPreflight(&sub, &item)
-			if preflight.skip {
-				if preflight.retryable {
-					retryableProcessingFailure = true
-				}
-				continue
-			}
-
-			resource := rssItemResource(&item)
-			decision, err := s.episodeService.EvaluateRSSItem(context.Background(), &sub, episode.RSSResource{
-				OriginalEpisode: item.Episode,
-				RelativeEpisode: relativeEpisode,
-				Resource:        resource,
-				Fansub:          item.Fansub,
-				Language:        string(item.Language),
-				PubTime:         item.PubTime,
-				SourceRSSURL:    sub.RssURL,
-			}, false)
-			if err != nil {
-				retryableProcessingFailure = true
-				logger.Error("Failed to evaluate RSS item against episode ledger",
-					"subscription_id", sub.ID,
-					"episode", item.Episode,
-					"error", err)
-				continue
-			}
-			if decision.Action != episode.DecisionDownload {
-				continue
-			}
-
-			_, err = s.processDownloadItem(&sub, &item, decision.EpisodeID)
-			if err != nil {
-				retryableProcessingFailure = true
-				// 错误已在 processDownloadItem 中记录
-				continue
-			}
-		}
-
-		// 使用事务更新订阅检查时间
-		watermark := maxPubTime
-		if retryableProcessingFailure {
-			watermark = sub.LastRSSPubTime
-		}
-		if err := s.updateSubscriptionCheckTime(&sub, watermark); err != nil {
-			logger.Error("Failed to update subscription check time",
-				"subscription", sub.Name,
-				"subscription_id", sub.ID,
+		if _, err := s.collectFeeds(context.Background(), status.Subscription, subscriptionFeeds); err != nil {
+			logger.Error("Failed to collect subscription feeds",
+				"subscription_id", status.Subscription.ID,
+				"subscription", status.Subscription.Name,
 				"error", err)
 		}
 	}
@@ -413,78 +239,242 @@ func (s *scheduler) checkRSSFeeds() {
 	logger.Info("RSS feed check completed")
 }
 
-func (s *scheduler) reconcileRSSBaseline(sub *model.Subscription, items []rss.RSSItem) error {
-	if s.episodeService == nil {
-		return errors.New("episode service is required")
+func (s *scheduler) CollectSubscription(ctx context.Context, subscriptionID uint) (CollectSummary, error) {
+	subscription, err := s.subscriptionRepo.GetByID(subscriptionID)
+	if err != nil {
+		return CollectSummary{}, err
+	}
+	feeds, err := s.feedRepo.ListBySubscription(subscriptionID)
+	if err != nil {
+		return CollectSummary{}, err
+	}
+	enabled := feeds[:0]
+	for _, feed := range feeds {
+		if feed.Enabled {
+			enabled = append(enabled, feed)
+		}
+	}
+	return s.collectFeeds(ctx, subscription, enabled)
+}
+
+func (s *scheduler) collectFeeds(
+	ctx context.Context,
+	subscription *model.Subscription,
+	feeds []model.SubscriptionFeed,
+) (CollectSummary, error) {
+	var summary CollectSummary
+	if len(feeds) == 0 {
+		return summary, nil
 	}
 
-	return s.db.Transaction(func(tx *gorm.DB) error {
-		var current model.Subscription
-		err := tx.Where(
-			"id = ? AND rss_url = ? AND rss_baseline_pending = ? AND updated_at = ?",
-			sub.ID,
-			sub.RssURL,
-			true,
-			sub.UpdatedAt,
-		).First(&current).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return fmt.Errorf("rss source changed while baseline was running")
+	results := make(chan feedFetchResult, len(feeds))
+	semaphore := make(chan struct{}, maxConcurrentFeedChecks)
+	var waitGroup sync.WaitGroup
+	for _, feed := range feeds {
+		feed := feed
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+			items, err := s.rssParser.FetchAndParse(feed.RSSURL)
+			results <- feedFetchResult{Feed: feed, Items: items, CheckedAt: time.Now(), Err: err}
+		}()
+	}
+	go func() {
+		waitGroup.Wait()
+		close(results)
+	}()
+
+	var latestCheck time.Time
+	for result := range results {
+		if err := ctx.Err(); err != nil {
+			return summary, err
 		}
+		summary.FeedsChecked++
+		if result.CheckedAt.After(latestCheck) {
+			latestCheck = result.CheckedAt
+		}
+		if result.Err != nil {
+			summary.FeedErrors++
+			_ = s.feedRepo.UpdateCheckFailure(result.Feed.ID, result.CheckedAt, result.Err.Error())
+			continue
+		}
+		summary.ItemsScanned += len(result.Items)
+		maxPubTime, itemSummary, err := s.processFetchedFeedItemsWithSummary(ctx, subscription, &result.Feed, result.Items)
 		if err != nil {
-			return err
+			summary.FeedErrors++
+			_ = s.feedRepo.UpdateCheckFailure(result.Feed.ID, result.CheckedAt, err.Error())
+			continue
+		}
+		summary.DownloadsCreated += itemSummary.DownloadsCreated
+		summary.CandidatesCreated += itemSummary.CandidatesCreated
+		if err := s.feedRepo.UpdateCheckSuccess(
+			result.Feed.ID,
+			result.CheckedAt,
+			maxPubTime,
+			result.Feed.BaselinePending,
+		); err != nil {
+			summary.FeedErrors++
+			continue
+		}
+	}
+	if !latestCheck.IsZero() {
+		if err := s.episodeService.RefreshSubscriptionProgress(subscription.ID); err != nil {
+			return summary, err
+		}
+		if err := s.db.Model(&model.Subscription{}).Where("id = ?", subscription.ID).
+			Update("last_check_time", latestCheck).Error; err != nil {
+			return summary, err
+		}
+	}
+	return summary, nil
+}
+
+func (s *scheduler) processFetchedFeedItems(
+	ctx context.Context,
+	subscription *model.Subscription,
+	feed *model.SubscriptionFeed,
+	items []rss.RSSItem,
+) (*time.Time, error) {
+	maxPubTime, _, err := s.processFetchedFeedItemsWithSummary(ctx, subscription, feed, items)
+	return maxPubTime, err
+}
+
+func (s *scheduler) processFetchedFeedItemsWithSummary(
+	ctx context.Context,
+	subscription *model.Subscription,
+	feed *model.SubscriptionFeed,
+	items []rss.RSSItem,
+) (*time.Time, CollectSummary, error) {
+	var maxPubTime *time.Time
+	var summary CollectSummary
+	for _, item := range items {
+		if err := ctx.Err(); err != nil {
+			return nil, summary, err
+		}
+		if !item.PubTime.IsZero() && (maxPubTime == nil || item.PubTime.After(*maxPubTime)) {
+			pubTime := item.PubTime
+			maxPubTime = &pubTime
 		}
 
-		txEpisodeService := episode.NewService(repository.NewEpisodeRepository(tx))
-		var maxPubTime *time.Time
-		for _, item := range items {
-			relativeEpisode := sub.RelativeEpisode(item.Episode)
-			if relativeEpisode <= 0 {
-				continue
-			}
-			if sub.TotalEpisodes > 0 && relativeEpisode > sub.TotalEpisodes {
-				continue
-			}
-			if !item.PubTime.IsZero() && (maxPubTime == nil || item.PubTime.After(*maxPubTime)) {
-				pubCopy := item.PubTime
-				maxPubTime = &pubCopy
-			}
-			_, err := txEpisodeService.EvaluateRSSItem(context.Background(), sub, episode.RSSResource{
-				OriginalEpisode: item.Episode,
-				RelativeEpisode: relativeEpisode,
-				Resource:        rssItemResource(&item),
-				Fansub:          item.Fansub,
-				Language:        string(item.Language),
-				PubTime:         item.PubTime,
-				SourceRSSURL:    sub.RssURL,
-			}, true)
+		relativeEpisode := feed.RelativeEpisode(item.Episode)
+		resource := episode.RSSResource{
+			OriginalEpisode:     item.Episode,
+			RelativeEpisode:     relativeEpisode,
+			SubscriptionFeedID:  feed.ID,
+			SourceFeedName:      feed.Name,
+			SourceEpisodeOffset: feed.EpisodeOffset,
+			Resource:            rssItemResource(&item),
+			Fansub:              preferredFansub(item.Fansub, feed.Fansub),
+			Language:            string(item.Language),
+			PubTime:             item.PubTime,
+			SourceRSSURL:        feed.RSSURL,
+		}
+		resourceKey := episode.ResourceKey(resource.Resource)
+		if resourceKey == "" {
+			logger.Warn("Skipping feed item without stable resource identity",
+				"subscription_id", subscription.ID,
+				"subscription_feed_id", feed.ID,
+				"title", item.Title)
+			continue
+		}
+		if item.PubTime.IsZero() {
+			seen, err := s.feedRepo.HasSeenItem(feed.ID, resourceKey)
 			if err != nil {
-				return err
+				return nil, summary, err
 			}
+			if seen {
+				continue
+			}
+		} else if !feed.BaselinePending && feed.LastRSSPubTime != nil && !item.PubTime.After(*feed.LastRSSPubTime) {
+			continue
 		}
 
-		now := time.Now()
-		updates := map[string]any{
-			"last_rss_pub_time":    maxPubTime,
-			"last_check_time":      now,
-			"rss_baseline_pending": false,
+		if relativeEpisode <= 0 || (subscription.TotalEpisodes > 0 && relativeEpisode > subscription.TotalEpisodes) {
+			if err := s.feedRepo.MarkSeenItem(feed.ID, resourceKey, item.Episode, time.Now()); err != nil {
+				return nil, summary, err
+			}
+			continue
 		}
-		result := tx.Model(&model.Subscription{}).
-			Where(
-				"id = ? AND rss_url = ? AND rss_baseline_pending = ? AND updated_at = ?",
-				sub.ID,
-				sub.RssURL,
-				true,
-				sub.UpdatedAt,
-			).
-			Updates(updates)
-		if result.Error != nil {
-			return result.Error
+		if feed.BaselinePending {
+			decision, err := s.episodeService.EvaluateRSSItem(ctx, subscription, resource, true)
+			if err != nil {
+				return nil, summary, err
+			}
+			if decision.Action == episode.DecisionCandidate {
+				summary.CandidatesCreated++
+			}
+			if err := s.feedRepo.MarkSeenItem(feed.ID, resourceKey, item.Episode, time.Now()); err != nil {
+				return nil, summary, err
+			}
+			continue
 		}
-		if result.RowsAffected != 1 {
-			return fmt.Errorf("rss source changed while baseline was running")
+
+		if _, err := s.episodeService.ObserveRSSItem(subscription, relativeEpisode); err != nil {
+			return nil, summary, err
 		}
-		return nil
-	})
+		if !s.matchesFilter(subscription, item.Title) {
+			if err := s.feedRepo.MarkSeenItem(feed.ID, resourceKey, item.Episode, time.Now()); err != nil {
+				return nil, summary, err
+			}
+			continue
+		}
+		allowed, _ := NewLanguageFilter(s.downloadRepo).CheckLanguageAllow(subscription, item.Language)
+		if !allowed {
+			if err := s.feedRepo.MarkSeenItem(feed.ID, resourceKey, item.Episode, time.Now()); err != nil {
+				return nil, summary, err
+			}
+			continue
+		}
+		preflight := s.downloadPreflight(subscription, &item)
+		if preflight.skip {
+			if preflight.retryable {
+				return nil, summary, errors.New(preflight.reason)
+			}
+			if err := s.feedRepo.MarkSeenItem(feed.ID, resourceKey, item.Episode, time.Now()); err != nil {
+				return nil, summary, err
+			}
+			continue
+		}
+		if strings.TrimSpace(item.TorrentURL) == "" && strings.TrimSpace(item.TorrentHash) != "" {
+			if err := s.feedRepo.MarkSeenItem(feed.ID, resourceKey, item.Episode, time.Now()); err != nil {
+				return nil, summary, err
+			}
+			continue
+		}
+
+		decision, err := s.episodeService.EvaluateRSSItem(ctx, subscription, resource, false)
+		if err != nil {
+			return nil, summary, err
+		}
+		switch decision.Action {
+		case episode.DecisionDownload:
+			feedID := feed.ID
+			downloadItem := item
+			downloadItem.Fansub = preferredFansub(item.Fansub, feed.Fansub)
+			created, err := s.processDownloadItem(subscription, &downloadItem, decision.EpisodeID, &feedID)
+			if err != nil {
+				return nil, summary, err
+			}
+			if created {
+				summary.DownloadsCreated++
+			}
+		case episode.DecisionCandidate:
+			summary.CandidatesCreated++
+		}
+		if err := s.feedRepo.MarkSeenItem(feed.ID, resourceKey, item.Episode, time.Now()); err != nil {
+			return nil, summary, err
+		}
+	}
+	return maxPubTime, summary, nil
+}
+
+func preferredFansub(itemFansub, configuredFansub string) string {
+	if fansub := strings.TrimSpace(itemFansub); fansub != "" {
+		return fansub
+	}
+	return strings.TrimSpace(configuredFansub)
 }
 
 func completedAtLogValue(completedAt *time.Time) any {
@@ -576,7 +566,7 @@ func parseSchedulerRuleToken(token string) (string, bool) {
 
 // processDownloadItem 处理单个下载条目（在事务中）
 // 返回是否成功创建下载任务
-func (s *scheduler) processDownloadItem(sub *model.Subscription, item *rss.RSSItem, episodeID uint) (bool, error) {
+func (s *scheduler) processDownloadItem(sub *model.Subscription, item *rss.RSSItem, episodeID uint, subscriptionFeedID *uint) (bool, error) {
 	resource := rssItemResource(item)
 	if s.episodeService == nil {
 		return false, errors.New("episode service is required")
@@ -604,15 +594,16 @@ func (s *scheduler) processDownloadItem(sub *model.Subscription, item *rss.RSSIt
 
 	// 创建下载任务
 	download := &model.Download{
-		SubscriptionID: sub.ID,
-		Title:          item.Title,
-		Episode:        item.Episode,
-		Fansub:         item.Fansub,
-		Language:       string(item.Language),
-		TorrentURL:     item.TorrentURL,
-		TorrentHash:    item.TorrentHash,
-		Status:         model.DownloadStatusPending,
-		Purpose:        model.DownloadPurposeNormal,
+		SubscriptionID:     sub.ID,
+		SubscriptionFeedID: subscriptionFeedID,
+		Title:              item.Title,
+		Episode:            item.Episode,
+		Fansub:             item.Fansub,
+		Language:           string(item.Language),
+		TorrentURL:         item.TorrentURL,
+		TorrentHash:        item.TorrentHash,
+		Status:             model.DownloadStatusPending,
+		Purpose:            model.DownloadPurposeNormal,
 	}
 
 	// 使用事务包装数据库操作
@@ -690,19 +681,6 @@ func (s *scheduler) logSmallTorrentSkip(sub *model.Subscription, item *rss.RSSIt
 		"size_bytes", item.SizeBytes,
 		"min_size_bytes", minSizeBytes,
 		"trigger_context", "scheduler_rss_check")
-}
-
-// updateSubscriptionCheckTime 更新订阅的检查时间（带事务）
-func (s *scheduler) updateSubscriptionCheckTime(sub *model.Subscription, maxPubTime *time.Time) error {
-	return s.db.Transaction(func(tx *gorm.DB) error {
-		now := time.Now()
-		sub.LastCheckTime = &now
-		if maxPubTime != nil {
-			pubCopy := *maxPubTime
-			sub.LastRSSPubTime = &pubCopy
-		}
-		return tx.Save(sub).Error
-	})
 }
 
 // Stop 停止调度器

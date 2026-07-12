@@ -43,6 +43,9 @@ func (m *mockScheduler) AddJob(string, func()) (cron.EntryID, error) {
 	return 0, nil
 }
 func (m *mockScheduler) RunRSSCheckNow() error { return nil }
+func (m *mockScheduler) CollectSubscription(context.Context, uint) (scheduler.CollectSummary, error) {
+	return scheduler.CollectSummary{}, nil
+}
 
 func newTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
@@ -126,7 +129,7 @@ func TestSetupStartsReplacementRecoveryAsynchronouslyOnce(t *testing.T) {
 	appCtx := newTestAppContext(db, cfg)
 
 	original := newScheduler
-	newScheduler = func(*gorm.DB, repository.SubscriptionRepository, repository.DownloadRepository, repository.ConfigRepository, string, rss.Parser, downloader.QBittorrentClient, *episode.Service) scheduler.Scheduler {
+	newScheduler = func(*gorm.DB, repository.SubscriptionRepository, repository.SubscriptionFeedRepository, repository.DownloadRepository, repository.ConfigRepository, string, rss.Parser, downloader.QBittorrentClient, *episode.Service) scheduler.Scheduler {
 		return &mockScheduler{}
 	}
 	defer func() { newScheduler = original }()
@@ -265,7 +268,7 @@ func setupRouterForTestWithConfig(t *testing.T, authEnabled bool, configure func
 	appCtx := newTestAppContext(db, cfg)
 
 	original := newScheduler
-	newScheduler = func(*gorm.DB, repository.SubscriptionRepository, repository.DownloadRepository, repository.ConfigRepository, string, rss.Parser, downloader.QBittorrentClient, *episode.Service) scheduler.Scheduler {
+	newScheduler = func(*gorm.DB, repository.SubscriptionRepository, repository.SubscriptionFeedRepository, repository.DownloadRepository, repository.ConfigRepository, string, rss.Parser, downloader.QBittorrentClient, *episode.Service) scheduler.Scheduler {
 		return &mockScheduler{}
 	}
 	t.Cleanup(func() { newScheduler = original })
@@ -286,7 +289,7 @@ func TestSetup_ReturnsErrorWhenSchedulerStartFailsAndBlockingEnabled(t *testing.
 	qbClient := downloader.NewQBittorrentClient()
 
 	original := newScheduler
-	newScheduler = func(*gorm.DB, repository.SubscriptionRepository, repository.DownloadRepository, repository.ConfigRepository, string, rss.Parser, downloader.QBittorrentClient, *episode.Service) scheduler.Scheduler {
+	newScheduler = func(*gorm.DB, repository.SubscriptionRepository, repository.SubscriptionFeedRepository, repository.DownloadRepository, repository.ConfigRepository, string, rss.Parser, downloader.QBittorrentClient, *episode.Service) scheduler.Scheduler {
 		return &mockScheduler{startErr: errors.New("boom")}
 	}
 	defer func() { newScheduler = original }()

@@ -1,7 +1,9 @@
 package scheduler
 
 import (
+	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +26,7 @@ type schedulerLedgerFixture struct {
 	episodeService *episode.Service
 	parser         *schedulerRSSParser
 	qb             *schedulerQBClient
+	feedRepo       repository.SubscriptionFeedRepository
 }
 
 func newSchedulerLedgerFixture(t *testing.T, items []rss.RSSItem) *schedulerLedgerFixture {
@@ -33,6 +36,8 @@ func newSchedulerLedgerFixture(t *testing.T, items []rss.RSSItem) *schedulerLedg
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(
 		&model.Subscription{},
+		&model.SubscriptionFeed{},
+		&model.SubscriptionFeedSeenItem{},
 		&model.Download{},
 		&model.Config{},
 		&model.SubscriptionEpisode{},
@@ -44,10 +49,11 @@ func newSchedulerLedgerFixture(t *testing.T, items []rss.RSSItem) *schedulerLedg
 	configRepo := repository.NewConfigRepository(db)
 	require.NoError(t, configRepo.Set("smart_fetch.enabled", "false"))
 	episodeRepo := repository.NewEpisodeRepository(db)
+	feedRepo := repository.NewSubscriptionFeedRepository(db)
 	episodeService := episode.NewService(episodeRepo)
 	parser := &schedulerRSSParser{items: items}
 	qb := &schedulerQBClient{}
-	created := NewScheduler(db, subscriptionRepo, downloadRepo, configRepo, "30m", parser, qb, episodeService)
+	created := NewScheduler(db, subscriptionRepo, feedRepo, downloadRepo, configRepo, "30m", parser, qb, episodeService)
 
 	return &schedulerLedgerFixture{
 		db:             db,
@@ -57,7 +63,37 @@ func newSchedulerLedgerFixture(t *testing.T, items []rss.RSSItem) *schedulerLedg
 		episodeService: episodeService,
 		parser:         parser,
 		qb:             qb,
+		feedRepo:       feedRepo,
 	}
+}
+
+func (f *schedulerLedgerFixture) seedFeed(
+	t *testing.T,
+	subscriptionID uint,
+	name, rssURL string,
+	offset int,
+	baselinePending bool,
+) model.SubscriptionFeed {
+	t.Helper()
+	feed := model.SubscriptionFeed{
+		SubscriptionID:   subscriptionID,
+		Name:             name,
+		RSSURL:           rssURL,
+		RSSURLNormalized: rssURL,
+		EpisodeOffset:    offset,
+		Enabled:          true,
+		BaselinePending:  baselinePending,
+	}
+	require.NoError(t, f.feedRepo.Create(&feed))
+	return feed
+}
+
+func (f *schedulerLedgerFixture) defaultFeed(t *testing.T, subscriptionID uint) model.SubscriptionFeed {
+	t.Helper()
+	feeds, err := f.feedRepo.ListBySubscription(subscriptionID)
+	require.NoError(t, err)
+	require.NotEmpty(t, feeds)
+	return feeds[0]
 }
 
 func (f *schedulerLedgerFixture) createSubscription(t *testing.T) model.Subscription {
@@ -75,6 +111,7 @@ func (f *schedulerLedgerFixture) createSubscription(t *testing.T) model.Subscrip
 		LanguagePreference: "both",
 	}
 	require.NoError(t, f.db.Create(&sub).Error)
+	f.seedFeed(t, sub.ID, "Default", sub.RssURL, sub.EpisodeOffset, sub.RSSBaselinePending)
 	return sub
 }
 
@@ -88,6 +125,131 @@ func schedulerRSSItem(episodeNumber int, hash string, pubTime time.Time) rss.RSS
 		Episode:     episodeNumber,
 		Language:    rss.LangCHS,
 	}
+}
+
+func TestRSSCheckMapsDifferentFeedOffsetsToOneDownload(t *testing.T) {
+	fx := newSchedulerLedgerFixture(t, nil)
+	sub := fx.createSubscription(t)
+	a := fx.seedFeed(t, sub.ID, "A", "https://a.test/rss", 0, false)
+	b := fx.seedFeed(t, sub.ID, "B", "https://b.test/rss", 100, false)
+	now := time.Now().UTC()
+	fx.parser.set(a.RSSURL, []rss.RSSItem{schedulerRSSItem(1, "feed-a", now)})
+	itemB := schedulerRSSItem(101, "feed-b", now)
+	itemB.TorrentURL = "https://b.test/101"
+	fx.parser.set(b.RSSURL, []rss.RSSItem{itemB})
+
+	fx.scheduler.checkRSSFeeds()
+
+	assert.Zero(t, fx.qb.addCalls, "scheduler must only create an outbox download")
+	var downloads []model.Download
+	require.NoError(t, fx.db.Find(&downloads).Error)
+	require.Len(t, downloads, 1)
+	require.NotNil(t, downloads[0].SubscriptionFeedID)
+	var candidates int64
+	require.NoError(t, fx.db.Model(&model.EpisodeResourceCandidate{}).Count(&candidates).Error)
+	assert.EqualValues(t, 1, candidates)
+}
+
+func TestNewFeedBaselineDoesNotDownloadHistoricalMissingEpisodes(t *testing.T) {
+	fx := newSchedulerLedgerFixture(t, nil)
+	sub := fx.createSubscription(t)
+	feed := fx.seedFeed(t, sub.ID, "B", "https://b.test/rss", 100, true)
+	base := time.Now().UTC().Add(-time.Hour)
+	first := schedulerRSSItem(101, "baseline-b1", base)
+	second := schedulerRSSItem(102, "baseline-b2", base.Add(time.Minute))
+	fx.parser.set(feed.RSSURL, []rss.RSSItem{first, second})
+
+	fx.scheduler.checkRSSFeeds()
+
+	assert.Zero(t, fx.qb.addCalls)
+	var downloads int64
+	require.NoError(t, fx.db.Model(&model.Download{}).Count(&downloads).Error)
+	assert.Zero(t, downloads)
+	for _, episodeNumber := range []int{1, 2} {
+		ledger, err := fx.episodeRepo.GetBySubscriptionAndEpisode(sub.ID, episodeNumber)
+		require.NoError(t, err)
+		assert.Equal(t, model.EpisodeStatusMissing, ledger.Status)
+	}
+	stored, err := fx.feedRepo.GetByID(feed.ID)
+	require.NoError(t, err)
+	assert.False(t, stored.BaselinePending)
+	require.NotNil(t, stored.LastRSSPubTime)
+	assert.Equal(t, base.Add(time.Minute), *stored.LastRSSPubTime)
+}
+
+func TestOneFeedFailureDoesNotBlockAnotherFeed(t *testing.T) {
+	fx := newSchedulerLedgerFixture(t, nil)
+	sub := fx.createSubscription(t)
+	failed := fx.seedFeed(t, sub.ID, "A", "https://a.test/rss", 0, false)
+	healthy := fx.seedFeed(t, sub.ID, "B", "https://b.test/rss", 100, false)
+	fx.parser.fail(failed.RSSURL, errors.New("timeout"))
+	fx.parser.set(healthy.RSSURL, []rss.RSSItem{schedulerRSSItem(101, "healthy-b", time.Now().UTC())})
+
+	fx.scheduler.checkRSSFeeds()
+
+	var downloads int64
+	require.NoError(t, fx.db.Model(&model.Download{}).Count(&downloads).Error)
+	assert.EqualValues(t, 1, downloads)
+	failedStored, err := fx.feedRepo.GetByID(failed.ID)
+	require.NoError(t, err)
+	healthyStored, err := fx.feedRepo.GetByID(healthy.ID)
+	require.NoError(t, err)
+	assert.Contains(t, failedStored.LastError, "timeout")
+	assert.Empty(t, healthyStored.LastError)
+	assert.NotNil(t, healthyStored.LastSuccessAt)
+}
+
+func TestFeedWithoutPublicationTimesStillFindsNewEpisodesIdempotently(t *testing.T) {
+	fx := newSchedulerLedgerFixture(t, nil)
+	sub := fx.createSubscription(t)
+	feed := fx.seedFeed(t, sub.ID, "A", "https://a.test/rss", 0, false)
+	fx.parser.set(feed.RSSURL, []rss.RSSItem{schedulerRSSItem(1, "no-time-a1", time.Time{})})
+
+	fx.scheduler.checkRSSFeeds()
+	fx.scheduler.checkRSSFeeds()
+
+	var downloads int64
+	require.NoError(t, fx.db.Model(&model.Download{}).Count(&downloads).Error)
+	assert.EqualValues(t, 1, downloads)
+}
+
+func TestFeedConfiguredFansubFallsBackIntoDownload(t *testing.T) {
+	fx := newSchedulerLedgerFixture(t, nil)
+	sub := fx.createSubscription(t)
+	feed := fx.seedFeed(t, sub.ID, "Fallback", "https://fallback.test/rss", 0, false)
+	feed.Fansub = "Configured Group"
+	require.NoError(t, fx.feedRepo.Update(&feed))
+	item := schedulerRSSItem(1, "fallback-fansub", time.Now().UTC())
+	item.Fansub = ""
+	fx.parser.set(feed.RSSURL, []rss.RSSItem{item})
+
+	fx.scheduler.checkRSSFeeds()
+
+	var download model.Download
+	require.NoError(t, fx.db.Where("torrent_hash = ?", "fallback-fansub").First(&download).Error)
+	assert.Equal(t, "Configured Group", download.Fansub)
+	require.NotNil(t, download.SubscriptionFeedID)
+	assert.Equal(t, feed.ID, *download.SubscriptionFeedID)
+}
+
+func TestBaselineWithoutPublicationTimesDoesNotBackfillOnSecondCheck(t *testing.T) {
+	fx := newSchedulerLedgerFixture(t, nil)
+	sub := fx.createSubscription(t)
+	feed := fx.seedFeed(t, sub.ID, "B", "https://b.test/rss", 100, true)
+	first := schedulerRSSItem(101, "baseline-no-time-b1", time.Time{})
+	fx.parser.set(feed.RSSURL, []rss.RSSItem{first})
+
+	fx.scheduler.checkRSSFeeds()
+	fx.scheduler.checkRSSFeeds()
+	var downloads int64
+	require.NoError(t, fx.db.Model(&model.Download{}).Count(&downloads).Error)
+	assert.Zero(t, downloads)
+
+	second := schedulerRSSItem(102, "baseline-no-time-b2", time.Time{})
+	fx.parser.set(feed.RSSURL, []rss.RSSItem{first, second})
+	fx.scheduler.checkRSSFeeds()
+	require.NoError(t, fx.db.Model(&model.Download{}).Count(&downloads).Error)
+	assert.EqualValues(t, 1, downloads)
 }
 
 func TestRSSCheckDoesNotReplaceDownloadedEpisode(t *testing.T) {
@@ -190,6 +352,9 @@ func TestRSSCheckLedgerFailureDoesNotAdvanceWatermarkAndRetriesNextRun(t *testin
 	fx := newSchedulerLedgerFixture(t, []rss.RSSItem{item})
 	sub := fx.createSubscription(t)
 	originalWatermark := *sub.LastRSSPubTime
+	feed := fx.defaultFeed(t, sub.ID)
+	feed.LastRSSPubTime = &originalWatermark
+	require.NoError(t, fx.feedRepo.Update(&feed))
 	require.NoError(t, fx.db.Exec(`
 		CREATE TRIGGER block_episode_observe
 		BEFORE INSERT ON subscription_episodes
@@ -200,7 +365,7 @@ func TestRSSCheckLedgerFailureDoesNotAdvanceWatermarkAndRetriesNextRun(t *testin
 
 	fx.scheduler.checkRSSFeeds()
 
-	afterFailure, err := repository.NewSubscriptionRepository(fx.db).GetByID(sub.ID)
+	afterFailure, err := fx.feedRepo.GetByID(feed.ID)
 	require.NoError(t, err)
 	require.NotNil(t, afterFailure.LastRSSPubTime)
 	assert.Equal(t, originalWatermark, *afterFailure.LastRSSPubTime)
@@ -209,7 +374,7 @@ func TestRSSCheckLedgerFailureDoesNotAdvanceWatermarkAndRetriesNextRun(t *testin
 	require.NoError(t, fx.db.Exec("DROP TRIGGER block_episode_observe").Error)
 	fx.scheduler.checkRSSFeeds()
 
-	afterRetry, err := repository.NewSubscriptionRepository(fx.db).GetByID(sub.ID)
+	afterRetry, err := fx.feedRepo.GetByID(feed.ID)
 	require.NoError(t, err)
 	require.NotNil(t, afterRetry.LastRSSPubTime)
 	assert.Equal(t, pubTime, *afterRetry.LastRSSPubTime)
@@ -232,15 +397,17 @@ func TestRSSSourceBaselineReconcilesLedgerWithoutCreatingDownloads(t *testing.T)
 	}
 	fx := newSchedulerLedgerFixture(t, items)
 	sub := fx.createSubscription(t)
-	oldWatermark := now.Add(-time.Hour)
+	oldWatermark := now.Add(-96 * time.Hour)
 	require.NoError(t, fx.db.Model(&model.Subscription{}).Where("id = ?", sub.ID).Updates(map[string]any{
-		"rss_url":              "https://new.example/feed.xml",
-		"rss_baseline_pending": true,
-		"last_rss_pub_time":    oldWatermark,
-		"filter_keywords":      "will-not-match",
-		"language_preference":  "cht",
+		"filter_keywords":     "will-not-match",
+		"language_preference": "cht",
 	}).Error)
-	sub.RssURL = "https://new.example/feed.xml"
+	feed := fx.defaultFeed(t, sub.ID)
+	feed.RSSURL = "https://new.example/feed.xml"
+	feed.RSSURLNormalized = feed.RSSURL
+	feed.BaselinePending = true
+	feed.LastRSSPubTime = &oldWatermark
+	require.NoError(t, fx.feedRepo.Update(&feed))
 
 	oldDownload := model.Download{
 		SubscriptionID: sub.ID,
@@ -283,11 +450,11 @@ func TestRSSSourceBaselineReconcilesLedgerWithoutCreatingDownloads(t *testing.T)
 	assert.Equal(t, "new-source-episode-1", candidates[0].TorrentHash)
 	assert.Equal(t, model.CandidateStatusPending, candidates[0].Status)
 
-	got, err := repository.NewSubscriptionRepository(fx.db).GetByID(sub.ID)
+	got, err := fx.feedRepo.GetByID(feed.ID)
 	require.NoError(t, err)
-	assert.False(t, got.RSSBaselinePending)
+	assert.False(t, got.BaselinePending)
 	require.NotNil(t, got.LastRSSPubTime)
-	assert.Equal(t, items[2].PubTime, *got.LastRSSPubTime)
+	assert.Equal(t, items[3].PubTime, *got.LastRSSPubTime)
 	assert.NotNil(t, got.LastCheckTime)
 }
 
@@ -299,11 +466,11 @@ func TestRSSSourceBaselineFailureKeepsPendingAndWatermarkUntilRetry(t *testing.T
 	}
 	fx := newSchedulerLedgerFixture(t, items)
 	sub := fx.createSubscription(t)
-	originalWatermark := now.Add(-time.Hour)
-	require.NoError(t, fx.db.Model(&model.Subscription{}).Where("id = ?", sub.ID).Updates(map[string]any{
-		"rss_baseline_pending": true,
-		"last_rss_pub_time":    originalWatermark,
-	}).Error)
+	originalWatermark := now.Add(-72 * time.Hour)
+	feed := fx.defaultFeed(t, sub.ID)
+	feed.BaselinePending = true
+	feed.LastRSSPubTime = &originalWatermark
+	require.NoError(t, fx.feedRepo.Update(&feed))
 	require.NoError(t, fx.db.Exec(`
 		CREATE TRIGGER block_baseline_observe
 		BEFORE INSERT ON subscription_episodes
@@ -313,9 +480,9 @@ func TestRSSSourceBaselineFailureKeepsPendingAndWatermarkUntilRetry(t *testing.T
 
 	fx.scheduler.checkRSSFeeds()
 
-	afterFailure, err := repository.NewSubscriptionRepository(fx.db).GetByID(sub.ID)
+	afterFailure, err := fx.feedRepo.GetByID(feed.ID)
 	require.NoError(t, err)
-	assert.True(t, afterFailure.RSSBaselinePending)
+	assert.True(t, afterFailure.BaselinePending)
 	require.NotNil(t, afterFailure.LastRSSPubTime)
 	assert.Equal(t, originalWatermark, *afterFailure.LastRSSPubTime)
 	var downloads int64
@@ -325,9 +492,9 @@ func TestRSSSourceBaselineFailureKeepsPendingAndWatermarkUntilRetry(t *testing.T
 	require.NoError(t, fx.db.Exec("DROP TRIGGER block_baseline_observe").Error)
 	fx.scheduler.checkRSSFeeds()
 
-	afterRetry, err := repository.NewSubscriptionRepository(fx.db).GetByID(sub.ID)
+	afterRetry, err := fx.feedRepo.GetByID(feed.ID)
 	require.NoError(t, err)
-	assert.False(t, afterRetry.RSSBaselinePending)
+	assert.False(t, afterRetry.BaselinePending)
 	require.NotNil(t, afterRetry.LastRSSPubTime)
 	assert.Equal(t, items[1].PubTime, *afterRetry.LastRSSPubTime)
 	for episodeNumber := 1; episodeNumber <= 2; episodeNumber++ {
@@ -340,13 +507,16 @@ func TestRSSSourceBaselineFailureKeepsPendingAndWatermarkUntilRetry(t *testing.T
 func TestEmptyRSSSourceBaselineClearsOldWatermark(t *testing.T) {
 	fx := newSchedulerLedgerFixture(t, nil)
 	sub := fx.createSubscription(t)
-	require.NoError(t, fx.db.Model(&model.Subscription{}).Where("id = ?", sub.ID).Update("rss_baseline_pending", true).Error)
+	feed := fx.defaultFeed(t, sub.ID)
+	feed.BaselinePending = true
+	feed.LastRSSPubTime = nil
+	require.NoError(t, fx.feedRepo.Update(&feed))
 
 	fx.scheduler.checkRSSFeeds()
 
-	got, err := repository.NewSubscriptionRepository(fx.db).GetByID(sub.ID)
+	got, err := fx.feedRepo.GetByID(feed.ID)
 	require.NoError(t, err)
-	assert.False(t, got.RSSBaselinePending)
+	assert.False(t, got.BaselinePending)
 	assert.Nil(t, got.LastRSSPubTime)
 	assert.NotNil(t, got.LastCheckTime)
 }
@@ -360,6 +530,10 @@ func TestRSSSourceBaselineCompletionFailureKeepsPendingAndWatermark(t *testing.T
 	fx := newSchedulerLedgerFixture(t, items)
 	sub := fx.createSubscription(t)
 	originalWatermark := *sub.LastRSSPubTime
+	feed := fx.defaultFeed(t, sub.ID)
+	feed.BaselinePending = true
+	feed.LastRSSPubTime = &originalWatermark
+	require.NoError(t, fx.feedRepo.Update(&feed))
 	oldDownload := model.Download{
 		SubscriptionID: sub.ID,
 		Title:          "old source episode 1",
@@ -381,26 +555,26 @@ func TestRSSSourceBaselineCompletionFailureKeepsPendingAndWatermark(t *testing.T
 		ActiveTitle:       oldDownload.Title,
 	}
 	require.NoError(t, fx.db.Create(&ledger).Error)
-	require.NoError(t, fx.db.Model(&model.Subscription{}).Where("id = ?", sub.ID).Update("rss_baseline_pending", true).Error)
 	require.NoError(t, fx.db.Exec(`
 		CREATE TRIGGER block_baseline_completion
-		BEFORE UPDATE OF rss_baseline_pending ON subscriptions
-		WHEN NEW.rss_baseline_pending = 0
+		BEFORE UPDATE OF baseline_pending ON subscription_feeds
+		WHEN NEW.baseline_pending = 0
 		BEGIN SELECT RAISE(ABORT, 'baseline completion blocked'); END;
 	`).Error)
 
 	fx.scheduler.checkRSSFeeds()
 
-	afterFailure, err := repository.NewSubscriptionRepository(fx.db).GetByID(sub.ID)
+	afterFailure, err := fx.feedRepo.GetByID(feed.ID)
 	require.NoError(t, err)
-	assert.True(t, afterFailure.RSSBaselinePending)
+	assert.True(t, afterFailure.BaselinePending)
 	require.NotNil(t, afterFailure.LastRSSPubTime)
 	assert.Equal(t, originalWatermark, *afterFailure.LastRSSPubTime)
 	var candidateCount int64
 	require.NoError(t, fx.db.Model(&model.EpisodeResourceCandidate{}).Count(&candidateCount).Error)
-	assert.Zero(t, candidateCount)
-	_, err = fx.episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 2)
-	require.ErrorIs(t, err, gorm.ErrRecordNotFound)
+	assert.EqualValues(t, 1, candidateCount)
+	missing, err := fx.episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 2)
+	require.NoError(t, err)
+	assert.Equal(t, model.EpisodeStatusMissing, missing.Status)
 	unchanged, err := fx.episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
 	require.NoError(t, err)
 	assert.Equal(t, oldDownload.TorrentHash, unchanged.ActiveTorrentHash)
@@ -408,98 +582,17 @@ func TestRSSSourceBaselineCompletionFailureKeepsPendingAndWatermark(t *testing.T
 	require.NoError(t, fx.db.Exec("DROP TRIGGER block_baseline_completion").Error)
 	fx.scheduler.checkRSSFeeds()
 
-	afterRetry, err := repository.NewSubscriptionRepository(fx.db).GetByID(sub.ID)
+	afterRetry, err := fx.feedRepo.GetByID(feed.ID)
 	require.NoError(t, err)
-	assert.False(t, afterRetry.RSSBaselinePending)
+	assert.False(t, afterRetry.BaselinePending)
 	require.NotNil(t, afterRetry.LastRSSPubTime)
 	assert.Equal(t, items[1].PubTime, *afterRetry.LastRSSPubTime)
 	assert.NotNil(t, afterRetry.LastCheckTime)
 	require.NoError(t, fx.db.Model(&model.EpisodeResourceCandidate{}).Count(&candidateCount).Error)
 	assert.EqualValues(t, 1, candidateCount)
-	missing, err := fx.episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 2)
+	missing, err = fx.episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 2)
 	require.NoError(t, err)
 	assert.Equal(t, model.EpisodeStatusMissing, missing.Status)
-}
-
-func TestRSSSourceBaselineDoesNotCompleteAfterConcurrentSourceChange(t *testing.T) {
-	fx := newSchedulerLedgerFixture(t, nil)
-	sub := fx.createSubscription(t)
-	originalWatermark := *sub.LastRSSPubTime
-	require.NoError(t, fx.db.Model(&model.Subscription{}).Where("id = ?", sub.ID).Updates(map[string]any{
-		"rss_url":              "https://newer.example/feed",
-		"rss_baseline_pending": true,
-	}).Error)
-
-	err := fx.scheduler.reconcileRSSBaseline(&sub, nil)
-	require.Error(t, err)
-
-	got, err := repository.NewSubscriptionRepository(fx.db).GetByID(sub.ID)
-	require.NoError(t, err)
-	assert.Equal(t, "https://newer.example/feed", got.RssURL)
-	assert.True(t, got.RSSBaselinePending)
-	require.NotNil(t, got.LastRSSPubTime)
-	assert.Equal(t, originalWatermark, *got.LastRSSPubTime)
-}
-
-func TestRSSSourceBaselineDoesNotCompleteAfterABASourceChange(t *testing.T) {
-	item := schedulerRSSItem(1, "aba-new-source-candidate", time.Now().UTC().Add(-time.Hour))
-	fx := newSchedulerLedgerFixture(t, []rss.RSSItem{item})
-	created := fx.createSubscription(t)
-	oldDownload := model.Download{
-		SubscriptionID: created.ID,
-		Title:          "old source episode 1",
-		Episode:        1,
-		TorrentURL:     "https://old.example/episode-1.torrent",
-		TorrentHash:    "aba-old-source",
-		Status:         model.DownloadStatusCompleted,
-		Purpose:        model.DownloadPurposeNormal,
-	}
-	require.NoError(t, fx.db.Create(&oldDownload).Error)
-	ledger := model.SubscriptionEpisode{
-		SubscriptionID:    created.ID,
-		Episode:           1,
-		Status:            model.EpisodeStatusDownloaded,
-		StatusSource:      model.EpisodeStatusSourceAutomatic,
-		ActiveDownloadID:  &oldDownload.ID,
-		ActiveTorrentHash: oldDownload.TorrentHash,
-		ActiveTorrentURL:  oldDownload.TorrentURL,
-		ActiveTitle:       oldDownload.Title,
-	}
-	require.NoError(t, fx.db.Create(&ledger).Error)
-	require.NoError(t, fx.db.Model(&model.Subscription{}).Where("id = ?", created.ID).Update("rss_baseline_pending", true).Error)
-
-	snapshot, err := repository.NewSubscriptionRepository(fx.db).GetByID(created.ID)
-	require.NoError(t, err)
-	require.True(t, snapshot.RSSBaselinePending)
-	require.NotNil(t, snapshot.LastRSSPubTime)
-	originalWatermark := *snapshot.LastRSSPubTime
-	originalURL := snapshot.RssURL
-	changedAt := snapshot.UpdatedAt.Add(time.Second)
-	revertedAt := changedAt.Add(time.Second)
-	require.NoError(t, fx.db.Exec(
-		"UPDATE subscriptions SET rss_url = ?, rss_baseline_pending = ?, updated_at = ? WHERE id = ?",
-		"https://intermediate.example/feed", true, changedAt, snapshot.ID,
-	).Error)
-	require.NoError(t, fx.db.Exec(
-		"UPDATE subscriptions SET rss_url = ?, rss_baseline_pending = ?, updated_at = ? WHERE id = ?",
-		originalURL, true, revertedAt, snapshot.ID,
-	).Error)
-
-	err = fx.scheduler.reconcileRSSBaseline(snapshot, []rss.RSSItem{item})
-	require.ErrorContains(t, err, "source changed")
-
-	got, err := repository.NewSubscriptionRepository(fx.db).GetByID(snapshot.ID)
-	require.NoError(t, err)
-	assert.Equal(t, originalURL, got.RssURL)
-	assert.True(t, got.RSSBaselinePending)
-	require.NotNil(t, got.LastRSSPubTime)
-	assert.Equal(t, originalWatermark, *got.LastRSSPubTime)
-	var candidateCount int64
-	require.NoError(t, fx.db.Model(&model.EpisodeResourceCandidate{}).Count(&candidateCount).Error)
-	assert.Zero(t, candidateCount)
-	unchanged, err := fx.episodeRepo.GetBySubscriptionAndEpisode(snapshot.ID, 1)
-	require.NoError(t, err)
-	assert.Equal(t, oldDownload.TorrentHash, unchanged.ActiveTorrentHash)
 }
 
 func TestSmartFetchAlwaysFetchesPendingRSSBaselineAfterCalendarGuard(t *testing.T) {
@@ -520,13 +613,13 @@ func TestSmartFetchAlwaysFetchesPendingRSSBaselineAfterCalendarGuard(t *testing.
 		CurrentEpisode:     1,
 		CompletedAt:        &completedAt,
 	}
-	status, _ := filter.EvaluateSubscription(&sub)
+	status, _ := filter.EvaluateSubscription(&sub, true)
 	assert.True(t, status.ShouldFetch)
-	assert.Equal(t, "rss_baseline_pending", status.FetchReason)
+	assert.Equal(t, "feed_baseline_pending", status.FetchReason)
 
 	sub.RssURL = ""
 	sub.SourceType = "calendar"
-	status, _ = filter.EvaluateSubscription(&sub)
+	status, _ = filter.EvaluateSubscription(&sub, true)
 	assert.False(t, status.ShouldFetch)
 	assert.Equal(t, "calendar_only", status.FetchReason)
 }
@@ -543,7 +636,7 @@ func TestProcessDownloadItemCreatesPendingIntentWithoutQBAdd(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, episode.DecisionDownload, decision.Action)
 
-	created, err := fx.scheduler.processDownloadItem(&sub, &item, decision.EpisodeID)
+	created, err := fx.scheduler.processDownloadItem(&sub, &item, decision.EpisodeID, nil)
 	require.NoError(t, err)
 	assert.True(t, created)
 	assert.Zero(t, fx.qb.addCalls)
@@ -604,7 +697,7 @@ func TestProcessDownloadItemPauseReturnsRetryableErrorAndReleasesClaim(t *testin
 	require.Equal(t, episode.DecisionDownload, decision.Action)
 	fx.scheduler.downloadsPaused = func() bool { return true }
 
-	created, err := fx.scheduler.processDownloadItem(&sub, &item, decision.EpisodeID)
+	created, err := fx.scheduler.processDownloadItem(&sub, &item, decision.EpisodeID, nil)
 
 	assert.False(t, created)
 	require.ErrorIs(t, err, errDownloadsPaused)
@@ -639,7 +732,7 @@ func TestProcessDownloadItemCreateFailureReleasesOnlyMatchingClaim(t *testing.T)
 	require.NoError(t, err)
 	require.True(t, claimed)
 
-	created, err := fx.scheduler.processDownloadItem(&sub, &item, claimedEpisode.ID)
+	created, err := fx.scheduler.processDownloadItem(&sub, &item, claimedEpisode.ID, nil)
 	require.ErrorContains(t, err, "failed to create download")
 	assert.False(t, created)
 	var count int64
@@ -682,7 +775,7 @@ func TestProcessDownloadItemAttachFailureRollsBackDownloadAndReleasesClaim(t *te
 		END;
 	`).Error)
 
-	created, err := fx.scheduler.processDownloadItem(&sub, &item, decision.EpisodeID)
+	created, err := fx.scheduler.processDownloadItem(&sub, &item, decision.EpisodeID, nil)
 	require.ErrorContains(t, err, "failed to attach download to episode")
 	require.ErrorContains(t, err, "attach blocked")
 	assert.False(t, created)
@@ -714,14 +807,43 @@ func TestProcessDownloadItemAttachFailureRollsBackDownloadAndReleasesClaim(t *te
 }
 
 type schedulerRSSParser struct {
-	items []rss.RSSItem
+	mu     sync.RWMutex
+	items  []rss.RSSItem
+	byURL  map[string][]rss.RSSItem
+	errors map[string]error
 }
 
-func (p *schedulerRSSParser) FetchAndParse(string) ([]rss.RSSItem, error) {
+func (p *schedulerRSSParser) set(url string, items []rss.RSSItem) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.byURL == nil {
+		p.byURL = make(map[string][]rss.RSSItem)
+	}
+	p.byURL[url] = append([]rss.RSSItem(nil), items...)
+}
+
+func (p *schedulerRSSParser) fail(url string, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.errors == nil {
+		p.errors = make(map[string]error)
+	}
+	p.errors[url] = err
+}
+
+func (p *schedulerRSSParser) FetchAndParse(url string) ([]rss.RSSItem, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if err := p.errors[url]; err != nil {
+		return nil, err
+	}
+	if items, ok := p.byURL[url]; ok {
+		return append([]rss.RSSItem(nil), items...), nil
+	}
 	return append([]rss.RSSItem(nil), p.items...), nil
 }
-func (p *schedulerRSSParser) FetchAndParseWithTimeout(string, time.Duration) ([]rss.RSSItem, error) {
-	return append([]rss.RSSItem(nil), p.items...), nil
+func (p *schedulerRSSParser) FetchAndParseWithTimeout(url string, _ time.Duration) ([]rss.RSSItem, error) {
+	return p.FetchAndParse(url)
 }
 func (p *schedulerRSSParser) Parse(interface{}) ([]rss.RSSItem, error) { return nil, nil }
 func (p *schedulerRSSParser) ExtractFansub(string) string              { return "" }

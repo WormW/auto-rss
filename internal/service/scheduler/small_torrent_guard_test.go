@@ -86,7 +86,7 @@ func TestProcessDownloadItemSmallTorrentGuardReleasesClaim(t *testing.T) {
 			if err != nil || !claimed {
 				t.Fatalf("claim episode: claimed=%v err=%v", claimed, err)
 			}
-			created, err := s.processDownloadItem(sub, item, claimedEpisode.ID)
+			created, err := s.processDownloadItem(sub, item, claimedEpisode.ID, nil)
 			if err != nil {
 				t.Fatalf("processDownloadItem() error = %v", err)
 			}
@@ -171,7 +171,7 @@ func TestProcessDownloadItemSmallTorrentGuardReleasesClaimAndLeavesExistingDownl
 	if err != nil || !claimed {
 		t.Fatalf("claim episode: claimed=%v err=%v", claimed, err)
 	}
-	created, err := s.processDownloadItem(sub, item, claimedEpisode.ID)
+	created, err := s.processDownloadItem(sub, item, claimedEpisode.ID, nil)
 	if err != nil {
 		t.Fatalf("processDownloadItem() error = %v", err)
 	}

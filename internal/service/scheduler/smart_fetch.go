@@ -137,12 +137,12 @@ func (f *SmartFetchFilter) SetStrategy(strategy *SmartFetchStrategy) {
 
 // FilterSubscriptions 过滤应该拉取的订阅
 // 返回：拉取状态列表，需要更新的订阅索引列表
-func (f *SmartFetchFilter) FilterSubscriptions(subscriptions []model.Subscription) ([]SubscriptionFetchStatus, []int) {
+func (f *SmartFetchFilter) FilterSubscriptions(subscriptions []model.Subscription, pendingFeeds map[uint]bool) ([]SubscriptionFetchStatus, []int) {
 	var results []SubscriptionFetchStatus
 	var needsUpdateIndexes []int
 
 	for i := range subscriptions {
-		status, needsUpdate := f.EvaluateSubscription(&subscriptions[i])
+		status, needsUpdate := f.EvaluateSubscription(&subscriptions[i], pendingFeeds[subscriptions[i].ID])
 		results = append(results, status)
 		if needsUpdate {
 			needsUpdateIndexes = append(needsUpdateIndexes, i)
@@ -154,7 +154,7 @@ func (f *SmartFetchFilter) FilterSubscriptions(subscriptions []model.Subscriptio
 
 // EvaluateSubscription 评估单个订阅是否应该拉取
 // 返回：拉取状态，是否需要更新数据库
-func (f *SmartFetchFilter) EvaluateSubscription(sub *model.Subscription) (SubscriptionFetchStatus, bool) {
+func (f *SmartFetchFilter) EvaluateSubscription(sub *model.Subscription, hasPendingFeed bool) (SubscriptionFetchStatus, bool) {
 	status := SubscriptionFetchStatus{
 		Subscription:      sub,
 		ShouldFetch:       false,
@@ -175,10 +175,10 @@ func (f *SmartFetchFilter) EvaluateSubscription(sub *model.Subscription) (Subscr
 		return status, needsUpdate
 	}
 
-	if sub.RSSBaselinePending {
+	if hasPendingFeed {
 		status.ShouldFetch = true
-		status.FetchReason = "rss_baseline_pending"
-		status.Explanation = "RSS 源等待基线对账，本轮强制拉取。"
+		status.FetchReason = "feed_baseline_pending"
+		status.Explanation = "订阅源等待基线对账，本轮强制拉取。"
 		status.NextFetchInterval = f.strategy.NormalInterval
 		return status, needsUpdate
 	}
