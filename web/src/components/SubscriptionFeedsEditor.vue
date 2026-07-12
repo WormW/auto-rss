@@ -544,23 +544,23 @@ const previewColumns: DataTableColumns<SubscriptionFeedPreviewItem> = [
   padding: 24px 0 14px;
 }
 
-.feed-name-cell,
-.feed-result-cell,
-.mapping-status {
+:deep(.feed-name-cell),
+:deep(.feed-result-cell),
+:deep(.mapping-status) {
   display: flex;
   min-width: 0;
   flex-direction: column;
 }
 
-.feed-name-cell strong {
+:deep(.feed-name-cell strong) {
   overflow: hidden;
   font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.feed-name-cell span,
-.feed-result-cell span {
+:deep(.feed-name-cell span),
+:deep(.feed-result-cell span) {
   overflow: hidden;
   color: #7b8491;
   font-size: 11px;
@@ -569,23 +569,23 @@ const previewColumns: DataTableColumns<SubscriptionFeedPreviewItem> = [
   white-space: nowrap;
 }
 
-.feed-offset-value,
-.feed-result-cell,
-.mapping-status {
+:deep(.feed-offset-value),
+:deep(.feed-result-cell),
+:deep(.mapping-status) {
   font-variant-numeric: tabular-nums;
 }
 
-.feed-row-error {
+:deep(.feed-row-error) {
   color: #d03050 !important;
 }
 
-.feed-row-actions {
+:deep(.feed-row-actions) {
   display: flex;
   align-items: center;
   gap: 2px;
 }
 
-.feed-icon-button {
+:deep(.feed-icon-button) {
   min-width: 40px;
   min-height: 40px;
   transition-property: scale, color;
@@ -593,7 +593,7 @@ const previewColumns: DataTableColumns<SubscriptionFeedPreviewItem> = [
   transition-timing-function: ease-out;
 }
 
-.feed-icon-button:active:not(:disabled) {
+:deep(.feed-icon-button:active:not(:disabled)) {
   scale: 0.96;
 }
 
@@ -627,11 +627,11 @@ const previewColumns: DataTableColumns<SubscriptionFeedPreviewItem> = [
   font-weight: 600;
 }
 
-.mapping-status {
+:deep(.mapping-status) {
   gap: 4px;
 }
 
-.mapping-status span {
+:deep(.mapping-status span) {
   color: #8a5a00;
   font-size: 11px;
   line-height: 1.35;

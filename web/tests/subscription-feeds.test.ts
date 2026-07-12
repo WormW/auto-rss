@@ -62,6 +62,18 @@ test('feed 编辑器要求映射预览并提供可访问的行操作', () => {
   assert.match(editor, /['"]aria-label['"]:\s*['"]删除 feed['"]/)
 })
 
+test('feed 编辑器为 TSX 渲染的行操作应用 scoped deep 样式', () => {
+  const editor = readFileSync(
+    new URL('../src/components/SubscriptionFeedsEditor.vue', import.meta.url),
+    'utf8'
+  )
+
+  assert.match(editor, /:deep\(\.feed-row-actions\)/)
+  assert.match(editor, /:deep\(\.feed-icon-button\)/)
+  assert.match(editor, /min-width:\s*40px/)
+  assert.match(editor, /min-height:\s*40px/)
+})
+
 test('订阅表单用 feed 编辑器和保存计划替代单 RSS 偏移表单', () => {
   const view = readFileSync(
     new URL('../src/views/Subscriptions.vue', import.meta.url),
