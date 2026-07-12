@@ -237,7 +237,7 @@ func (s *Service) Export(includeSensitive bool) (*Package, error) {
 	seenSubscriptionKeys := make(map[string]uint, len(subscriptions))
 	for _, sub := range subscriptions {
 		key := subscriptionKeyFromModel(sub)
-		if key == "" {
+		if hasOwnership && key == "" {
 			return nil, fmt.Errorf("subscription %d has no stable backup key", sub.ID)
 		}
 		if existingID, exists := seenSubscriptionKeys[key]; hasOwnership && exists && existingID != sub.ID {
@@ -1402,7 +1402,7 @@ func validatePackage(pkg *Package) error {
 	subscriptionKeys := make(map[string]struct{}, len(pkg.Subscriptions))
 	for i, record := range pkg.Subscriptions {
 		key := subscriptionKeyFromRecord(record)
-		if key == "" {
+		if hasOwnership && key == "" {
 			return fmt.Errorf("subscriptions[%d]: missing stable subscription key", i)
 		}
 		if _, exists := subscriptionKeys[key]; hasOwnership && exists {
