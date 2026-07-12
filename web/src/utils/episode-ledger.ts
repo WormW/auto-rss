@@ -26,7 +26,6 @@ export interface CandidateDifferenceDescription {
 }
 
 const UNKNOWN_VALUE = '未知'
-const MAX_TITLE_LENGTH = 80
 
 const statusLabels: Record<EpisodeStatus, string> = {
   missing: '缺失',
@@ -47,13 +46,6 @@ const statusTypes: Record<EpisodeStatus, EpisodeStatusTagType> = {
 const normalizeValue = (value?: string | null): string => value?.trim() || ''
 
 const displayValue = (value?: string | null): string => normalizeValue(value) || UNKNOWN_VALUE
-
-const displayTitle = (value?: string | null): string => {
-  const normalized = normalizeValue(value)
-  if (!normalized) return UNKNOWN_VALUE
-  if (normalized.length <= MAX_TITLE_LENGTH) return normalized
-  return `${normalized.slice(0, MAX_TITLE_LENGTH)}...`
-}
 
 const describeField = (
   currentValue: string | null | undefined,
@@ -89,7 +81,7 @@ export const describeCandidateDifference = (
   action: 'manual_review',
   hash: describeField(current.active_torrent_hash, candidate.torrent_hash),
   url: describeField(current.active_torrent_url, candidate.torrent_url),
-  title: describeField(current.active_title, candidate.title, displayTitle),
+  title: describeField(current.active_title, candidate.title),
   fansub: displayValue(candidate.fansub),
   language: displayValue(candidate.language),
   publishedAt: displayValue(candidate.pub_time),

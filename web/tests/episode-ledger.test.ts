@@ -130,7 +130,20 @@ test('候选资源比较安全处理空资源身份、长标题和空发布时�
   assert.equal(result.url.candidate, '未知')
   assert.equal(result.url.different, false)
   assert.equal(result.title.current, '未知')
-  assert.equal(result.title.candidate.endsWith('...'), true)
-  assert.equal(result.title.candidate.length <= 83, true)
+  assert.equal(result.title.candidate, longTitle)
   assert.equal(result.publishedAt, '未知')
+})
+
+test('候选资源比较完整保留前缀相同但版本不同的长标题', () => {
+  const sharedPrefix = '共同前缀'.repeat(20)
+  const currentTitle = `${sharedPrefix} v1`
+  const candidateTitle = `${sharedPrefix} v2`
+  const result = describeCandidateDifference(
+    episode({ active_title: currentTitle }),
+    candidate({ title: candidateTitle })
+  )
+
+  assert.equal(result.title.current, currentTitle)
+  assert.equal(result.title.candidate, candidateTitle)
+  assert.equal(result.title.different, true)
 })
