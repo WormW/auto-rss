@@ -1,6 +1,10 @@
 package downloader
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/WormW/auto-rss/internal/model"
+)
 
 func TestMapQBStateToStatus(t *testing.T) {
 	tests := []struct {
@@ -28,5 +32,14 @@ func TestMapQBStateToStatus(t *testing.T) {
 				t.Fatalf("mapQBStateToStatus(%q) = %q, want %q", tt.state, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestReplacementMonitorIsolationSkipsNormalCompletionHandler(t *testing.T) {
+	if shouldRunCompletionHandler(&model.Download{Purpose: model.DownloadPurposeReplacement}) {
+		t.Fatal("replacement download must not enter the normal completion handler")
+	}
+	if !shouldRunCompletionHandler(&model.Download{Purpose: model.DownloadPurposeNormal}) {
+		t.Fatal("normal download should enter the normal completion handler")
 	}
 }

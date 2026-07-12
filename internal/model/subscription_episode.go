@@ -68,6 +68,8 @@ type EpisodeResourceCandidate struct {
 	FinalPath             string     `json:"final_path" gorm:"type:text"`
 	ReplacementStage      string     `json:"replacement_stage" gorm:"size:40;index"`
 	ReplacementDownloadID *uint      `json:"replacement_download_id" gorm:"index"`
+	OldDownloadID         *uint      `json:"old_download_id" gorm:"index"`
+	OldTorrentHash        string     `json:"old_torrent_hash" gorm:"size:128"`
 	CreatedAt             time.Time  `json:"created_at"`
 	UpdatedAt             time.Time  `json:"updated_at"`
 }

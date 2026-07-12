@@ -42,6 +42,8 @@ func (m *mockQBClient) GetTorrentsByCategory(category string) ([]*downloader.Tor
 func (m *mockQBClient) SetCategory(hash, category string) error               { return nil }
 func (m *mockQBClient) SetLocation(hash, location string) error               { return nil }
 func (m *mockQBClient) RenameTorrentFile(hash, oldPath, newPath string) error { return nil }
+func (m *mockQBClient) PauseTorrent(hash string) error                        { return nil }
+func (m *mockQBClient) ResumeTorrent(hash string) error                       { return nil }
 func (m *mockQBClient) RemoveTorrentTask(hash string) error                   { return nil }
 func (m *mockQBClient) DeleteTorrentWithPayload(hash string) error            { return nil }
 func (m *mockQBClient) GetTorrentFiles(hash string) ([]downloader.TorrentFile, error) {

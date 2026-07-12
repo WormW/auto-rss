@@ -125,6 +125,46 @@ func TestRunMigrationsAddsDiskCleanupFailureColumns(t *testing.T) {
 	}
 }
 
+func TestRunMigrationsAddsReplacementRecoverySnapshotColumnsToExistingLedger(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("Failed to connect to test database: %v", err)
+	}
+	if err := db.Exec(`CREATE TABLE episode_resource_candidates (
+		id integer PRIMARY KEY AUTOINCREMENT,
+		subscription_episode_id integer NOT NULL,
+		resource_key text,
+		status text,
+		replacement_stage text
+	)`).Error; err != nil {
+		t.Fatalf("create legacy candidate table: %v", err)
+	}
+	if err := db.AutoMigrate(&MigrationRecord{}); err != nil {
+		t.Fatalf("create migration table: %v", err)
+	}
+	for _, id := range []string{
+		"202504090001", "202504090002", "202504230001", "202606120001",
+		"202606150001", "202606150002", "202606180001", "202607110001",
+	} {
+		if err := db.Create(&MigrationRecord{ID: id}).Error; err != nil {
+			t.Fatalf("seed migration %s: %v", id, err)
+		}
+	}
+
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+	if !db.Migrator().HasColumn(&model.EpisodeResourceCandidate{}, "old_download_id") {
+		t.Fatal("expected old_download_id recovery snapshot column")
+	}
+	if !db.Migrator().HasColumn(&model.EpisodeResourceCandidate{}, "old_torrent_hash") {
+		t.Fatal("expected old_torrent_hash recovery snapshot column")
+	}
+	if !db.Migrator().HasIndex(&model.EpisodeResourceCandidate{}, "idx_episode_candidate_single_replacing") {
+		t.Fatal("expected unique replacing candidate index")
+	}
+}
+
 func TestRunMigrationsBackfillsEpisodeLedgerWithoutInferringGaps(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

@@ -468,7 +468,7 @@ func (m *DownloadMonitor) checkDownloads() {
 
 		if m.statusSync != nil {
 			changed, _ := m.statusSync.UpdateStatus(download, torrent)
-			if changed && downloadStatusForTorrent(torrent) == model.DownloadStatusCompleted && m.completionHandler != nil {
+			if changed && downloadStatusForTorrent(torrent) == model.DownloadStatusCompleted && m.completionHandler != nil && shouldRunCompletionHandler(download) {
 				subscription, _ := m.subscriptionRepo.GetByID(download.SubscriptionID)
 				if subscription != nil {
 					m.completionHandler.HandleComplete(download, torrent, subscription)
@@ -483,6 +483,10 @@ func (m *DownloadMonitor) checkDownloads() {
 		stalled, _, _ := m.downloadRepo.List(0, 10000, "stalled")
 		m.statusSync.Reconcile(torrents, downloading, stalled)
 	}
+}
+
+func shouldRunCompletionHandler(download *model.Download) bool {
+	return download != nil && download.Purpose != model.DownloadPurposeReplacement
 }
 
 // sendFailedNotification 发送下载失败通知

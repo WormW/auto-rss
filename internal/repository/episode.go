@@ -43,6 +43,9 @@ type EpisodeRepository interface {
 	ListCandidatesByScope(subscriptionID uint, episode, offset, limit int) ([]model.EpisodeResourceCandidate, error)
 	KeepCandidate(subscriptionID uint, episode int, candidateID uint) (*model.EpisodeResourceCandidate, error)
 	UpdateCandidate(candidate *model.EpisodeResourceCandidate) error
+	GetCandidateByID(candidateID uint) (*model.EpisodeResourceCandidate, error)
+	ClaimCandidateForReplacement(candidateID uint) (*model.EpisodeResourceCandidate, error)
+	ListIncompleteReplacements() ([]model.EpisodeResourceCandidate, error)
 	ObserveEpisode(subscriptionID uint, episode int) (*model.SubscriptionEpisode, error)
 	EnsureRange(subscriptionID uint, total int) error
 	EnsureRangeInTx(tx *gorm.DB, subscriptionID uint, total int) error
@@ -52,6 +55,7 @@ type EpisodeRepository interface {
 
 var ErrActiveDownloadMustBeResolved = errors.New("active download must be resolved")
 var ErrCandidateStateConflict = errors.New("candidate state conflict")
+var ErrReplacementInProgress = errors.New("replacement already in progress")
 
 type episodeRepository struct {
 	db *gorm.DB
@@ -402,6 +406,75 @@ func (r *episodeRepository) UpdateCandidate(candidate *model.EpisodeResourceCand
 		return errors.New("candidate is required")
 	}
 	return r.db.Save(candidate).Error
+}
+
+func (r *episodeRepository) GetCandidateByID(candidateID uint) (*model.EpisodeResourceCandidate, error) {
+	var candidate model.EpisodeResourceCandidate
+	if err := r.db.First(&candidate, candidateID).Error; err != nil {
+		return nil, err
+	}
+	return &candidate, nil
+}
+
+func (r *episodeRepository) ClaimCandidateForReplacement(candidateID uint) (*model.EpisodeResourceCandidate, error) {
+	result := r.db.Exec(`
+		UPDATE episode_resource_candidates
+		SET status = ?, replacement_stage = ?, failure_reason = '',
+			staged_path = '', old_resource_path = '', rollback_path = '',
+			replacement_download_id = NULL, old_download_id = NULL, old_torrent_hash = '',
+			updated_at = ?
+		WHERE id = ?
+		  AND status IN (?, ?)
+		  AND NOT EXISTS (
+			SELECT 1 FROM episode_resource_candidates active
+			WHERE active.subscription_episode_id = episode_resource_candidates.subscription_episode_id
+			  AND active.id <> episode_resource_candidates.id
+			  AND active.status = ?
+		  )`,
+		model.CandidateStatusReplacing, "queued", time.Now(), candidateID,
+		model.CandidateStatusPending, model.CandidateStatusFailed, model.CandidateStatusReplacing,
+	)
+	if result.Error != nil {
+		var candidate model.EpisodeResourceCandidate
+		if err := r.db.First(&candidate, candidateID).Error; err == nil {
+			var active int64
+			if countErr := r.db.Model(&model.EpisodeResourceCandidate{}).
+				Where("subscription_episode_id = ? AND id <> ? AND status = ?", candidate.SubscriptionEpisodeID, candidate.ID, model.CandidateStatusReplacing).
+				Count(&active).Error; countErr == nil && active > 0 {
+				return nil, ErrReplacementInProgress
+			}
+		}
+		return nil, result.Error
+	}
+	candidate, err := r.GetCandidateByID(candidateID)
+	if err != nil {
+		return nil, err
+	}
+	if result.RowsAffected == 1 {
+		return candidate, nil
+	}
+	if candidate.Status == model.CandidateStatusReplacing {
+		return nil, ErrReplacementInProgress
+	}
+	var active int64
+	if err := r.db.Model(&model.EpisodeResourceCandidate{}).
+		Where("subscription_episode_id = ? AND id <> ? AND status = ?", candidate.SubscriptionEpisodeID, candidate.ID, model.CandidateStatusReplacing).
+		Count(&active).Error; err != nil {
+		return nil, err
+	}
+	if active > 0 {
+		return nil, ErrReplacementInProgress
+	}
+	return nil, fmt.Errorf("%w: candidate %d has status %s", ErrCandidateStateConflict, candidateID, candidate.Status)
+}
+
+func (r *episodeRepository) ListIncompleteReplacements() ([]model.EpisodeResourceCandidate, error) {
+	var candidates []model.EpisodeResourceCandidate
+	err := r.db.Where("status IN ?", []string{
+		model.CandidateStatusReplacing,
+		model.CandidateStatusAcceptedCleanupFailed,
+	}).Order("updated_at ASC, id ASC").Find(&candidates).Error
+	return candidates, err
 }
 
 func (r *episodeRepository) ObserveEpisode(subscriptionID uint, episode int) (*model.SubscriptionEpisode, error) {

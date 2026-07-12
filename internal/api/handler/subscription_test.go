@@ -562,6 +562,8 @@ func (m *collectEpisodesSmallTorrentQBClient) SetLocation(hash string, location 
 func (m *collectEpisodesSmallTorrentQBClient) RenameTorrentFile(hash string, oldPath string, newPath string) error {
 	return nil
 }
+func (m *collectEpisodesSmallTorrentQBClient) PauseTorrent(hash string) error  { return nil }
+func (m *collectEpisodesSmallTorrentQBClient) ResumeTorrent(hash string) error { return nil }
 func (m *collectEpisodesSmallTorrentQBClient) RemoveTorrentTask(hash string) error {
 	return nil
 }

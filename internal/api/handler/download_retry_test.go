@@ -77,6 +77,8 @@ func (m *mockQBittorrentClient) SetLocation(hash string, location string) error 
 func (m *mockQBittorrentClient) RenameTorrentFile(hash string, oldPath string, newPath string) error {
 	return nil
 }
+func (m *mockQBittorrentClient) PauseTorrent(hash string) error  { return nil }
+func (m *mockQBittorrentClient) ResumeTorrent(hash string) error { return nil }
 func (m *mockQBittorrentClient) GetTorrentFiles(hash string) ([]downloader.TorrentFile, error) {
 	return nil, nil
 }

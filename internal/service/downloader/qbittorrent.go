@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/WormW/auto-rss/internal/pkg/utils"
+	qbclient "github.com/WormW/auto-rss/internal/qbittorrent"
 	"github.com/go-resty/resty/v2"
 )
 
@@ -16,59 +17,9 @@ const (
 	torrentAddPollInterval = 500 * time.Millisecond
 )
 
-// QBittorrentClient qBittorrent 客户端接口
-type QBittorrentClient interface {
-	// Login 登录
-	Login(host, username, password string) error
-	// TestConnection 测试连接
-	TestConnection(host, username, password string) error
-	// AddTorrent 添加种子任务
-	AddTorrent(torrentURL string, savePath string, category string) (string, error)
-	// AddTorrentFile 通过文件内容添加种子
-	AddTorrentFile(filename string, fileContent []byte, savePath string, category string) (string, error)
-	// GetTorrentInfo 获取种子信息
-	GetTorrentInfo(hash string) (*TorrentInfo, error)
-	// GetTorrentsByCategory 获取指定分类的所有种子
-	GetTorrentsByCategory(category string) ([]*TorrentInfo, error)
-	// SetCategory 设置种子分类
-	SetCategory(hash string, category string) error
-	// SetLocation 移动种子到新位置
-	SetLocation(hash string, location string) error
-	// RenameTorrentFile 重命名种子文件
-	RenameTorrentFile(hash string, oldPath string, newPath string) error
-	// RemoveTorrentTask 仅删除 qBittorrent 任务，不删除已下载文件
-	RemoveTorrentTask(hash string) error
-	// DeleteTorrentWithPayload 删除 qBittorrent 任务及其已下载文件
-	DeleteTorrentWithPayload(hash string) error
-	// GetTorrentFiles 获取种子文件列表
-	GetTorrentFiles(hash string) ([]TorrentFile, error)
-	// GetVersion 获取qBittorrent版本信息
-	GetVersion() (string, error)
-	// SetProxy 设置代理
-	SetProxy(proxyURL string) error
-	// DownloadTorrentFile 下载种子文件内容
-	DownloadTorrentFile(url string) ([]byte, error)
-}
-
-// TorrentInfo 种子信息
-type TorrentInfo struct {
-	Hash       string
-	Name       string
-	Progress   float64
-	State      string // 状态：downloading, uploading, pausedUP, pausedDL, queuedUP, queuedDL, checkingUP, checkingDL, stalledUP, stalledDL, metaDL, forcedUP, forcedDL, allocating, unknown, missingFiles, error
-	SavePath   string
-	Category   string
-	Size       int64
-	Downloaded int64
-	Uploaded   int64
-}
-
-// TorrentFile 种子文件
-type TorrentFile struct {
-	Name     string
-	Size     int64
-	Progress float64
-}
+type QBittorrentClient = qbclient.Client
+type TorrentInfo = qbclient.TorrentInfo
+type TorrentFile = qbclient.TorrentFile
 
 type qbittorrentClient struct {
 	host        string
@@ -311,6 +262,29 @@ func getInt64Value(m map[string]interface{}, key string) int64 {
 // RemoveTorrentTask 仅删除 qBittorrent 任务，不删除已下载文件。
 func (c *qbittorrentClient) RemoveTorrentTask(hash string) error {
 	return c.deleteTorrent(hash, false)
+}
+
+// PauseTorrent 暂停指定种子任务。
+func (c *qbittorrentClient) PauseTorrent(hash string) error {
+	return c.controlTorrent(hash, "pause")
+}
+
+// ResumeTorrent 恢复指定种子任务。
+func (c *qbittorrentClient) ResumeTorrent(hash string) error {
+	return c.controlTorrent(hash, "resume")
+}
+
+func (c *qbittorrentClient) controlTorrent(hash, action string) error {
+	resp, err := c.client.R().
+		SetFormData(map[string]string{"hashes": hash}).
+		Post(c.host + "/api/v2/torrents/" + action)
+	if err != nil {
+		return fmt.Errorf("%s torrent request failed: %w", action, err)
+	}
+	if resp.StatusCode() != 200 {
+		return fmt.Errorf("%s torrent failed: status code %d", action, resp.StatusCode())
+	}
+	return nil
 }
 
 // DeleteTorrentWithPayload 删除 qBittorrent 任务及其已下载文件。

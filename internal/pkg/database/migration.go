@@ -182,6 +182,31 @@ func RunMigrations(db *gorm.DB) error {
 				)
 			},
 		},
+		{
+			ID: "202607120001", // add replacement recovery snapshots
+			Migrate: func(tx *gorm.DB) error {
+				if err := tx.AutoMigrate(&model.EpisodeResourceCandidate{}); err != nil {
+					return err
+				}
+				return tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_episode_candidate_single_replacing
+					ON episode_resource_candidates(subscription_episode_id)
+					WHERE status = 'replacing'`).Error
+			},
+			Rollback: func(tx *gorm.DB) error {
+				if err := tx.Exec("DROP INDEX IF EXISTS idx_episode_candidate_single_replacing").Error; err != nil {
+					return err
+				}
+				if tx.Migrator().HasColumn(&model.EpisodeResourceCandidate{}, "old_download_id") {
+					if err := tx.Migrator().DropColumn(&model.EpisodeResourceCandidate{}, "old_download_id"); err != nil {
+						return err
+					}
+				}
+				if tx.Migrator().HasColumn(&model.EpisodeResourceCandidate{}, "old_torrent_hash") {
+					return tx.Migrator().DropColumn(&model.EpisodeResourceCandidate{}, "old_torrent_hash")
+				}
+				return nil
+			},
+		},
 	})
 
 	// 设置迁移超时

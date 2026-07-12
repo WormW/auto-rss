@@ -241,6 +241,8 @@ func (m *smallTorrentGuardQBClient) SetLocation(hash string, location string) er
 func (m *smallTorrentGuardQBClient) RenameTorrentFile(hash string, oldPath string, newPath string) error {
 	return nil
 }
+func (m *smallTorrentGuardQBClient) PauseTorrent(hash string) error             { return nil }
+func (m *smallTorrentGuardQBClient) ResumeTorrent(hash string) error            { return nil }
 func (m *smallTorrentGuardQBClient) RemoveTorrentTask(hash string) error        { return nil }
 func (m *smallTorrentGuardQBClient) DeleteTorrentWithPayload(hash string) error { return nil }
 func (m *smallTorrentGuardQBClient) GetTorrentFiles(hash string) ([]downloader.TorrentFile, error) {

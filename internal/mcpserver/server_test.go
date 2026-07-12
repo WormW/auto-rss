@@ -645,6 +645,9 @@ func (c *fakeMCPQBClient) RenameTorrentFile(hash string, oldPath string, newPath
 	return nil
 }
 
+func (c *fakeMCPQBClient) PauseTorrent(hash string) error  { return nil }
+func (c *fakeMCPQBClient) ResumeTorrent(hash string) error { return nil }
+
 func (c *fakeMCPQBClient) RemoveTorrentTask(hash string) error {
 	c.removeTaskCalls++
 	c.removedHash = hash

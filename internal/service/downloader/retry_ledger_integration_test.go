@@ -670,6 +670,8 @@ func (q *retryLedgerQBClient) SetCategory(hash, category string) error {
 }
 func (q *retryLedgerQBClient) SetLocation(string, string) error               { return nil }
 func (q *retryLedgerQBClient) RenameTorrentFile(string, string, string) error { return nil }
+func (q *retryLedgerQBClient) PauseTorrent(string) error                      { return nil }
+func (q *retryLedgerQBClient) ResumeTorrent(string) error                     { return nil }
 func (q *retryLedgerQBClient) RemoveTorrentTask(string) error                 { return nil }
 func (q *retryLedgerQBClient) DeleteTorrentWithPayload(hash string) error {
 	q.operations = append(q.operations, "delete")
