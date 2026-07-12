@@ -39,7 +39,7 @@
         >
           <div class="alert-row">
             <span>{{ loadError }}</span>
-            <n-button size="small" :loading="loading" @click="loadEpisodes">
+            <n-button class="error-retry-button" size="small" :loading="loading" @click="loadEpisodes">
               <template #icon><n-icon><ReloadOutlined /></n-icon></template>
               重试
             </n-button>
@@ -74,9 +74,11 @@
             <div class="manual-episode-input">
               <n-input-number
                 id="manual-episode-number"
+                class="manual-episode-number"
                 v-model:value="manualEpisodeNumber"
                 :min="1"
                 :max="10000"
+                button-placement="both"
                 placeholder="集数"
                 @keyup.enter="addManualEpisode"
               />
@@ -217,7 +219,7 @@
       <n-alert v-if="candidateError" type="error" role="alert" class="candidate-error">
         <div class="alert-row">
           <span>{{ candidateError }}</span>
-          <n-button size="small" @click="reloadSelectedCandidates">重试</n-button>
+          <n-button class="error-retry-button" size="small" @click="reloadSelectedCandidates">重试</n-button>
         </div>
       </n-alert>
 
@@ -226,6 +228,7 @@
           <label for="candidate-resource-select">资源候选</label>
           <n-select
             id="candidate-resource-select"
+            class="candidate-select"
             v-model:value="selectedCandidateId"
             :options="candidateOptions"
           />
@@ -1102,6 +1105,7 @@ function apiErrorMessage(error: any, fallback: string) {
 .episode-filter-tabs :deep(.n-tabs-tab) {
   flex: 0 0 auto;
   min-width: 78px;
+  min-height: 40px;
 }
 
 .manual-episode-row {
@@ -1125,6 +1129,16 @@ function apiErrorMessage(error: any, fallback: string) {
   gap: 8px;
 }
 
+.manual-episode-number :deep(.n-input) {
+  min-height: 40px;
+}
+
+.manual-episode-number :deep(.n-input__prefix > .n-button),
+.manual-episode-number :deep(.n-input__suffix > .n-button) {
+  min-width: 40px;
+  min-height: 40px;
+}
+
 .selection-toolbar {
   margin: 16px 0 12px;
   padding: 10px 0;
@@ -1134,6 +1148,16 @@ function apiErrorMessage(error: any, fallback: string) {
   gap: 8px 14px;
   border-top: 1px solid rgba(31, 37, 46, 0.09);
   border-bottom: 1px solid rgba(31, 37, 46, 0.09);
+}
+
+.selection-toolbar :deep(.n-checkbox) {
+  min-height: 40px;
+  align-items: center;
+}
+
+.error-retry-button {
+  min-width: 40px;
+  min-height: 40px;
 }
 
 .selection-count {
@@ -1333,6 +1357,11 @@ function apiErrorMessage(error: any, fallback: string) {
   grid-template-columns: 100px minmax(0, 1fr);
   align-items: center;
   gap: 12px;
+}
+
+.candidate-select :deep(.n-base-selection) {
+  min-height: 40px;
+  --n-height: 40px !important;
 }
 
 .resource-comparison {

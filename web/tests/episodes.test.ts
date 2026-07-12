@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 import {
@@ -39,4 +40,28 @@ test('相对集数不会小于零且无偏移行为不变', () => {
   assert.equal(getRelativeEpisode(169, 170), 0)
   assert.equal(getRelativeEpisode(12, 0), 12)
   assert.equal(getRelativeEpisode(12, -5), 12)
+})
+
+test('剧集管理新增交互目标保持至少 40px 点击区域', () => {
+  const drawer = readFileSync(
+    new URL('../src/components/EpisodeManagerDrawer.vue', import.meta.url),
+    'utf8'
+  )
+
+  assert.match(drawer, /<n-input-number[\s\S]*?class="manual-episode-number"[\s\S]*?button-placement="both"[\s\S]*?\/>/)
+  assert.match(drawer, /<n-select[\s\S]*?class="candidate-select"[\s\S]*?\/>/)
+  assert.equal((drawer.match(/class="error-retry-button"/g) || []).length, 2)
+
+  const fortyPixelRules = [
+    /\.episode-filter-tabs :deep\(\.n-tabs-tab\)\s*\{[^}]*min-height:\s*40px;/s,
+    /\.manual-episode-number :deep\(\.n-input\)\s*\{[^}]*min-height:\s*40px;/s,
+    /\.manual-episode-number :deep\(\.n-input__prefix > \.n-button\),[\s\S]*?\.manual-episode-number :deep\(\.n-input__suffix > \.n-button\)\s*\{[^}]*min-width:\s*40px;[^}]*min-height:\s*40px;/s,
+    /\.candidate-select :deep\(\.n-base-selection\)\s*\{[^}]*min-height:\s*40px;/s,
+    /\.selection-toolbar :deep\(\.n-checkbox\)\s*\{[^}]*min-height:\s*40px;/s,
+    /\.error-retry-button\s*\{[^}]*min-width:\s*40px;[^}]*min-height:\s*40px;/s
+  ]
+
+  for (const rule of fortyPixelRules) {
+    assert.match(drawer, rule)
+  }
 })
