@@ -2,6 +2,9 @@ package subscriptionfeed_test
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -33,6 +36,75 @@ func TestPreviewMapsOriginalEpisodesWithFeedOffset(t *testing.T) {
 	assert.True(t, preview.Items[0].Valid)
 	assert.False(t, preview.Items[1].Valid)
 	assert.Equal(t, "relative_episode_not_positive", preview.Items[1].InvalidReason)
+}
+
+func TestPreviewUsesConfiguredSystemProxy(t *testing.T) {
+	proxyCalls := 0
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		proxyCalls++
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>Proxy Feed</title>
+<item><title>[Group] Anime [01]</title><link>https://example.test/1</link></item>
+</channel></rss>`)
+	}))
+	defer proxy.Close()
+
+	_, repo, db := newFeedServiceFixture(t, &fakeParser{})
+	require.NoError(t, db.AutoMigrate(&model.Config{}))
+	configRepo := repository.NewConfigRepository(db)
+	require.NoError(t, configRepo.Set("system_proxy", proxy.URL))
+	svc := subscriptionfeed.NewServiceWithConfig(db, repo, rss.NewParser(), configRepo)
+
+	preview, err := svc.Preview(context.Background(), subscriptionfeed.Input{
+		RSSURL: "http://127.0.0.1:1/feed",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, proxyCalls)
+	assert.Equal(t, 1, preview.ValidItems)
+}
+
+func TestPreviewClearsStaleProxyWhenSystemProxyIsEmpty(t *testing.T) {
+	proxyCalls := 0
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		proxyCalls++
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>Proxy Feed</title>
+<item><title>[Group] Anime [01]</title><link>https://example.test/1</link></item>
+</channel></rss>`)
+	}))
+	defer proxy.Close()
+	targetCalls := 0
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetCalls++
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>Direct Feed</title>
+<item><title>[Group] Anime [02]</title><link>https://example.test/2</link></item>
+</channel></rss>`)
+	}))
+	defer target.Close()
+
+	_, repo, db := newFeedServiceFixture(t, &fakeParser{})
+	require.NoError(t, db.AutoMigrate(&model.Config{}))
+	configRepo := repository.NewConfigRepository(db)
+	require.NoError(t, configRepo.Set("system_proxy", proxy.URL))
+	svc := subscriptionfeed.NewServiceWithConfig(db, repo, rss.NewParser(), configRepo)
+
+	proxied, err := svc.Preview(context.Background(), subscriptionfeed.Input{RSSURL: target.URL})
+	require.NoError(t, err)
+	require.Len(t, proxied.Items, 1)
+	assert.Equal(t, 1, proxied.Items[0].OriginalEpisode)
+
+	require.NoError(t, configRepo.Set("system_proxy", ""))
+	direct, err := svc.Preview(context.Background(), subscriptionfeed.Input{RSSURL: target.URL})
+	require.NoError(t, err)
+	require.Len(t, direct.Items, 1)
+	assert.Equal(t, 2, direct.Items[0].OriginalEpisode)
+	assert.Equal(t, 1, proxyCalls)
+	assert.Equal(t, 1, targetCalls)
 }
 
 func TestCreateRejectsFeedWhoseNonEmptyItemsHaveNoValidMapping(t *testing.T) {

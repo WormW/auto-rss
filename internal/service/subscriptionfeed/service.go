@@ -3,6 +3,7 @@ package subscriptionfeed
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/WormW/auto-rss/internal/model"
@@ -62,13 +63,23 @@ type Prepared struct {
 }
 
 type Service struct {
-	db     *gorm.DB
-	repo   repository.SubscriptionFeedRepository
-	parser rss.Parser
+	db         *gorm.DB
+	repo       repository.SubscriptionFeedRepository
+	parser     rss.Parser
+	configRepo repository.ConfigRepository
 }
 
 func NewService(db *gorm.DB, repo repository.SubscriptionFeedRepository, parser rss.Parser) *Service {
 	return &Service{db: db, repo: repo, parser: parser}
+}
+
+func NewServiceWithConfig(
+	db *gorm.DB,
+	repo repository.SubscriptionFeedRepository,
+	parser rss.Parser,
+	configRepo repository.ConfigRepository,
+) *Service {
+	return &Service{db: db, repo: repo, parser: parser, configRepo: configRepo}
 }
 
 func (s *Service) Preview(ctx context.Context, input Input) (Preview, error) {
@@ -76,6 +87,9 @@ func (s *Service) Preview(ctx context.Context, input Input) (Preview, error) {
 		return Preview{}, err
 	}
 	if err := ctx.Err(); err != nil {
+		return Preview{}, err
+	}
+	if err := s.applySystemProxy(); err != nil {
 		return Preview{}, err
 	}
 	items, err := s.parser.FetchAndParse(strings.TrimSpace(input.RSSURL))
@@ -114,6 +128,25 @@ func (s *Service) Preview(ctx context.Context, input Input) (Preview, error) {
 		return Preview{}, ErrNoMappableEpisodes
 	}
 	return preview, nil
+}
+
+func (s *Service) applySystemProxy() error {
+	if s.configRepo == nil {
+		return nil
+	}
+
+	proxyURL := ""
+	config, err := s.configRepo.Get("system_proxy")
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return fmt.Errorf("load system proxy: %w", err)
+	}
+	if config != nil {
+		proxyURL = strings.TrimSpace(config.Value)
+	}
+	if err := s.parser.SetProxy(proxyURL); err != nil {
+		return fmt.Errorf("apply system proxy: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) Prepare(ctx context.Context, input Input) (Prepared, error) {
