@@ -4,6 +4,7 @@ import "errors"
 
 var ErrTorrentAlreadyExists = errors.New("torrent already exists")
 var ErrTorrentNotFound = errors.New("torrent not found")
+var ErrTorrentOwnershipUnconfirmed = errors.New("torrent ownership unconfirmed")
 
 type Client interface {
 	Login(host, username, password string) error

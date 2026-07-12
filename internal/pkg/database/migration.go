@@ -185,7 +185,7 @@ func RunMigrations(db *gorm.DB) error {
 		{
 			ID: "202607120001", // add replacement recovery snapshots
 			Migrate: func(tx *gorm.DB) error {
-				if err := tx.AutoMigrate(&model.EpisodeResourceCandidate{}, &model.Download{}); err != nil {
+				if err := tx.AutoMigrate(&model.EpisodeResourceCandidate{}); err != nil {
 					return err
 				}
 				return tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_episode_candidate_single_replacing
@@ -203,6 +203,18 @@ func RunMigrations(db *gorm.DB) error {
 				}
 				if tx.Migrator().HasColumn(&model.EpisodeResourceCandidate{}, "old_torrent_hash") {
 					return tx.Migrator().DropColumn(&model.EpisodeResourceCandidate{}, "old_torrent_hash")
+				}
+				return nil
+			},
+		},
+		{
+			ID: "202607120002", // persist replacement torrent ownership
+			Migrate: func(tx *gorm.DB) error {
+				return tx.AutoMigrate(&model.Download{})
+			},
+			Rollback: func(tx *gorm.DB) error {
+				if tx.Migrator().HasColumn(&model.Download{}, "replacement_torrent_owned") {
+					return tx.Migrator().DropColumn(&model.Download{}, "replacement_torrent_owned")
 				}
 				return nil
 			},

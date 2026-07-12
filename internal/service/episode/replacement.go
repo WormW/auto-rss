@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
+	qbclient "github.com/WormW/auto-rss/internal/qbittorrent"
 	"github.com/WormW/auto-rss/internal/repository"
 	"gorm.io/gorm"
 )
@@ -35,6 +36,7 @@ type ReplacementDownloader interface {
 }
 
 type TorrentTaskController interface {
+	GetTorrentInfo(hash string) (*qbclient.TorrentInfo, error)
 	PauseTorrent(hash string) error
 	ResumeTorrent(hash string) error
 	RemoveTorrentTask(hash string) error
@@ -237,6 +239,14 @@ func (s *ReplacementService) advance(ctx context.Context, candidate *model.Episo
 			if freshErr == nil {
 				*candidate = *fresh
 			}
+			if errors.Is(downloadErr, ErrReplacementOwnershipUnknown) {
+				candidate.Status = model.CandidateStatusReplacing
+				candidate.FailureReason = downloadErr.Error()
+				if saveErr := s.episodes.UpdateCandidate(candidate); saveErr != nil {
+					return errors.Join(downloadErr, saveErr)
+				}
+				return downloadErr
+			}
 			if freshErr == nil && (fresh.ReplacementStage == ReplacementStageDetaching || fresh.ReplacementStage == ReplacementStageStaged) && fresh.StagedPath != "" {
 				fresh.FailureReason = downloadErr.Error()
 				if saveErr := s.episodes.UpdateCandidate(fresh); saveErr != nil {
@@ -253,6 +263,9 @@ func (s *ReplacementService) advance(ctx context.Context, candidate *model.Episo
 					return errors.Join(downloadErr, cleanupErr, saveErr)
 				}
 				return errors.Join(downloadErr, cleanupErr)
+			}
+			if err := s.discardFailedReplacementDownload(candidate, newDownload); err != nil {
+				return errors.Join(downloadErr, err)
 			}
 			return s.recordFailure(candidate, downloadErr)
 		}
@@ -298,6 +311,9 @@ func (s *ReplacementService) advance(ctx context.Context, candidate *model.Episo
 			}
 			return err
 		}
+		if err := s.discardFailedReplacementDownload(candidate, download); err != nil {
+			return errors.Join(cause, err)
+		}
 		return s.recordFailure(candidate, cause)
 	case ReplacementStageDetaching:
 		if err := ctx.Err(); err != nil {
@@ -311,14 +327,31 @@ func (s *ReplacementService) advance(ctx context.Context, candidate *model.Episo
 			return err
 		}
 		if newDownload.ReplacementTorrentOwned {
-			if err := s.torrents.RemoveTorrentTask(newDownload.TorrentHash); err != nil {
+			info, infoErr := s.torrents.GetTorrentInfo(newDownload.TorrentHash)
+			if errors.Is(infoErr, qbclient.ErrTorrentNotFound) {
+				newDownload.ReplacementTorrentOwned = false
+			} else if infoErr != nil {
+				err := fmt.Errorf("verify detaching torrent ownership: %w", infoErr)
 				candidate.FailureReason = err.Error()
 				if saveErr := s.episodes.UpdateCandidate(candidate); saveErr != nil {
 					return errors.Join(err, saveErr)
 				}
 				return err
+			} else if err := validateDetachingTorrentOwnership(candidate, newDownload, info); err != nil {
+				candidate.FailureReason = err.Error()
+				if saveErr := s.episodes.UpdateCandidate(candidate); saveErr != nil {
+					return errors.Join(err, saveErr)
+				}
+				return err
+			} else if err := s.torrents.RemoveTorrentTask(newDownload.TorrentHash); err != nil {
+				candidate.FailureReason = err.Error()
+				if saveErr := s.episodes.UpdateCandidate(candidate); saveErr != nil {
+					return errors.Join(err, saveErr)
+				}
+				return err
+			} else {
+				newDownload.ReplacementTorrentOwned = false
 			}
-			newDownload.ReplacementTorrentOwned = false
 		}
 		newDownload.Status = model.DownloadStatusCompleted
 		if err := s.downloads.Update(newDownload); err != nil {
@@ -407,6 +440,21 @@ func (s *ReplacementService) advance(ctx context.Context, candidate *model.Episo
 	}
 }
 
+func validateDetachingTorrentOwnership(candidate *model.EpisodeResourceCandidate, download *model.Download, info *qbclient.TorrentInfo) error {
+	if candidate == nil || download == nil || info == nil {
+		return errors.New("detaching torrent ownership information is missing")
+	}
+	expectedCategory := replacementTorrentCategoryPrefix + fmt.Sprint(candidate.ID)
+	expectedSavePath, pathErr := filepath.Abs(filepath.Dir(candidate.StagedPath))
+	actualSavePath, actualPathErr := filepath.Abs(strings.TrimSpace(info.SavePath))
+	if pathErr != nil || actualPathErr != nil ||
+		!strings.EqualFold(strings.TrimSpace(info.Hash), strings.TrimSpace(download.TorrentHash)) ||
+		info.Category != expectedCategory || filepath.Clean(actualSavePath) != filepath.Clean(expectedSavePath) {
+		return errors.New("detaching torrent ownership hash/category/save path changed")
+	}
+	return nil
+}
+
 func (s *ReplacementService) failDownloadedCandidate(candidate *model.EpisodeResourceCandidate, download *model.Download, cause error) error {
 	if download != nil && download.ID != 0 {
 		candidate.ReplacementDownloadID = &download.ID
@@ -420,7 +468,39 @@ func (s *ReplacementService) failDownloadedCandidate(candidate *model.EpisodeRes
 		}
 		return errors.Join(cause, cleanupErr)
 	}
+	if err := s.discardFailedReplacementDownload(candidate, download); err != nil {
+		return errors.Join(cause, err)
+	}
 	return s.recordFailure(candidate, cause)
+}
+
+func (s *ReplacementService) discardFailedReplacementDownload(candidate *model.EpisodeResourceCandidate, download *model.Download) error {
+	if candidate == nil || download == nil || download.ID == 0 {
+		return nil
+	}
+	if download.Purpose != model.DownloadPurposeReplacement || download.ReplacementCandidateID == nil || *download.ReplacementCandidateID != candidate.ID {
+		return errors.New("refusing to discard unrelated replacement download")
+	}
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&model.EpisodeResourceCandidate{}).
+			Where("id = ? AND replacement_download_id = ?", candidate.ID, download.ID).
+			Update("replacement_download_id", nil).Error; err != nil {
+			return err
+		}
+		result := tx.Where("id = ? AND purpose = ? AND replacement_candidate_id = ?", download.ID, model.DownloadPurposeReplacement, candidate.ID).
+			Delete(&model.Download{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return errors.New("replacement download changed before discard")
+		}
+		return nil
+	})
+	if err == nil {
+		candidate.ReplacementDownloadID = nil
+	}
+	return err
 }
 
 func (s *ReplacementService) recordUnknownStage(candidate *model.EpisodeResourceCandidate) error {

@@ -2,7 +2,6 @@ package downloader
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -24,6 +23,7 @@ type TorrentFile = qbclient.TorrentFile
 
 var ErrTorrentAlreadyExists = qbclient.ErrTorrentAlreadyExists
 var ErrTorrentNotFound = qbclient.ErrTorrentNotFound
+var ErrTorrentOwnershipUnconfirmed = qbclient.ErrTorrentOwnershipUnconfirmed
 
 type qbittorrentClient struct {
 	host        string
@@ -184,10 +184,10 @@ func (c *qbittorrentClient) AddTorrentExclusive(torrentURL, savePath, category, 
 	}
 	resp, err := c.client.R().SetFormData(formData).Post(c.host + "/api/v2/torrents/add")
 	if err != nil {
-		return "", fmt.Errorf("exclusive add torrent request failed: %w", err)
+		return "", fmt.Errorf("%w: exclusive add torrent request failed: %v", ErrTorrentOwnershipUnconfirmed, err)
 	}
 	if resp.StatusCode() != 200 {
-		return "", fmt.Errorf("exclusive add torrent failed: status code %d, body: %s", resp.StatusCode(), string(resp.Body()))
+		return "", fmt.Errorf("%w: exclusive add torrent failed: status code %d, body: %s", ErrTorrentOwnershipUnconfirmed, resp.StatusCode(), string(resp.Body()))
 	}
 
 	deadline := time.Now().Add(torrentAddPollTimeout)
@@ -212,11 +212,11 @@ func (c *qbittorrentClient) AddTorrentExclusive(torrentURL, savePath, category, 
 				return owned[0], nil
 			}
 			if len(owned) > 1 {
-				return "", errors.New("exclusive add ownership is ambiguous")
+				return "", fmt.Errorf("%w: exclusive add ownership is ambiguous", ErrTorrentOwnershipUnconfirmed)
 			}
 		}
 		if time.Now().After(deadline) {
-			return "", errors.New("exclusive add ownership was not confirmed")
+			return "", fmt.Errorf("%w: exclusive add ownership was not confirmed", ErrTorrentOwnershipUnconfirmed)
 		}
 		time.Sleep(torrentAddPollInterval)
 	}

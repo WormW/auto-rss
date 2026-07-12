@@ -20,6 +20,8 @@ const replacementTorrentCategoryPrefix = "AutoRss:replacement:"
 
 var replacementPollInterval = 5 * time.Second
 
+var ErrReplacementOwnershipUnknown = qbclient.ErrTorrentOwnershipUnconfirmed
+
 type qbReplacementDownloader struct {
 	db             *gorm.DB
 	downloads      repository.DownloadRepository
@@ -148,37 +150,76 @@ func (d *qbReplacementDownloader) DownloadToStage(ctx context.Context, candidate
 
 	hash := strings.TrimSpace(download.TorrentHash)
 	if hash == "" || hash == queuedHash {
-		hash, err = d.qb.AddTorrentExclusive(
-			candidate.TorrentURL,
-			stagedDir,
-			replacementTorrentCategoryPrefix+fmt.Sprint(candidate.ID),
-			candidate.TorrentHash,
-		)
-		if err != nil {
-			download.Status = model.DownloadStatusFailed
-			download.ErrorMessage = err.Error()
-			_ = d.downloads.Update(download)
-			return download, "", err
+		adoptedHash, adopted, adoptErr := d.adoptCandidateTorrent(candidate, download, stagedDir)
+		if adoptErr != nil {
+			return download, "", adoptErr
 		}
-		hash = strings.TrimSpace(hash)
-		if hash == "" {
-			hash = strings.TrimSpace(candidate.TorrentHash)
+		if adopted {
+			hash = adoptedHash
 		}
-		if hash == "" {
-			return download, "", errors.New("qBittorrent did not return a replacement torrent hash")
-		}
-		download.TorrentHash = hash
-		download.ReplacementTorrentOwned = true
-		if err := d.downloads.Update(download); err != nil {
-			return download, "", err
+		if !adopted {
+			if expectedHash := strings.TrimSpace(candidate.TorrentHash); expectedHash != "" {
+				existing, lookupErr := d.downloads.GetByHash(expectedHash)
+				if lookupErr == nil && existing.ID != download.ID {
+					return download, "", fmt.Errorf("replacement hash %s already belongs to download %d", expectedHash, existing.ID)
+				}
+				if lookupErr != nil && !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+					return download, "", lookupErr
+				}
+			}
+			hash, err = d.qb.AddTorrentExclusive(
+				candidate.TorrentURL,
+				stagedDir,
+				replacementTorrentCategoryPrefix+fmt.Sprint(candidate.ID),
+				candidate.TorrentHash,
+			)
+			if err != nil {
+				adoptedHash, adopted, adoptErr = d.adoptCandidateTorrent(candidate, download, stagedDir)
+				if adoptErr != nil {
+					return download, "", errors.Join(err, adoptErr)
+				}
+				if !adopted {
+					download.ErrorMessage = err.Error()
+					_ = d.downloads.Update(download)
+					return download, "", err
+				}
+				hash = adoptedHash
+			}
+			hash = strings.TrimSpace(hash)
+			if hash == "" {
+				hash = strings.TrimSpace(candidate.TorrentHash)
+			}
+			if hash == "" {
+				return download, "", errors.New("qBittorrent did not return a replacement torrent hash")
+			}
+			if !adopted {
+				download.TorrentHash = hash
+				download.ReplacementTorrentOwned = true
+				if err := d.downloads.Update(download); err != nil {
+					return download, "", fmt.Errorf("%w: persist exclusive torrent ownership: %v", ErrReplacementOwnershipUnknown, err)
+				}
+			}
 		}
 	}
 	if download.FilePath != "" && download.RenamedPath != "" && pathWithin(stagedDir, download.FilePath) && (osFilePromoter{}).Exists(download.FilePath) {
-		if err := d.qb.RemoveTorrentTask(hash); err != nil {
-			return download, "", fmt.Errorf("detach replacement torrent: %w", err)
+		checkpoint = d.db.Model(&model.EpisodeResourceCandidate{}).
+			Where("id = ? AND status = ? AND replacement_stage = ?", candidate.ID, model.CandidateStatusReplacing, ReplacementStageDownloading).
+			Updates(map[string]any{
+				"replacement_download_id": download.ID,
+				"staged_path":             download.FilePath,
+				"final_path":              download.RenamedPath,
+				"replacement_stage":       ReplacementStageDetaching,
+			})
+		if checkpoint.Error != nil {
+			return download, "", checkpoint.Error
+		}
+		if checkpoint.RowsAffected != 1 {
+			return download, "", errors.New("replacement candidate changed before recovered detach checkpoint")
+		}
+		if err := d.detachCandidateTorrent(candidate, download, download.FilePath); err != nil {
+			return download, "", err
 		}
 		download.Status = model.DownloadStatusCompleted
-		download.ReplacementTorrentOwned = false
 		if err := d.downloads.Update(download); err != nil {
 			return download, "", err
 		}
@@ -239,8 +280,8 @@ func (d *qbReplacementDownloader) DownloadToStage(ctx context.Context, candidate
 	if checkpoint.RowsAffected != 1 {
 		return download, "", errors.New("replacement candidate changed before detach checkpoint")
 	}
-	if err := d.qb.RemoveTorrentTask(hash); err != nil {
-		return download, "", fmt.Errorf("detach replacement torrent: %w", err)
+	if err := d.detachCandidateTorrent(candidate, download, stagedPath); err != nil {
+		return download, "", err
 	}
 	if err := d.db.Model(&model.EpisodeResourceCandidate{}).
 		Where("id = ? AND status = ? AND replacement_stage = ?", candidate.ID, model.CandidateStatusReplacing, ReplacementStageDetaching).
@@ -249,12 +290,66 @@ func (d *qbReplacementDownloader) DownloadToStage(ctx context.Context, candidate
 	}
 	now := time.Now()
 	download.Status = model.DownloadStatusCompleted
-	download.ReplacementTorrentOwned = false
 	download.DownloadedAt = &now
 	if err := d.downloads.Update(download); err != nil {
 		return download, "", err
 	}
 	return download, stagedPath, nil
+}
+
+func (d *qbReplacementDownloader) detachCandidateTorrent(candidate model.EpisodeResourceCandidate, download *model.Download, stagedPath string) error {
+	if !download.ReplacementTorrentOwned {
+		return nil
+	}
+	info, err := d.qb.GetTorrentInfo(download.TorrentHash)
+	if errors.Is(err, qbclient.ErrTorrentNotFound) {
+		download.ReplacementTorrentOwned = false
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("verify detaching torrent ownership: %w", err)
+	}
+	candidate.StagedPath = stagedPath
+	if err := validateDetachingTorrentOwnership(&candidate, download, info); err != nil {
+		return err
+	}
+	if err := d.qb.RemoveTorrentTask(download.TorrentHash); err != nil {
+		return fmt.Errorf("detach replacement torrent: %w", err)
+	}
+	download.ReplacementTorrentOwned = false
+	return nil
+}
+
+func (d *qbReplacementDownloader) adoptCandidateTorrent(candidate model.EpisodeResourceCandidate, download *model.Download, stagedDir string) (string, bool, error) {
+	category := replacementTorrentCategoryPrefix + fmt.Sprint(candidate.ID)
+	torrents, err := d.qb.GetTorrentsByCategory(category)
+	if err != nil {
+		return "", false, fmt.Errorf("%w: query candidate torrent category: %v", ErrReplacementOwnershipUnknown, err)
+	}
+	if len(torrents) == 0 {
+		return "", false, nil
+	}
+	if len(torrents) != 1 {
+		return "", false, fmt.Errorf("%w: candidate torrent category is ambiguous (%d tasks)", ErrReplacementOwnershipUnknown, len(torrents))
+	}
+	torrent := torrents[0]
+	hash := strings.TrimSpace(torrent.Hash)
+	if torrent.Category != category || hash == "" {
+		return "", false, fmt.Errorf("%w: candidate torrent category/hash mismatch", ErrReplacementOwnershipUnknown)
+	}
+	actualSavePath, pathErr := filepath.Abs(strings.TrimSpace(torrent.SavePath))
+	if pathErr != nil || filepath.Clean(actualSavePath) != filepath.Clean(stagedDir) {
+		return "", false, fmt.Errorf("%w: candidate torrent save path mismatch", ErrReplacementOwnershipUnknown)
+	}
+	if expected := strings.TrimSpace(candidate.TorrentHash); expected != "" && !strings.EqualFold(expected, hash) {
+		return "", false, fmt.Errorf("%w: candidate torrent hash mismatch", ErrReplacementOwnershipUnknown)
+	}
+	download.TorrentHash = hash
+	download.ReplacementTorrentOwned = true
+	if err := d.downloads.Update(download); err != nil {
+		return "", false, fmt.Errorf("%w: persist adopted torrent ownership: %v", ErrReplacementOwnershipUnknown, err)
+	}
+	return hash, true, nil
 }
 
 func (d *qbReplacementDownloader) waitForCompletion(ctx context.Context, hash string) (*qbclient.TorrentInfo, error) {

@@ -168,6 +168,41 @@ func TestRunMigrationsAddsReplacementRecoverySnapshotColumnsToExistingLedger(t *
 	}
 }
 
+func TestRunMigrationsAddsReplacementOwnershipAfterRecoveryMigrationApplied(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("Failed to connect to test database: %v", err)
+	}
+	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}, &MigrationRecord{}); err != nil {
+		t.Fatalf("create pre-ownership schema: %v", err)
+	}
+	if err := db.Migrator().DropColumn(&model.Download{}, "replacement_torrent_owned"); err != nil {
+		t.Fatalf("drop ownership column to simulate 120001 schema: %v", err)
+	}
+	for _, id := range []string{
+		"202504090001", "202504090002", "202504230001", "202606120001",
+		"202606150001", "202606150002", "202606180001", "202607110001", "202607120001",
+	} {
+		if err := db.Create(&MigrationRecord{ID: id}).Error; err != nil {
+			t.Fatalf("seed migration %s: %v", id, err)
+		}
+	}
+
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+	if !db.Migrator().HasColumn(&model.Download{}, "replacement_torrent_owned") {
+		t.Fatal("expected replacement_torrent_owned from a migration after 120001")
+	}
+	version, err := GetCurrentVersion(db)
+	if err != nil {
+		t.Fatalf("GetCurrentVersion failed: %v", err)
+	}
+	if version != "202607120002" {
+		t.Fatalf("migration version = %q, want 202607120002", version)
+	}
+}
+
 func TestRunMigrationsBackfillsEpisodeLedgerWithoutInferringGaps(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
