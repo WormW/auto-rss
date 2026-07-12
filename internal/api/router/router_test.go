@@ -59,10 +59,33 @@ func newTestDB(t *testing.T) *gorm.DB {
 		&model.RefreshToken{},
 		&model.Notification{},
 		&model.NotificationSetting{},
+		&model.SubscriptionEpisode{},
+		&model.EpisodeResourceCandidate{},
 	); err != nil {
 		t.Fatalf("failed to migrate sqlite db: %v", err)
 	}
 	return db
+}
+
+func TestSetupRegistersEpisodeLedgerManagementRoutes(t *testing.T) {
+	router, _, _ := setupRouterForTestWithConfig(t, false, nil)
+	want := map[string]bool{
+		http.MethodGet + " /api/v1/subscriptions/:id/episodes":                                         false,
+		http.MethodPut + " /api/v1/subscriptions/:id/episodes/status":                                  false,
+		http.MethodGet + " /api/v1/subscriptions/:id/episodes/:episode/candidates":                     false,
+		http.MethodPost + " /api/v1/subscriptions/:id/episodes/:episode/candidates/:candidate_id/keep": false,
+	}
+	for _, route := range router.Routes() {
+		key := route.Method + " " + route.Path
+		if _, ok := want[key]; ok {
+			want[key] = true
+		}
+	}
+	for route, registered := range want {
+		if !registered {
+			t.Errorf("episode management route not registered: %s", route)
+		}
+	}
 }
 
 func newRouterTestConfig(authEnabled bool) *config.Config {

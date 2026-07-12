@@ -309,6 +309,10 @@ func (s *Service) RefreshSubscriptionProgress(subscriptionID uint) error {
 	return s.repository.RefreshSubscriptionProgress(subscriptionID)
 }
 
+func (s *Service) SetUserStatus(subscriptionID uint, episodes []int, status string) error {
+	return s.repository.SetUserStatus(subscriptionID, episodes, status)
+}
+
 func episodeResource(episode *model.SubscriptionEpisode) model.EpisodeResource {
 	return model.EpisodeResource{
 		Hash:  episode.ActiveTorrentHash,

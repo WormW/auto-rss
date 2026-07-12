@@ -154,6 +154,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	authHandler := handler.NewAuthHandler(cfg, jwtService)
 	notificationHandler := handler.NewNotificationHandler(db, notificationSvc, wsHub, jwtService, cfg.AuthEnabled)
 	backupHandler := handler.NewBackupHandler(backup.NewService(db))
+	episodeHandler := handler.NewEpisodeHandler(subscriptionRepo, episodeRepo, episodeService)
 
 	// API v1 路由组
 	v1 := r.Group("/api/v1")
@@ -208,6 +209,10 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			subscriptions.GET("/:id", subscriptionHandler.GetByID)
 			subscriptions.PUT("/:id", subscriptionHandler.Update)
 			subscriptions.DELETE("/:id", subscriptionHandler.Delete)
+			subscriptions.GET("/:id/episodes", episodeHandler.List)
+			subscriptions.PUT("/:id/episodes/status", episodeHandler.UpdateStatus)
+			subscriptions.GET("/:id/episodes/:episode/candidates", episodeHandler.ListCandidates)
+			subscriptions.POST("/:id/episodes/:episode/candidates/:candidate_id/keep", episodeHandler.KeepCandidate)
 			subscriptions.GET("/:id/diagnostics", subscriptionDiagnosticsHandler.Get)
 			subscriptions.POST("/:id/diagnostics/retry-failed", subscriptionDiagnosticsHandler.RetryFailed)
 			subscriptions.POST("/:id/toggle", subscriptionHandler.Toggle)
