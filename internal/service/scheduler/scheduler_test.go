@@ -226,7 +226,8 @@ func TestManualCollectionReportsWhenAllFeedsFail(t *testing.T) {
 
 	summary, err := fx.scheduler.CollectSubscription(context.Background(), sub.ID)
 
-	require.ErrorContains(t, err, "all subscription feeds failed")
+	require.ErrorContains(t, err, "all subscription feeds failed: 1")
+	require.ErrorContains(t, err, "Default: upstream timeout")
 	assert.Equal(t, 1, summary.FeedsChecked)
 	assert.Equal(t, 1, summary.FeedErrors)
 }

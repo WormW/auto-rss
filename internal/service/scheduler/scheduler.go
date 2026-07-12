@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,11 +35,12 @@ type Scheduler interface {
 }
 
 type CollectSummary struct {
-	FeedsChecked      int `json:"feeds_checked"`
-	ItemsScanned      int `json:"items_scanned"`
-	DownloadsCreated  int `json:"downloads_created"`
-	CandidatesCreated int `json:"candidates_created"`
-	FeedErrors        int `json:"feed_errors"`
+	FeedsChecked       int `json:"feeds_checked"`
+	ItemsScanned       int `json:"items_scanned"`
+	DownloadsCreated   int `json:"downloads_created"`
+	DownloadsRecovered int `json:"downloads_recovered"`
+	CandidatesCreated  int `json:"candidates_created"`
+	FeedErrors         int `json:"feed_errors"`
 }
 
 type SubscriptionCollector interface {
@@ -296,6 +298,7 @@ func (s *scheduler) collectFeeds(
 	}()
 
 	var latestCheck time.Time
+	feedErrorDetails := make([]string, 0, len(feeds))
 	for result := range results {
 		if err := ctx.Err(); err != nil {
 			return summary, err
@@ -306,6 +309,7 @@ func (s *scheduler) collectFeeds(
 		}
 		if result.Err != nil {
 			summary.FeedErrors++
+			feedErrorDetails = append(feedErrorDetails, feedErrorDetail(result.Feed, result.Err))
 			_ = s.feedRepo.UpdateCheckFailure(result.Feed.ID, result.CheckedAt, result.Err.Error())
 			continue
 		}
@@ -319,10 +323,12 @@ func (s *scheduler) collectFeeds(
 		)
 		if err != nil {
 			summary.FeedErrors++
+			feedErrorDetails = append(feedErrorDetails, feedErrorDetail(result.Feed, err))
 			_ = s.feedRepo.UpdateCheckFailure(result.Feed.ID, result.CheckedAt, err.Error())
 			continue
 		}
 		summary.DownloadsCreated += itemSummary.DownloadsCreated
+		summary.DownloadsRecovered += itemSummary.DownloadsRecovered
 		summary.CandidatesCreated += itemSummary.CandidatesCreated
 		if err := s.feedRepo.UpdateCheckSuccess(
 			result.Feed.ID,
@@ -331,6 +337,8 @@ func (s *scheduler) collectFeeds(
 			result.Feed.BaselinePending,
 		); err != nil {
 			summary.FeedErrors++
+			feedErrorDetails = append(feedErrorDetails, feedErrorDetail(result.Feed, err))
+			_ = s.feedRepo.UpdateCheckFailure(result.Feed.ID, result.CheckedAt, err.Error())
 			continue
 		}
 	}
@@ -344,7 +352,8 @@ func (s *scheduler) collectFeeds(
 		}
 	}
 	if summary.FeedsChecked > 0 && summary.FeedErrors == summary.FeedsChecked {
-		return summary, fmt.Errorf("%w: %d", ErrAllSubscriptionFeedsFailed, summary.FeedErrors)
+		sort.Strings(feedErrorDetails)
+		return summary, fmt.Errorf("%w: %d: %s", ErrAllSubscriptionFeedsFailed, summary.FeedErrors, strings.Join(feedErrorDetails, "; "))
 	}
 	return summary, nil
 }
@@ -476,12 +485,15 @@ func (s *scheduler) processFetchedFeedItemsWithSummary(
 			feedID := feed.ID
 			downloadItem := item
 			downloadItem.Fansub = preferredFansub(item.Fansub, feed.Fansub)
-			created, err := s.processDownloadItem(subscription, &downloadItem, decision.EpisodeID, &feedID)
+			downloadResult, err := s.processDownloadItemWithResult(subscription, &downloadItem, decision.EpisodeID, &feedID)
 			if err != nil {
 				return nil, summary, err
 			}
-			if created {
+			if downloadResult.Created {
 				summary.DownloadsCreated++
+			}
+			if downloadResult.Recovered {
+				summary.DownloadsRecovered++
 			}
 		case episode.DecisionCandidate:
 			if decision.CandidateCreated {
@@ -589,12 +601,22 @@ func parseSchedulerRuleToken(token string) (string, bool) {
 	return token, false
 }
 
-// processDownloadItem 处理单个下载条目（在事务中）
-// 返回是否成功创建下载任务
+type downloadProcessResult struct {
+	Created   bool
+	Recovered bool
+}
+
+// processDownloadItem 处理单个下载条目（在事务中）。
+// 保留 bool 返回值供已有内部调用使用；采集汇总通过 processDownloadItemWithResult 区分新建和恢复。
 func (s *scheduler) processDownloadItem(sub *model.Subscription, item *rss.RSSItem, episodeID uint, subscriptionFeedID *uint) (bool, error) {
+	result, err := s.processDownloadItemWithResult(sub, item, episodeID, subscriptionFeedID)
+	return result.Created, err
+}
+
+func (s *scheduler) processDownloadItemWithResult(sub *model.Subscription, item *rss.RSSItem, episodeID uint, subscriptionFeedID *uint) (downloadProcessResult, error) {
 	resource := rssItemResource(item)
 	if s.episodeService == nil {
-		return false, errors.New("episode service is required")
+		return downloadProcessResult{}, errors.New("episode service is required")
 	}
 	releaseClaim := func(cause error) error {
 		if err := s.episodeService.ReleaseDownloadClaim(episodeID, resource); err != nil {
@@ -608,13 +630,13 @@ func (s *scheduler) processDownloadItem(sub *model.Subscription, item *rss.RSSIt
 		logger.Info("Skipping download creation because downloads are paused",
 			"subscription", sub.Name,
 			"title", item.Title)
-		return false, releaseClaim(errDownloadsPaused)
+		return downloadProcessResult{}, releaseClaim(errDownloadsPaused)
 	}
 
 	minSizeBytes := minTorrentSizeBytes(s.configRepo)
 	if shouldSkipSmallTorrent(item, minSizeBytes) {
 		s.logSmallTorrentSkip(sub, item, minSizeBytes)
-		return false, releaseClaim(nil)
+		return downloadProcessResult{}, releaseClaim(nil)
 	}
 
 	// 创建下载任务
@@ -644,7 +666,14 @@ func (s *scheduler) processDownloadItem(sub *model.Subscription, item *rss.RSSIt
 	})
 
 	if err != nil {
-		return false, releaseClaim(err)
+		recovered, recoveryErr := s.recoverFailedDownload(sub, item, episodeID, resource, err)
+		if recoveryErr != nil {
+			return downloadProcessResult{}, releaseClaim(recoveryErr)
+		}
+		if recovered {
+			return downloadProcessResult{Recovered: true}, nil
+		}
+		return downloadProcessResult{}, releaseClaim(err)
 	}
 
 	logger.Info("Download task created",
@@ -657,7 +686,66 @@ func (s *scheduler) processDownloadItem(sub *model.Subscription, item *rss.RSSIt
 		"fansub", item.Fansub,
 		"language", item.Language,
 		"trigger_context", "scheduler_rss_check")
+	return downloadProcessResult{Created: true}, nil
+}
+
+func (s *scheduler) recoverFailedDownload(
+	sub *model.Subscription,
+	item *rss.RSSItem,
+	episodeID uint,
+	resource model.EpisodeResource,
+	createErr error,
+) (bool, error) {
+	hash := strings.TrimSpace(item.TorrentHash)
+	if hash == "" {
+		return false, nil
+	}
+	existing, err := s.downloadRepo.GetByHash(hash)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to inspect existing torrent hash %s after create failure: %w", hash, err)
+	}
+	if existing.SubscriptionID != sub.ID || sub.RelativeEpisode(existing.Episode) != sub.RelativeEpisode(item.Episode) {
+		return false, fmt.Errorf(
+			"torrent hash %s already belongs to download %d (subscription %d, episode %d): %w",
+			hash,
+			existing.ID,
+			existing.SubscriptionID,
+			existing.Episode,
+			createErr,
+		)
+	}
+	if existing.Status != model.DownloadStatusFailed {
+		return false, fmt.Errorf(
+			"torrent hash %s already belongs to download %d with status %s: %w",
+			hash,
+			existing.ID,
+			existing.Status,
+			createErr,
+		)
+	}
+	if err := s.episodeService.ReleaseDownloadClaim(episodeID, resource); err != nil {
+		return false, fmt.Errorf("failed to release episode claim before recovering download %d: %w", existing.ID, err)
+	}
+	if err := s.episodeService.RequeueDownload(existing, sub); err != nil {
+		return false, fmt.Errorf("failed to requeue existing download %d: %w", existing.ID, err)
+	}
+	logger.Info("Recovered failed download for RSS episode",
+		"subscription_id", sub.ID,
+		"download_id", existing.ID,
+		"episode", item.Episode,
+		"torrent_hash", hash)
 	return true, nil
+}
+
+func feedErrorDetail(feed model.SubscriptionFeed, err error) string {
+	name := strings.TrimSpace(feed.Name)
+	if name == "" {
+		name = fmt.Sprintf("feed %d", feed.ID)
+	}
+	return fmt.Sprintf("%s: %v", name, err)
 }
 
 var errDownloadsPaused = errors.New("downloads are paused")

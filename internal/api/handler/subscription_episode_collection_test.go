@@ -524,6 +524,64 @@ func TestCollectEpisodesCreatesOnePendingOutboxAndNeverAddsToQBittorrent(t *test
 	assert.Zero(t, fx.qb.addCalls)
 }
 
+func TestCollectEpisodesRecoversFailedDownloadWithSameTorrentHash(t *testing.T) {
+	fx := newEpisodeCollectionFixture(t)
+	sub := fx.createSubscription(t, nil)
+	resource := model.EpisodeResource{
+		Hash:  "recover-failed-hash",
+		URL:   "magnet:?xt=urn:btih:recover-failed-hash",
+		Title: "Ledger Show 03",
+	}
+	_, err := fx.episodeRepo.ObserveEpisode(sub.ID, 3)
+	require.NoError(t, err)
+	failed := model.Download{
+		SubscriptionID: sub.ID,
+		Title:          resource.Title,
+		Episode:        3,
+		TorrentURL:     resource.URL,
+		TorrentHash:    resource.Hash,
+		Status:         model.DownloadStatusFailed,
+		RetryCount:     5,
+		MaxRetries:     5,
+		LastError:      "previous qBittorrent failure",
+		ErrorMessage:   "previous qBittorrent failure",
+	}
+	require.NoError(t, fx.db.Create(&failed).Error)
+	fx.handler.rssParser = &mockRSSParser{items: []rss.RSSItem{{
+		Title: resource.Title, Episode: 3, TorrentURL: resource.URL, TorrentHash: resource.Hash,
+		PubTime: time.Now().UTC().Truncate(time.Second),
+	}}}
+
+	completed, err := runEpisodeCollectionTask(t, fx.handler, &sub)
+	require.NoError(t, err)
+	result, ok := completed.Result.(scheduler.CollectSummary)
+	require.True(t, ok)
+	assert.Zero(t, result.DownloadsCreated)
+	assert.Equal(t, 1, result.DownloadsRecovered)
+	assert.Zero(t, result.FeedErrors)
+
+	var downloads []model.Download
+	require.NoError(t, fx.db.Find(&downloads).Error)
+	require.Len(t, downloads, 1)
+	assert.Equal(t, failed.ID, downloads[0].ID)
+	assert.Equal(t, model.DownloadStatusRetryCleanup, downloads[0].Status)
+	assert.Zero(t, downloads[0].RetryCount)
+	assert.Empty(t, downloads[0].LastError)
+	assert.Empty(t, downloads[0].ErrorMessage)
+
+	ledger, err := fx.episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 3)
+	require.NoError(t, err)
+	assert.Equal(t, model.EpisodeStatusDownloading, ledger.Status)
+	require.NotNil(t, ledger.ActiveDownloadID)
+	assert.Equal(t, failed.ID, *ledger.ActiveDownloadID)
+	assert.Equal(t, resource.Hash, ledger.ActiveTorrentHash)
+	feeds, err := fx.feedRepo.ListBySubscription(sub.ID)
+	require.NoError(t, err)
+	require.Len(t, feeds, 1)
+	assert.Empty(t, feeds[0].LastError)
+	assert.Zero(t, fx.qb.addCalls)
+}
+
 func TestCollectEpisodesHandlesEmptyFeedAndObservesBeforeFiltering(t *testing.T) {
 	t.Run("empty feed", func(t *testing.T) {
 		fx := newEpisodeCollectionFixture(t)
@@ -608,6 +666,11 @@ func TestCollectEpisodesRollsBackClaimAndKeepsWatermarkOnCreateOrAttachFailure(t
 
 			completed, err := runEpisodeCollectionTask(t, fx.handler, &sub)
 			require.ErrorContains(t, err, "all subscription feeds failed")
+			if tt.name == "create failure" {
+				require.ErrorContains(t, err, "Default: torrent hash collision-hash already belongs to download")
+			} else {
+				require.ErrorContains(t, err, "Default: failed to attach download to episode")
+			}
 			result, ok := completed.Result.(scheduler.CollectSummary)
 			require.True(t, ok)
 			assert.Equal(t, 1, result.FeedErrors)

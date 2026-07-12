@@ -8,9 +8,10 @@ test('采集任务展示后端真实统计字段', () => {
     feeds_checked: 2,
     items_scanned: 15,
     downloads_created: 2,
+    downloads_recovered: 1,
     candidates_created: 1,
     feed_errors: 1
-  }), '下载 2 / 扫描 15 / 候选 1 / Feed 2 / 错误 1')
+  }), '下载 2 / 恢复 1 / 扫描 15 / 候选 1 / Feed 2 / 错误 1')
 })
 
 test('采集任务零结果仍明确展示下载和扫描数量', () => {

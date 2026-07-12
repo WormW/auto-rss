@@ -2,6 +2,7 @@ export interface CollectionTaskResult {
   feeds_checked?: number
   items_scanned?: number
   downloads_created?: number
+  downloads_recovered?: number
   candidates_created?: number
   feed_errors?: number
 }
@@ -12,9 +13,11 @@ const count = (value: number | undefined): number => {
 
 export const formatCollectionTaskResult = (result: CollectionTaskResult): string => {
   const parts = [
-    `下载 ${count(result.downloads_created)}`,
-    `扫描 ${count(result.items_scanned)}`
+    `下载 ${count(result.downloads_created)}`
   ]
+  const recovered = count(result.downloads_recovered)
+  if (recovered > 0) parts.push(`恢复 ${recovered}`)
+  parts.push(`扫描 ${count(result.items_scanned)}`)
   const candidates = count(result.candidates_created)
   if (candidates > 0) parts.push(`候选 ${candidates}`)
   parts.push(`Feed ${count(result.feeds_checked)}`)
