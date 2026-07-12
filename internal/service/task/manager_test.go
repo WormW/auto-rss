@@ -411,3 +411,7 @@ func TestManager_GetManager_Singleton(t *testing.T) {
 	assert.Same(t, m1, m2)
 	assert.Same(t, m2, m3)
 }
+
+func TestReplacementTaskTypeUsesStableAPIValue(t *testing.T) {
+	assert.Equal(t, TaskType("replacement"), TaskTypeReplacement)
+}

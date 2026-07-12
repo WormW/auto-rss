@@ -160,16 +160,36 @@ func (s *ReplacementService) Replace(ctx context.Context, candidateID uint) erro
 	return s.advance(ctx, candidate)
 }
 
-func (s *ReplacementService) RecoverIncomplete(ctx context.Context) error {
+func (s *ReplacementService) RetryCleanup(ctx context.Context, candidateID uint) error {
 	if err := s.validate(); err != nil {
 		return err
+	}
+	candidate, err := s.episodes.GetCandidateByID(candidateID)
+	if err != nil {
+		return err
+	}
+	if candidate.Status != model.CandidateStatusAcceptedCleanupFailed {
+		return fmt.Errorf("%w: candidate %d has status %s", repository.ErrCandidateStateConflict, candidateID, candidate.Status)
+	}
+	return s.cleanup(ctx, candidate)
+}
+
+func (s *ReplacementService) RecoverIncomplete(ctx context.Context) error {
+	_, err := s.RecoverIncompleteWithCount(ctx)
+	return err
+}
+
+func (s *ReplacementService) RecoverIncompleteWithCount(ctx context.Context) (int, error) {
+	if err := s.validate(); err != nil {
+		return 0, err
 	}
 	s.recoveryMu.Lock()
 	defer s.recoveryMu.Unlock()
 	candidates, err := s.episodes.ListIncompleteReplacements()
 	if err != nil {
-		return err
+		return 0, err
 	}
+	scannedCount := len(candidates)
 	errCh := make(chan error, len(candidates))
 	var activeDownloads sync.WaitGroup
 	advanceCandidate := func(candidate model.EpisodeResourceCandidate) {
@@ -200,7 +220,7 @@ func (s *ReplacementService) RecoverIncomplete(ctx context.Context) error {
 	for err := range errCh {
 		recoveryErrors = append(recoveryErrors, err)
 	}
-	return errors.Join(recoveryErrors...)
+	return scannedCount, errors.Join(recoveryErrors...)
 }
 
 func (s *ReplacementService) validate() error {
@@ -682,6 +702,10 @@ func (s *ReplacementService) cleanup(ctx context.Context, candidate *model.Episo
 	*candidate = *fresh
 	if candidate.ReplacementStage == ReplacementStageDone && candidate.Status == model.CandidateStatusAccepted {
 		return nil
+	}
+	if candidate.Status != model.CandidateStatusAcceptedCleanupFailed ||
+		(candidate.ReplacementStage != ReplacementStageSwitched && candidate.ReplacementStage != ReplacementStageCleaning) {
+		return fmt.Errorf("%w: candidate %d cannot retry cleanup from status %s stage %s", repository.ErrCandidateStateConflict, candidate.ID, candidate.Status, candidate.ReplacementStage)
 	}
 	candidate.Status = model.CandidateStatusAcceptedCleanupFailed
 	candidate.ReplacementStage = ReplacementStageCleaning

@@ -2,6 +2,7 @@ package router
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +29,8 @@ import (
 	"github.com/WormW/auto-rss/internal/service/task"
 	"github.com/gin-gonic/gin"
 	"github.com/robfig/cron/v3"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -70,10 +74,12 @@ func newTestDB(t *testing.T) *gorm.DB {
 func TestSetupRegistersEpisodeLedgerManagementRoutes(t *testing.T) {
 	router, _, _ := setupRouterForTestWithConfig(t, false, nil)
 	want := map[string]bool{
-		http.MethodGet + " /api/v1/subscriptions/:id/episodes":                                         false,
-		http.MethodPut + " /api/v1/subscriptions/:id/episodes/status":                                  false,
-		http.MethodGet + " /api/v1/subscriptions/:id/episodes/:episode/candidates":                     false,
-		http.MethodPost + " /api/v1/subscriptions/:id/episodes/:episode/candidates/:candidate_id/keep": false,
+		http.MethodGet + " /api/v1/subscriptions/:id/episodes":                                                  false,
+		http.MethodPut + " /api/v1/subscriptions/:id/episodes/status":                                           false,
+		http.MethodGet + " /api/v1/subscriptions/:id/episodes/:episode/candidates":                              false,
+		http.MethodPost + " /api/v1/subscriptions/:id/episodes/:episode/candidates/:candidate_id/keep":          false,
+		http.MethodPost + " /api/v1/subscriptions/:id/episodes/:episode/candidates/:candidate_id/replace":       false,
+		http.MethodPost + " /api/v1/subscriptions/:id/episodes/:episode/candidates/:candidate_id/retry-cleanup": false,
 	}
 	for _, route := range router.Routes() {
 		key := route.Method + " " + route.Path
@@ -86,6 +92,65 @@ func TestSetupRegistersEpisodeLedgerManagementRoutes(t *testing.T) {
 			t.Errorf("episode management route not registered: %s", route)
 		}
 	}
+}
+
+func TestSetupStartsReplacementRecoveryAsynchronouslyOnce(t *testing.T) {
+	db := newTestDB(t)
+	cfg := newRouterTestConfig(false)
+	qbClient := downloader.NewQBittorrentClient()
+	appCtx := newTestAppContext(db, cfg)
+
+	original := newScheduler
+	newScheduler = func(*gorm.DB, repository.SubscriptionRepository, repository.DownloadRepository, repository.ConfigRepository, string, rss.Parser, downloader.QBittorrentClient, *episode.Service) scheduler.Scheduler {
+		return &mockScheduler{}
+	}
+	defer func() { newScheduler = original }()
+
+	var calls atomic.Int32
+	started := make(chan struct{})
+	recovery := func(ctx context.Context) (int, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-ctx.Done()
+		return 3, ctx.Err()
+	}
+
+	type setupResult struct {
+		router *gin.Engine
+		err    error
+	}
+	setupDone := make(chan setupResult, 1)
+	go func() {
+		r, err := setup(db, cfg, qbClient, appCtx, "", setupDependencies{replacementRecovery: recovery})
+		setupDone <- setupResult{router: r, err: err}
+	}()
+
+	select {
+	case result := <-setupDone:
+		require.NoError(t, result.err)
+		require.NotNil(t, result.router)
+	case <-time.After(2 * time.Second):
+		t.Fatal("router setup blocked on replacement recovery")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("replacement recovery was not started")
+	}
+	assert.EqualValues(t, 1, calls.Load())
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		appCtx.Shutdown()
+		close(shutdownDone)
+	}()
+	select {
+	case <-shutdownDone:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not cancel replacement recovery")
+	}
+	assert.EqualValues(t, 1, calls.Load())
 }
 
 func newRouterTestConfig(authEnabled bool) *config.Config {
@@ -145,7 +210,9 @@ func setupRouterForTestWithConfig(t *testing.T, authEnabled bool, configure func
 	t.Cleanup(func() { newScheduler = original })
 	t.Cleanup(appCtx.Shutdown)
 
-	r, err := Setup(db, cfg, qbClient, appCtx, "")
+	r, err := setup(db, cfg, qbClient, appCtx, "", setupDependencies{
+		replacementRecovery: func(context.Context) (int, error) { return 0, nil },
+	})
 	if err != nil {
 		t.Fatalf("failed to setup router: %v", err)
 	}

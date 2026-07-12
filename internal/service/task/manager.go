@@ -13,8 +13,9 @@ import (
 type TaskType string
 
 const (
-	TaskTypeCollect TaskType = "collect" // 采集任务
-	TaskTypeImport  TaskType = "import"  // 导入任务
+	TaskTypeCollect     TaskType = "collect"     // 采集任务
+	TaskTypeImport      TaskType = "import"      // 导入任务
+	TaskTypeReplacement TaskType = "replacement" // 剧集资源替换任务
 )
 
 // TaskStatus 任务状态

@@ -2,16 +2,21 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/episode"
+	"github.com/WormW/auto-rss/internal/service/task"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,13 +46,286 @@ func setupEpisodeHandlerTest(t *testing.T) (*gorm.DB, *gin.Engine) {
 
 	subscriptionRepo := repository.NewSubscriptionRepository(db)
 	episodeRepo := repository.NewEpisodeRepository(db)
-	handler := NewEpisodeHandler(subscriptionRepo, episodeRepo, episode.NewService(episodeRepo))
+	handler := NewEpisodeHandler(subscriptionRepo, episodeRepo, episode.NewService(episodeRepo), nil)
 	router := gin.New()
 	router.GET("/subscriptions/:id/episodes", handler.List)
 	router.PUT("/subscriptions/:id/episodes/status", handler.UpdateStatus)
 	router.GET("/subscriptions/:id/episodes/:episode/candidates", handler.ListCandidates)
 	router.POST("/subscriptions/:id/episodes/:episode/candidates/:candidate_id/keep", handler.KeepCandidate)
 	return db, router
+}
+
+type fakeReplacementActions struct {
+	mu         sync.Mutex
+	replaceIDs []uint
+	cleanupIDs []uint
+	replaceErr error
+	cleanupErr error
+}
+
+func (f *fakeReplacementActions) Replace(_ context.Context, candidateID uint) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.replaceIDs = append(f.replaceIDs, candidateID)
+	return f.replaceErr
+}
+
+func (f *fakeReplacementActions) RetryCleanup(_ context.Context, candidateID uint) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cleanupIDs = append(f.cleanupIDs, candidateID)
+	return f.cleanupErr
+}
+
+func (f *fakeReplacementActions) lastReplaceID() uint {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.replaceIDs) == 0 {
+		return 0
+	}
+	return f.replaceIDs[len(f.replaceIDs)-1]
+}
+
+func (f *fakeReplacementActions) lastCleanupID() uint {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.cleanupIDs) == 0 {
+		return 0
+	}
+	return f.cleanupIDs[len(f.cleanupIDs)-1]
+}
+
+type fakeEpisodeTaskStarter struct {
+	startErr error
+	started  chan *task.Task
+	results  chan error
+}
+
+func newFakeEpisodeTaskStarter() *fakeEpisodeTaskStarter {
+	return &fakeEpisodeTaskStarter{
+		started: make(chan *task.Task, 8),
+		results: make(chan error, 8),
+	}
+}
+
+func (f *fakeEpisodeTaskStarter) StartTask(taskType task.TaskType, subscriptionID uint, name string, fn func(context.Context, *task.Task) error) (*task.Task, error) {
+	if f.startErr != nil {
+		return nil, f.startErr
+	}
+	started := &task.Task{
+		ID:             fmt.Sprintf("%s-test", taskType),
+		Type:           taskType,
+		Status:         task.TaskStatusRunning,
+		SubscriptionID: subscriptionID,
+		Name:           name,
+	}
+	f.started <- started
+	go func() {
+		f.results <- fn(context.Background(), started)
+	}()
+	return started, nil
+}
+
+type replacementHandlerFixture struct {
+	db          *gorm.DB
+	router      *gin.Engine
+	replacement *fakeReplacementActions
+	tasks       *fakeEpisodeTaskStarter
+}
+
+func newReplacementHandlerFixture(t *testing.T, replacement ReplacementActions) *replacementHandlerFixture {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(
+		&model.Subscription{},
+		&model.Download{},
+		&model.SubscriptionEpisode{},
+		&model.EpisodeResourceCandidate{},
+	))
+
+	replacementFake, _ := replacement.(*fakeReplacementActions)
+	tasks := newFakeEpisodeTaskStarter()
+	episodeRepo := repository.NewEpisodeRepository(db)
+	h := newEpisodeHandler(
+		repository.NewSubscriptionRepository(db),
+		episodeRepo,
+		episode.NewService(episodeRepo),
+		replacement,
+		tasks,
+	)
+	router := gin.New()
+	router.POST("/subscriptions/:id/episodes/:episode/candidates/:candidate_id/replace", h.Replace)
+	router.POST("/subscriptions/:id/episodes/:episode/candidates/:candidate_id/retry-cleanup", h.RetryCleanup)
+	return &replacementHandlerFixture{db: db, router: router, replacement: replacementFake, tasks: tasks}
+}
+
+func (fx *replacementHandlerFixture) seedCandidate(t *testing.T, subscriptionID uint, episodeNumber int, status string) model.EpisodeResourceCandidate {
+	t.Helper()
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID: subscriptionID,
+		Episode:        episodeNumber,
+		Status:         model.EpisodeStatusDownloaded,
+		StatusSource:   model.EpisodeStatusSourceAutomatic,
+	}
+	require.NoError(t, fx.db.Create(&ledger).Error)
+	candidate := model.EpisodeResourceCandidate{
+		SubscriptionEpisodeID: ledger.ID,
+		ResourceKey:           fmt.Sprintf("hash:%d:%d:%s", subscriptionID, episodeNumber, status),
+		Status:                status,
+	}
+	require.NoError(t, fx.db.Create(&candidate).Error)
+	return candidate
+}
+
+func awaitTaskResult(t *testing.T, results <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-results:
+		return err
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for replacement task")
+		return nil
+	}
+}
+
+func TestEpisodeHandlerReplaceStartsReplacementTask(t *testing.T) {
+	for _, status := range []string{model.CandidateStatusPending, model.CandidateStatusFailed} {
+		t.Run(status, func(t *testing.T) {
+			replacement := &fakeReplacementActions{}
+			fx := newReplacementHandlerFixture(t, replacement)
+			sub := seedEpisodeSubscription(t, fx.db, 1)
+			candidate := fx.seedCandidate(t, sub.ID, 1, status)
+
+			recorder := performEpisodeRequest(fx.router, http.MethodPost, fmt.Sprintf("/subscriptions/%d/episodes/1/candidates/%d/replace", sub.ID, candidate.ID), "")
+			require.Equal(t, http.StatusAccepted, recorder.Code, recorder.Body.String())
+			response := decodeEpisodeResponse(t, recorder)
+			var data struct {
+				TaskID string `json:"task_id"`
+			}
+			require.NoError(t, json.Unmarshal(response.Data, &data))
+			assert.NotEmpty(t, data.TaskID)
+			require.NoError(t, awaitTaskResult(t, fx.tasks.results))
+			assert.Equal(t, candidate.ID, replacement.lastReplaceID())
+		})
+	}
+}
+
+func TestEpisodeHandlerReplaceMapsDisallowedStatusesToConflict(t *testing.T) {
+	for _, status := range []string{
+		model.CandidateStatusReplacing,
+		model.CandidateStatusAcceptedCleanupFailed,
+		model.CandidateStatusAccepted,
+		model.CandidateStatusKeptExisting,
+	} {
+		t.Run(status, func(t *testing.T) {
+			replacement := &fakeReplacementActions{}
+			fx := newReplacementHandlerFixture(t, replacement)
+			sub := seedEpisodeSubscription(t, fx.db, 1)
+			candidate := fx.seedCandidate(t, sub.ID, 1, status)
+
+			recorder := performEpisodeRequest(fx.router, http.MethodPost, fmt.Sprintf("/subscriptions/%d/episodes/1/candidates/%d/replace", sub.ID, candidate.ID), "")
+			assert.Equal(t, http.StatusConflict, recorder.Code, recorder.Body.String())
+			assert.EqualValues(t, 0, replacement.lastReplaceID())
+		})
+	}
+}
+
+func TestEpisodeHandlerReplaceConflictsWithReplacingCandidateInSameEpisode(t *testing.T) {
+	replacement := &fakeReplacementActions{}
+	fx := newReplacementHandlerFixture(t, replacement)
+	sub := seedEpisodeSubscription(t, fx.db, 1)
+	target := fx.seedCandidate(t, sub.ID, 1, model.CandidateStatusPending)
+	sibling := model.EpisodeResourceCandidate{
+		SubscriptionEpisodeID: target.SubscriptionEpisodeID,
+		ResourceKey:           "hash:replacing-sibling",
+		Status:                model.CandidateStatusReplacing,
+	}
+	require.NoError(t, fx.db.Create(&sibling).Error)
+
+	recorder := performEpisodeRequest(fx.router, http.MethodPost, fmt.Sprintf("/subscriptions/%d/episodes/1/candidates/%d/replace", sub.ID, target.ID), "")
+	assert.Equal(t, http.StatusConflict, recorder.Code, recorder.Body.String())
+	assert.EqualValues(t, 0, replacement.lastReplaceID())
+}
+
+func TestEpisodeHandlerRetryCleanupOnlyAcceptsCleanupFailedCandidate(t *testing.T) {
+	replacement := &fakeReplacementActions{}
+	fx := newReplacementHandlerFixture(t, replacement)
+	sub := seedEpisodeSubscription(t, fx.db, 2)
+	pending := fx.seedCandidate(t, sub.ID, 1, model.CandidateStatusPending)
+	cleanupFailed := fx.seedCandidate(t, sub.ID, 2, model.CandidateStatusAcceptedCleanupFailed)
+
+	rejected := performEpisodeRequest(fx.router, http.MethodPost, fmt.Sprintf("/subscriptions/%d/episodes/1/candidates/%d/retry-cleanup", sub.ID, pending.ID), "")
+	assert.Equal(t, http.StatusConflict, rejected.Code, rejected.Body.String())
+
+	accepted := performEpisodeRequest(fx.router, http.MethodPost, fmt.Sprintf("/subscriptions/%d/episodes/2/candidates/%d/retry-cleanup", sub.ID, cleanupFailed.ID), "")
+	require.Equal(t, http.StatusAccepted, accepted.Code, accepted.Body.String())
+	require.NoError(t, awaitTaskResult(t, fx.tasks.results))
+	assert.Equal(t, cleanupFailed.ID, replacement.lastCleanupID())
+}
+
+func TestEpisodeHandlerReplacementActionsValidateIDsAndStrictScope(t *testing.T) {
+	replacement := &fakeReplacementActions{}
+	fx := newReplacementHandlerFixture(t, replacement)
+	sub := seedEpisodeSubscription(t, fx.db, 2)
+	otherSub := seedEpisodeSubscription(t, fx.db, 1)
+	candidate := fx.seedCandidate(t, sub.ID, 1, model.CandidateStatusPending)
+
+	tests := []struct {
+		name   string
+		path   string
+		status int
+	}{
+		{name: "malformed subscription", path: fmt.Sprintf("/subscriptions/nope/episodes/1/candidates/%d/replace", candidate.ID), status: http.StatusBadRequest},
+		{name: "malformed episode", path: fmt.Sprintf("/subscriptions/%d/episodes/nope/candidates/%d/replace", sub.ID, candidate.ID), status: http.StatusBadRequest},
+		{name: "malformed candidate", path: fmt.Sprintf("/subscriptions/%d/episodes/1/candidates/nope/replace", sub.ID), status: http.StatusBadRequest},
+		{name: "wrong episode", path: fmt.Sprintf("/subscriptions/%d/episodes/2/candidates/%d/replace", sub.ID, candidate.ID), status: http.StatusNotFound},
+		{name: "wrong subscription", path: fmt.Sprintf("/subscriptions/%d/episodes/1/candidates/%d/replace", otherSub.ID, candidate.ID), status: http.StatusNotFound},
+		{name: "missing candidate", path: fmt.Sprintf("/subscriptions/%d/episodes/1/candidates/99999/replace", sub.ID), status: http.StatusNotFound},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := performEpisodeRequest(fx.router, http.MethodPost, test.path, "")
+			assert.Equal(t, test.status, recorder.Code, recorder.Body.String())
+		})
+	}
+	assert.EqualValues(t, 0, replacement.lastReplaceID())
+}
+
+func TestEpisodeHandlerReplacementActionsMapMissingDependencyAndTaskCreationFailure(t *testing.T) {
+	t.Run("missing replacement service", func(t *testing.T) {
+		fx := newReplacementHandlerFixture(t, nil)
+		sub := seedEpisodeSubscription(t, fx.db, 1)
+		candidate := fx.seedCandidate(t, sub.ID, 1, model.CandidateStatusPending)
+
+		recorder := performEpisodeRequest(fx.router, http.MethodPost, fmt.Sprintf("/subscriptions/%d/episodes/1/candidates/%d/replace", sub.ID, candidate.ID), "")
+		assert.Equal(t, http.StatusInternalServerError, recorder.Code, recorder.Body.String())
+	})
+
+	t.Run("task creation failure", func(t *testing.T) {
+		replacement := &fakeReplacementActions{}
+		fx := newReplacementHandlerFixture(t, replacement)
+		fx.tasks.startErr = errors.New("already running")
+		sub := seedEpisodeSubscription(t, fx.db, 1)
+		candidate := fx.seedCandidate(t, sub.ID, 1, model.CandidateStatusPending)
+
+		recorder := performEpisodeRequest(fx.router, http.MethodPost, fmt.Sprintf("/subscriptions/%d/episodes/1/candidates/%d/replace", sub.ID, candidate.ID), "")
+		assert.Equal(t, http.StatusInternalServerError, recorder.Code, recorder.Body.String())
+		assert.EqualValues(t, 0, replacement.lastReplaceID())
+	})
+}
+
+func TestEpisodeHandlerReplacementServiceErrorFailsTaskCallback(t *testing.T) {
+	replacement := &fakeReplacementActions{replaceErr: episode.ErrReplacementInProgress}
+	fx := newReplacementHandlerFixture(t, replacement)
+	sub := seedEpisodeSubscription(t, fx.db, 1)
+	candidate := fx.seedCandidate(t, sub.ID, 1, model.CandidateStatusPending)
+
+	recorder := performEpisodeRequest(fx.router, http.MethodPost, fmt.Sprintf("/subscriptions/%d/episodes/1/candidates/%d/replace", sub.ID, candidate.ID), "")
+	require.Equal(t, http.StatusAccepted, recorder.Code, recorder.Body.String())
+	assert.ErrorIs(t, awaitTaskResult(t, fx.tasks.results), episode.ErrReplacementInProgress)
 }
 
 func performEpisodeRequest(router http.Handler, method, path, body string) *httptest.ResponseRecorder {

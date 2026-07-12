@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"io/fs"
@@ -41,8 +42,16 @@ var newScheduler = func(db *gorm.DB, subscriptionRepo repository.SubscriptionRep
 	return scheduler.NewScheduler(db, subscriptionRepo, downloadRepo, configRepo, rssInterval, rssParser, qbClient, episodeService)
 }
 
+type setupDependencies struct {
+	replacementRecovery func(context.Context) (int, error)
+}
+
 // Setup 设置路由
 func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClient, appCtx *app.Context, renameTemplate string) (*gin.Engine, error) {
+	return setup(db, cfg, qbClient, appCtx, renameTemplate, setupDependencies{})
+}
+
+func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClient, appCtx *app.Context, renameTemplate string, dependencies setupDependencies) (*gin.Engine, error) {
 	r := gin.New()
 
 	// 应用中间件
@@ -98,6 +107,20 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	configRepo := repository.NewConfigRepository(db)
 	rssSourceRepo := repository.NewRSSSourceRepository(db)
 	logRepo := repository.NewLogRepository(db)
+	replacementDownloader := episode.NewQBReplacementDownloader(db, downloadRepo, configRepo, qbClient, renameTemplate, cfg.DownloadPath)
+	replacementService := episode.NewReplacementService(
+		db,
+		episodeRepo,
+		downloadRepo,
+		subscriptionRepo,
+		replacementDownloader,
+		qbClient,
+		episode.NewOSFilePromoter(),
+	)
+	replacementRecovery := dependencies.replacementRecovery
+	if replacementRecovery == nil {
+		replacementRecovery = replacementService.RecoverIncompleteWithCount
+	}
 
 	// 初始化调度器
 	rssScheduler := newScheduler(db, subscriptionRepo, downloadRepo, configRepo, cfg.RSSInterval, rssParser, qbClient, episodeService)
@@ -154,7 +177,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	authHandler := handler.NewAuthHandler(cfg, jwtService)
 	notificationHandler := handler.NewNotificationHandler(db, notificationSvc, wsHub, jwtService, cfg.AuthEnabled)
 	backupHandler := handler.NewBackupHandler(backup.NewService(db))
-	episodeHandler := handler.NewEpisodeHandler(subscriptionRepo, episodeRepo, episodeService)
+	episodeHandler := handler.NewEpisodeHandler(subscriptionRepo, episodeRepo, episodeService, replacementService)
 
 	// API v1 路由组
 	v1 := r.Group("/api/v1")
@@ -213,6 +236,8 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			subscriptions.PUT("/:id/episodes/status", episodeHandler.UpdateStatus)
 			subscriptions.GET("/:id/episodes/:episode/candidates", episodeHandler.ListCandidates)
 			subscriptions.POST("/:id/episodes/:episode/candidates/:candidate_id/keep", episodeHandler.KeepCandidate)
+			subscriptions.POST("/:id/episodes/:episode/candidates/:candidate_id/replace", episodeHandler.Replace)
+			subscriptions.POST("/:id/episodes/:episode/candidates/:candidate_id/retry-cleanup", episodeHandler.RetryCleanup)
 			subscriptions.GET("/:id/diagnostics", subscriptionDiagnosticsHandler.Get)
 			subscriptions.POST("/:id/diagnostics/retry-failed", subscriptionDiagnosticsHandler.RetryFailed)
 			subscriptions.POST("/:id/toggle", subscriptionHandler.Toggle)
@@ -417,6 +442,7 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		logger.Error("Failed to start RSS scheduler, API continues without scheduler", "error", err)
 	}
 	appCtx.RegisterShutdownHook(rssScheduler.Stop)
+	startReplacementRecovery(appCtx, replacementRecovery)
 
 	// 初始化健康检查器
 	healthChecker := handler.NewHealthChecker(db, qbClient)
@@ -450,6 +476,28 @@ func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	}
 
 	return r, nil
+}
+
+func startReplacementRecovery(appCtx *app.Context, recoverIncomplete func(context.Context) (int, error)) {
+	if appCtx == nil || recoverIncomplete == nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	appCtx.RegisterShutdownHook(func() {
+		cancel()
+		<-done
+	})
+	logger.Info("Replacement startup recovery started")
+	go func() {
+		defer close(done)
+		scannedCount, err := recoverIncomplete(ctx)
+		if err != nil {
+			logger.Error("Replacement startup recovery failed", "scanned_count", scannedCount, "error", err)
+			return
+		}
+		logger.Info("Replacement startup recovery completed", "scanned_count", scannedCount)
+	}()
 }
 
 // coverHandler 封面图片处理：本地存在则直接返回，否则从 Bangumi 原 URL fallback 并异步重新下载

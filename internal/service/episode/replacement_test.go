@@ -1520,6 +1520,71 @@ func TestReplacementRecoveryRetriesCleanupAndIsIdempotent(t *testing.T) {
 	assert.Equal(t, ReplacementStageDone, got.ReplacementStage)
 }
 
+func TestReplacementRecoveryReportsScannedCandidateCount(t *testing.T) {
+	fx := newReplacementFixture(t)
+	candidate := fx.seedPendingCandidate(fx.writeOldFile("old-content"))
+	require.NoError(t, fx.db.Model(&candidate).Updates(map[string]any{
+		"status":            model.CandidateStatusAcceptedCleanupFailed,
+		"replacement_stage": ReplacementStageCleaning,
+	}).Error)
+
+	count, err := fx.service.RecoverIncompleteWithCount(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+}
+
+func TestReplacementRetryCleanupOnlyAcceptsCleanupFailedCandidate(t *testing.T) {
+	fx := newReplacementFixture(t)
+	pending := fx.seedPendingCandidate(fx.writeOldFile("pending-old"))
+
+	err := fx.service.RetryCleanup(context.Background(), pending.ID)
+	require.ErrorIs(t, err, repository.ErrCandidateStateConflict)
+
+	require.NoError(t, fx.db.Model(&pending).Updates(map[string]any{
+		"status":            model.CandidateStatusAcceptedCleanupFailed,
+		"replacement_stage": ReplacementStageCleaning,
+	}).Error)
+
+	require.NoError(t, fx.service.RetryCleanup(context.Background(), pending.ID))
+	got := fx.loadCandidate(pending.ID)
+	assert.Equal(t, model.CandidateStatusAccepted, got.Status)
+	assert.Equal(t, ReplacementStageDone, got.ReplacementStage)
+}
+
+type cleanupStateRaceRepository struct {
+	repository.EpisodeRepository
+	db      *gorm.DB
+	lookups int
+}
+
+func (r *cleanupStateRaceRepository) GetCandidateByID(candidateID uint) (*model.EpisodeResourceCandidate, error) {
+	r.lookups++
+	if r.lookups == 2 {
+		if err := r.db.Model(&model.EpisodeResourceCandidate{}).Where("id = ?", candidateID).Updates(map[string]any{
+			"status":            model.CandidateStatusPending,
+			"replacement_stage": "",
+		}).Error; err != nil {
+			return nil, err
+		}
+	}
+	return r.EpisodeRepository.GetCandidateByID(candidateID)
+}
+
+func TestReplacementRetryCleanupRevalidatesConcurrentStateChange(t *testing.T) {
+	fx := newReplacementFixture(t)
+	candidate := fx.seedPendingCandidate(fx.writeOldFile("old-content"))
+	require.NoError(t, fx.db.Model(&candidate).Updates(map[string]any{
+		"status":            model.CandidateStatusAcceptedCleanupFailed,
+		"replacement_stage": ReplacementStageCleaning,
+	}).Error)
+	fx.service.episodes = &cleanupStateRaceRepository{EpisodeRepository: fx.repo, db: fx.db}
+
+	err := fx.service.RetryCleanup(context.Background(), candidate.ID)
+	require.ErrorIs(t, err, repository.ErrCandidateStateConflict)
+	got := fx.loadCandidate(candidate.ID)
+	assert.Equal(t, model.CandidateStatusPending, got.Status)
+}
+
 func TestReplacementRecoveryKeepsUnknownStageForManualInspection(t *testing.T) {
 	fx := newReplacementFixture(t)
 	candidate := fx.seedPendingCandidate(fx.writeOldFile("old-content"))
