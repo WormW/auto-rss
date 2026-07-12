@@ -808,5 +808,6 @@ export const diskApi = {
 
 export * from './rss-source'
 export * from './mikan'
+export * from './episode'
 
 export default api
