@@ -194,6 +194,95 @@ ws://localhost:7892/ws/notifications?token=<access_token>
 | `POST` | `/subscriptions/import` | 导入订阅 |
 | `GET` | `/subscriptions/statistics` | 获取订阅统计 |
 
+#### 订阅 feed
+
+feed 是订阅 RSS 配置的事实来源。多个 feed 没有业务优先级，各自维护 URL、字幕组、集数偏移、启用状态、基线和健康信息。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/subscriptions/:id/feeds` | 列出订阅的全部 feed |
+| `POST` | `/subscriptions/:id/feeds` | 创建 feed；服务端再次拉取并校验映射 |
+| `PUT` | `/subscriptions/:id/feeds/:feedId` | 更新 feed；URL 或偏移变化时重建基线 |
+| `DELETE` | `/subscriptions/:id/feeds/:feedId` | 删除 feed，保留剧集台账和来源快照 |
+| `POST` | `/subscriptions/feeds/preview` | 为尚未创建的订阅预览 feed 映射 |
+| `POST` | `/subscriptions/:id/feeds/preview` | 预览新增 feed 映射 |
+| `POST` | `/subscriptions/:id/feeds/:feedId/preview` | 预览已有 feed 的待修改映射 |
+
+创建或更新请求：
+
+```json
+{
+  "name": "ANi",
+  "fansub": "ANi",
+  "rss_url": "https://example.com/anime.xml",
+  "episode_offset": 100,
+  "enabled": true
+}
+```
+
+预览成功响应的 `data` 包含：
+
+```json
+{
+  "parsed_items": 2,
+  "valid_items": 1,
+  "items": [
+    {
+      "title": "Anime 101",
+      "original_episode": 101,
+      "episode_offset": 100,
+      "relative_episode": 1,
+      "valid": true,
+      "invalid_reason": ""
+    }
+  ]
+}
+```
+
+空 RSS 返回成功响应和 `warning: "empty_feed"`，允许保存并等待首次发布。错误状态如下：
+
+| HTTP 状态 | 场景 |
+|-----------|------|
+| `409` | 同一订阅已有相同规范化 URL，或创建请求内含重复 URL |
+| `422` | URL 无效、偏移为负数，或 RSS 有条目但没有可映射到正相对集数的条目 |
+| `502` | feed 拉取失败 |
+
+旧 `PUT /subscriptions/:id` 中的 `rss_url`、`fansub` 和 `episode_offset` 仅兼容单 feed 订阅。订阅已有多条 feed 时，这些字段返回 `409`；客户端应改用 feed API。其他订阅共享字段仍通过订阅更新接口保存。
+
+创建订阅时可以原子地提交初始 feeds：
+
+```json
+{
+  "name": "Anime",
+  "season": 1,
+  "feeds": [
+    { "name": "A", "rss_url": "https://a.example/rss", "episode_offset": 0, "enabled": true },
+    { "name": "B", "rss_url": "https://b.example/rss", "episode_offset": 100, "enabled": true }
+  ]
+}
+```
+
+#### 订阅导入与导出
+
+`GET /subscriptions/export?format=json` 导出版本 `2.0`，每个订阅包含 `feeds`。导入 JSON 同时接受直接数组、顶层 `subscriptions`，以及 API 响应的 `data.subscriptions`；旧 `1.0` 单 RSS 记录会转换为一条默认 feed。
+
+`GET /subscriptions/export?format=opml` 为每个 feed 输出一条 outline，并用以下属性保留订阅分组和映射：
+
+```xml
+<outline type="rss"
+  text="Anime - B"
+  title="Anime"
+  xmlUrl="https://b.example/rss"
+  autoRssSubscription="Anime"
+  autoRssSeason="1"
+  autoRssFeed="B"
+  autoRssFansub="Group B"
+  autoRssOffset="100"
+  autoRssEnabled="true"></outline>
+```
+
+导入时按 `autoRssSubscription + autoRssSeason` 合并为一个订阅的多条 feeds。没有扩展属性的传统 OPML 仍按“一条 outline 对应一个订阅”导入；非法 offset 会使该订阅组失败，不会默认为 0。
+
 #### 剧集台账与资源候选
 
 剧集台账以订阅内的相对集数为唯一身份。RSS 或手动采集发现同集不同资源时，不会自动删除或替换已有下载，而是创建待人工处理的资源候选。
@@ -245,18 +334,19 @@ ws://localhost:7892/ws/notifications?token=<access_token>
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `name` | string | 番剧名称 |
-| `rss_url` | string | RSS 地址 |
+| `feeds` | array | feed 配置列表；新客户端使用的 RSS 事实来源 |
+| `rss_url` | string | 旧单 feed 兼容投影 |
 | `season` | int | 季度 |
 | `enabled` | bool | 是否启用自动检查 |
 | `rename_enabled` | bool | 是否启用重命名 |
-| `fansub` | string | 字幕组 |
+| `fansub` | string | 旧单 feed 兼容投影；新配置写入 feed |
 | `language` | string | 字幕语言 |
 | `language_preference` | string | `auto`、`chs`、`cht`、`both` |
 | `filter_keywords` | string | 包含关键词 |
 | `exclude_keywords` | string | 排除关键词 |
 | `filter_rules` | string | 支持 `include:`、`exclude:`、`+`、`-` 等规则前缀 |
 | `total_episodes` | int | 总集数，0 表示未知 |
-| `episode_offset` | int | RSS 集数偏移 |
+| `episode_offset` | int | 旧单 feed 兼容投影；新配置写入 feed |
 | `collection_torrent` | string | 合集种子地址 |
 | `bangumi_id` | int | Bangumi 条目 ID |
 | `air_day` | string | 更新星期，`0` 表示周日 |
@@ -676,7 +766,9 @@ GET /api/v1/backup/export?include_sensitive=false
 
 `source_format` 支持 `auto`、`auto-rss`、`auto-bangumi`。`strategy` 支持 `skip`、`merge`、`overwrite`。脱敏字段在导入时始终跳过。
 
-Auto-RSS schema `1.1` 使用稳定的订阅键关联 `episodes` 和 `episode_candidates`，不导出数据库运行时 ID。正在下载的剧集会规范化为可恢复的缺失状态；候选的替换阶段、替换下载 ID、旧下载 ID、暂存路径、回滚路径、最终路径和旧任务 Hash 等运行时状态不会进入备份。导入时也会再次清除这些字段，避免在另一台设备上引用无效任务或本地文件路径。schema `1.0` 仍可导入，但不包含剧集拥有状态和候选。
+Auto-RSS schema `1.2` 在 `1.1` 剧集台账基础上保留订阅 feeds。导出会清除 feed ID、规范化 URL、基线状态、水位线、检查时间、成功时间和错误；恢复时重建 ID，并将每条 feed 设为待基线。`overwrite` 以备份中的 feeds 完整替换目标配置，`merge` 只补充目标订阅中不存在的规范化 URL，不覆盖目标 feed 的运行时状态。
+
+schema `1.0` 和 `1.1` 仍可导入。没有 `feeds` 的旧记录会从 `rss_url`、`fansub` 和 `episode_offset` 生成默认 feed。正在下载的剧集会规范化为可恢复的缺失状态；候选的替换阶段、替换下载 ID、旧下载 ID、暂存路径、回滚路径、最终路径和旧任务 Hash 等运行时状态不会进入备份。
 
 ---
 
