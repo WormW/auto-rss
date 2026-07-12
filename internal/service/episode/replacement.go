@@ -26,6 +26,8 @@ const (
 	ReplacementStageOldBackedUp     = "old_backed_up"
 	ReplacementStagePromoted        = "promoted"
 	ReplacementStageSwitched        = "switched"
+	ReplacementStageCleanupQueued   = "cleanup_queued"
+	ReplacementStageCleanupActive   = "cleanup_active"
 	ReplacementStageCleaning        = "cleaning"
 	ReplacementStageDone            = "done"
 )
@@ -128,6 +130,7 @@ func validateRenameEndpoint(path string, mustExist bool) error {
 
 type ReplacementService struct {
 	recoveryMu    sync.Mutex
+	candidateMu   candidateLockTable
 	db            *gorm.DB
 	episodes      repository.EpisodeRepository
 	downloads     repository.DownloadRepository
@@ -135,6 +138,41 @@ type ReplacementService struct {
 	downloader    ReplacementDownloader
 	torrents      TorrentTaskController
 	files         FilePromoter
+}
+
+type candidateLockTable struct {
+	mu      sync.Mutex
+	entries map[uint]*candidateLockEntry
+}
+
+type candidateLockEntry struct {
+	mu   sync.Mutex
+	refs int
+}
+
+func (t *candidateLockTable) lock(candidateID uint) func() {
+	t.mu.Lock()
+	if t.entries == nil {
+		t.entries = make(map[uint]*candidateLockEntry)
+	}
+	entry := t.entries[candidateID]
+	if entry == nil {
+		entry = &candidateLockEntry{}
+		t.entries[candidateID] = entry
+	}
+	entry.refs++
+	t.mu.Unlock()
+
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		t.mu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(t.entries, candidateID)
+		}
+		t.mu.Unlock()
+	}
 }
 
 func NewReplacementService(
@@ -150,28 +188,74 @@ func NewReplacementService(
 }
 
 func (s *ReplacementService) Replace(ctx context.Context, candidateID uint) error {
+	if err := s.PrepareReplace(candidateID); err != nil {
+		return err
+	}
+	return s.ContinueReplace(ctx, candidateID)
+}
+
+func (s *ReplacementService) PrepareReplace(candidateID uint) error {
 	if err := s.validate(); err != nil {
 		return err
 	}
-	candidate, err := s.episodes.ClaimCandidateForReplacement(candidateID)
+	unlock := s.candidateMu.lock(candidateID)
+	defer unlock()
+	_, err := s.episodes.ClaimCandidateForReplacement(candidateID)
+	return err
+}
+
+func (s *ReplacementService) ContinueReplace(ctx context.Context, candidateID uint) error {
+	if err := s.validate(); err != nil {
+		return err
+	}
+	unlock := s.candidateMu.lock(candidateID)
+	defer unlock()
+	candidate, err := s.episodes.GetCandidateByID(candidateID)
 	if err != nil {
 		return err
+	}
+	if candidate.Status == model.CandidateStatusAccepted && candidate.ReplacementStage == ReplacementStageDone {
+		return nil
+	}
+	if candidate.Status != model.CandidateStatusReplacing {
+		return fmt.Errorf("%w: candidate %d has status %s", repository.ErrCandidateStateConflict, candidateID, candidate.Status)
 	}
 	return s.advance(ctx, candidate)
 }
 
 func (s *ReplacementService) RetryCleanup(ctx context.Context, candidateID uint) error {
+	if err := s.PrepareRetryCleanup(candidateID); err != nil {
+		return err
+	}
+	return s.ContinueRetryCleanup(ctx, candidateID)
+}
+
+func (s *ReplacementService) PrepareRetryCleanup(candidateID uint) error {
 	if err := s.validate(); err != nil {
 		return err
 	}
+	unlock := s.candidateMu.lock(candidateID)
+	defer unlock()
+	return s.claimCleanup(candidateID)
+}
+
+func (s *ReplacementService) ContinueRetryCleanup(ctx context.Context, candidateID uint) error {
+	if err := s.validate(); err != nil {
+		return err
+	}
+	unlock := s.candidateMu.lock(candidateID)
+	defer unlock()
 	candidate, err := s.episodes.GetCandidateByID(candidateID)
 	if err != nil {
 		return err
 	}
-	if candidate.Status != model.CandidateStatusAcceptedCleanupFailed {
-		return fmt.Errorf("%w: candidate %d has status %s", repository.ErrCandidateStateConflict, candidateID, candidate.Status)
+	if candidate.Status == model.CandidateStatusAccepted && candidate.ReplacementStage == ReplacementStageDone {
+		return nil
 	}
-	return s.cleanup(ctx, candidate)
+	if candidate.Status != model.CandidateStatusAcceptedCleanupFailed || candidate.ReplacementStage != ReplacementStageCleanupQueued {
+		return cleanupStateConflict(candidate)
+	}
+	return s.cleanupClaimed(ctx, candidate)
 }
 
 func (s *ReplacementService) RecoverIncomplete(ctx context.Context) error {
@@ -193,7 +277,16 @@ func (s *ReplacementService) RecoverIncompleteWithCount(ctx context.Context) (in
 	errCh := make(chan error, len(candidates))
 	var activeDownloads sync.WaitGroup
 	advanceCandidate := func(candidate model.EpisodeResourceCandidate) {
-		if err := s.advance(ctx, &candidate); err != nil {
+		unlock := s.candidateMu.lock(candidate.ID)
+		defer unlock()
+		fresh, err := s.episodes.GetCandidateByID(candidate.ID)
+		if err == nil && fresh.Status == model.CandidateStatusAccepted && fresh.ReplacementStage == ReplacementStageDone {
+			return
+		}
+		if err == nil {
+			err = s.advance(ctx, fresh)
+		}
+		if err != nil {
 			errCh <- fmt.Errorf("candidate %d: %w", candidate.ID, err)
 		}
 	}
@@ -235,7 +328,7 @@ func (s *ReplacementService) advance(ctx context.Context, candidate *model.Episo
 		return errors.New("replacement candidate is required")
 	}
 	if candidate.Status == model.CandidateStatusAcceptedCleanupFailed {
-		if candidate.ReplacementStage == ReplacementStageSwitched || candidate.ReplacementStage == ReplacementStageCleaning {
+		if candidate.ReplacementStage == ReplacementStageSwitched || candidate.ReplacementStage == ReplacementStageCleaning || candidate.ReplacementStage == ReplacementStageCleanupQueued || candidate.ReplacementStage == ReplacementStageCleanupActive {
 			return s.cleanup(ctx, candidate)
 		}
 		return s.recordUnknownStage(candidate)
@@ -634,7 +727,7 @@ func (s *ReplacementService) switchDatabase(candidate *model.EpisodeResourceCand
 		if err := tx.First(&current, candidate.ID).Error; err != nil {
 			return err
 		}
-		if current.Status == model.CandidateStatusAcceptedCleanupFailed && (current.ReplacementStage == ReplacementStageSwitched || current.ReplacementStage == ReplacementStageCleaning) {
+		if current.Status == model.CandidateStatusAcceptedCleanupFailed && (current.ReplacementStage == ReplacementStageSwitched || current.ReplacementStage == ReplacementStageCleanupQueued || current.ReplacementStage == ReplacementStageCleanupActive || current.ReplacementStage == ReplacementStageCleaning) {
 			return nil
 		}
 		if current.Status != model.CandidateStatusReplacing || current.ReplacementStage != ReplacementStagePromoted {
@@ -692,6 +785,54 @@ func (s *ReplacementService) switchDatabase(candidate *model.EpisodeResourceCand
 }
 
 func (s *ReplacementService) cleanup(ctx context.Context, candidate *model.EpisodeResourceCandidate) error {
+	if candidate == nil {
+		return errors.New("replacement candidate is required")
+	}
+	fresh, err := s.episodes.GetCandidateByID(candidate.ID)
+	if err != nil {
+		return err
+	}
+	candidate = fresh
+	if candidate.Status == model.CandidateStatusAccepted && candidate.ReplacementStage == ReplacementStageDone {
+		return nil
+	}
+	if candidate.Status != model.CandidateStatusAcceptedCleanupFailed {
+		return cleanupStateConflict(candidate)
+	}
+	if candidate.ReplacementStage != ReplacementStageCleanupQueued {
+		if candidate.ReplacementStage != ReplacementStageSwitched && candidate.ReplacementStage != ReplacementStageCleaning && candidate.ReplacementStage != ReplacementStageCleanupActive {
+			return cleanupStateConflict(candidate)
+		}
+		if err := s.claimCleanup(candidate.ID); err != nil {
+			return err
+		}
+		fresh, err := s.episodes.GetCandidateByID(candidate.ID)
+		if err != nil {
+			return err
+		}
+		candidate = fresh
+	}
+	return s.cleanupClaimed(ctx, candidate)
+}
+
+func (s *ReplacementService) claimCleanup(candidateID uint) error {
+	result := s.db.Model(&model.EpisodeResourceCandidate{}).
+		Where("id = ? AND status = ? AND replacement_stage IN ?", candidateID, model.CandidateStatusAcceptedCleanupFailed, []string{ReplacementStageSwitched, ReplacementStageCleaning, ReplacementStageCleanupActive}).
+		Updates(map[string]any{"replacement_stage": ReplacementStageCleanupQueued, "updated_at": time.Now()})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 1 {
+		return nil
+	}
+	candidate, err := s.episodes.GetCandidateByID(candidateID)
+	if err != nil {
+		return err
+	}
+	return cleanupStateConflict(candidate)
+}
+
+func (s *ReplacementService) cleanupClaimed(ctx context.Context, candidate *model.EpisodeResourceCandidate) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -703,15 +844,26 @@ func (s *ReplacementService) cleanup(ctx context.Context, candidate *model.Episo
 	if candidate.ReplacementStage == ReplacementStageDone && candidate.Status == model.CandidateStatusAccepted {
 		return nil
 	}
-	if candidate.Status != model.CandidateStatusAcceptedCleanupFailed ||
-		(candidate.ReplacementStage != ReplacementStageSwitched && candidate.ReplacementStage != ReplacementStageCleaning) {
-		return fmt.Errorf("%w: candidate %d cannot retry cleanup from status %s stage %s", repository.ErrCandidateStateConflict, candidate.ID, candidate.Status, candidate.ReplacementStage)
+	if candidate.Status != model.CandidateStatusAcceptedCleanupFailed || candidate.ReplacementStage != ReplacementStageCleanupQueued {
+		return cleanupStateConflict(candidate)
 	}
-	candidate.Status = model.CandidateStatusAcceptedCleanupFailed
-	candidate.ReplacementStage = ReplacementStageCleaning
-	if err := s.episodes.UpdateCandidate(candidate); err != nil {
-		return err
+	result := s.db.Model(&model.EpisodeResourceCandidate{}).
+		Where("id = ? AND status = ? AND replacement_stage = ?", candidate.ID, model.CandidateStatusAcceptedCleanupFailed, ReplacementStageCleanupQueued).
+		Updates(map[string]any{"replacement_stage": ReplacementStageCleanupActive, "updated_at": time.Now()})
+	if result.Error != nil {
+		return result.Error
 	}
+	if result.RowsAffected != 1 {
+		fresh, err := s.episodes.GetCandidateByID(candidate.ID)
+		if err == nil && fresh.Status == model.CandidateStatusAccepted && fresh.ReplacementStage == ReplacementStageDone {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return cleanupStateConflict(fresh)
+	}
+	candidate.ReplacementStage = ReplacementStageCleanupActive
 	if candidate.OldTorrentHash != "" {
 		if err := s.torrents.RemoveTorrentTask(candidate.OldTorrentHash); err != nil {
 			return s.cleanupFailure(candidate, err)
@@ -727,20 +879,50 @@ func (s *ReplacementService) cleanup(ctx context.Context, candidate *model.Episo
 			return s.cleanupFailure(candidate, err)
 		}
 	}
-	candidate.Status = model.CandidateStatusAccepted
-	candidate.ReplacementStage = ReplacementStageDone
-	candidate.FailureReason = ""
-	return s.episodes.UpdateCandidate(candidate)
+	result = s.db.Model(&model.EpisodeResourceCandidate{}).
+		Where("id = ? AND status = ? AND replacement_stage = ?", candidate.ID, model.CandidateStatusAcceptedCleanupFailed, ReplacementStageCleanupActive).
+		Updates(map[string]any{"status": model.CandidateStatusAccepted, "replacement_stage": ReplacementStageDone, "failure_reason": "", "updated_at": time.Now()})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 1 {
+		return nil
+	}
+	fresh, err = s.episodes.GetCandidateByID(candidate.ID)
+	if err == nil && fresh.Status == model.CandidateStatusAccepted && fresh.ReplacementStage == ReplacementStageDone {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return cleanupStateConflict(fresh)
 }
 
 func (s *ReplacementService) cleanupFailure(candidate *model.EpisodeResourceCandidate, err error) error {
-	candidate.Status = model.CandidateStatusAcceptedCleanupFailed
-	candidate.ReplacementStage = ReplacementStageCleaning
-	candidate.FailureReason = err.Error()
-	if saveErr := s.episodes.UpdateCandidate(candidate); saveErr != nil {
-		return errors.Join(err, saveErr)
+	result := s.db.Model(&model.EpisodeResourceCandidate{}).
+		Where("id = ? AND status = ? AND replacement_stage = ?", candidate.ID, model.CandidateStatusAcceptedCleanupFailed, ReplacementStageCleanupActive).
+		Updates(map[string]any{"replacement_stage": ReplacementStageCleaning, "failure_reason": err.Error(), "updated_at": time.Now()})
+	if result.Error != nil {
+		return errors.Join(err, result.Error)
+	}
+	if result.RowsAffected != 1 {
+		fresh, loadErr := s.episodes.GetCandidateByID(candidate.ID)
+		if loadErr == nil && fresh.Status == model.CandidateStatusAccepted && fresh.ReplacementStage == ReplacementStageDone {
+			return nil
+		}
+		if loadErr != nil {
+			return errors.Join(err, loadErr)
+		}
+		return errors.Join(err, cleanupStateConflict(fresh))
 	}
 	return err
+}
+
+func cleanupStateConflict(candidate *model.EpisodeResourceCandidate) error {
+	if candidate == nil {
+		return fmt.Errorf("%w: candidate is missing", repository.ErrCandidateStateConflict)
+	}
+	return fmt.Errorf("%w: candidate %d cannot clean up from status %s stage %s", repository.ErrCandidateStateConflict, candidate.ID, candidate.Status, candidate.ReplacementStage)
 }
 
 func (s *ReplacementService) failAndResume(candidate *model.EpisodeResourceCandidate, err error) error {

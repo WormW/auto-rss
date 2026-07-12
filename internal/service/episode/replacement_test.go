@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -350,6 +351,37 @@ func TestReplacementRejectsConcurrentReplacingCandidate(t *testing.T) {
 
 	require.ErrorIs(t, err, ErrReplacementInProgress)
 	assert.Equal(t, model.CandidateStatusReplacing, fx.loadCandidate(first.ID).Status)
+	assert.Equal(t, model.CandidateStatusPending, fx.loadCandidate(second.ID).Status)
+}
+
+func TestReplacementPrepareReplaceClaimsBeforeContinuation(t *testing.T) {
+	fx := newReplacementFixture(t)
+	candidate := fx.seedPendingCandidate(fx.writeOldFile("old-content"))
+
+	require.NoError(t, fx.service.PrepareReplace(candidate.ID))
+	prepared := fx.loadCandidate(candidate.ID)
+	assert.Equal(t, model.CandidateStatusReplacing, prepared.Status)
+	assert.Equal(t, ReplacementStageQueued, prepared.ReplacementStage)
+
+	require.NoError(t, fx.service.ContinueReplace(context.Background(), candidate.ID))
+	completed := fx.loadCandidate(candidate.ID)
+	assert.Equal(t, model.CandidateStatusAccepted, completed.Status)
+	assert.Equal(t, ReplacementStageDone, completed.ReplacementStage)
+}
+
+func TestReplacementPrepareReplaceMapsAtomicClaimConflict(t *testing.T) {
+	fx := newReplacementFixture(t)
+	first := fx.seedPendingCandidate(fx.writeOldFile("old-content"))
+	require.NoError(t, fx.service.PrepareReplace(first.ID))
+	second := model.EpisodeResourceCandidate{
+		SubscriptionEpisodeID: fx.ledger.ID,
+		ResourceKey:           "hash:prepare-second",
+		Status:                model.CandidateStatusPending,
+	}
+	require.NoError(t, fx.db.Create(&second).Error)
+
+	err := fx.service.PrepareReplace(second.ID)
+	require.ErrorIs(t, err, ErrReplacementInProgress)
 	assert.Equal(t, model.CandidateStatusPending, fx.loadCandidate(second.ID).Status)
 }
 
@@ -1583,6 +1615,127 @@ func TestReplacementRetryCleanupRevalidatesConcurrentStateChange(t *testing.T) {
 	require.ErrorIs(t, err, repository.ErrCandidateStateConflict)
 	got := fx.loadCandidate(candidate.ID)
 	assert.Equal(t, model.CandidateStatusPending, got.Status)
+}
+
+func seedCleanupCheckpoint(t *testing.T, fx *replacementFixture) model.EpisodeResourceCandidate {
+	t.Helper()
+	candidate := fx.seedPendingCandidate(fx.writeOldFile("old-content"))
+	rollbackPath := filepath.Join(fx.root, ".auto-rss-rollback", "old.mkv")
+	require.NoError(t, os.MkdirAll(filepath.Dir(rollbackPath), 0o755))
+	require.NoError(t, os.WriteFile(rollbackPath, []byte("rollback"), 0o644))
+	oldID := fx.old.ID
+	require.NoError(t, fx.db.Model(&candidate).Updates(map[string]any{
+		"status":                  model.CandidateStatusAcceptedCleanupFailed,
+		"replacement_stage":       ReplacementStageCleaning,
+		"old_torrent_hash":        fx.old.TorrentHash,
+		"rollback_path":           rollbackPath,
+		"old_download_id":         oldID,
+		"old_resource_path":       fx.old.RenamedPath,
+		"replacement_download_id": nil,
+	}).Error)
+	return fx.loadCandidate(candidate.ID)
+}
+
+type blockingCountingTorrentController struct {
+	TorrentTaskController
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+	removes atomic.Int32
+}
+
+func (c *blockingCountingTorrentController) RemoveTorrentTask(string) error {
+	c.removes.Add(1)
+	c.once.Do(func() { close(c.started) })
+	<-c.release
+	return nil
+}
+
+type countingFilePromoter struct {
+	FilePromoter
+	removes atomic.Int32
+}
+
+func (p *countingFilePromoter) Remove(path string) error {
+	p.removes.Add(1)
+	return p.FilePromoter.Remove(path)
+}
+
+type countingCleanupDownloadRepository struct {
+	repository.DownloadRepository
+	deletes atomic.Int32
+}
+
+func (r *countingCleanupDownloadRepository) Delete(id uint) error {
+	r.deletes.Add(1)
+	return r.DownloadRepository.Delete(id)
+}
+
+func TestReplacementManualCleanupAndRecoverySerializeExternalEffects(t *testing.T) {
+	fx := newReplacementFixture(t)
+	candidate := seedCleanupCheckpoint(t, fx)
+	controller := &blockingCountingTorrentController{
+		TorrentTaskController: fx.controller,
+		started:               make(chan struct{}),
+		release:               make(chan struct{}),
+	}
+	files := &countingFilePromoter{FilePromoter: fx.promoter}
+	downloads := &countingCleanupDownloadRepository{DownloadRepository: fx.downloads}
+	service := NewReplacementService(fx.db, fx.repo, downloads, fx.subs, fx.downloader, controller, files)
+	manualDone := make(chan error, 1)
+	go func() { manualDone <- service.RetryCleanup(context.Background(), candidate.ID) }()
+	<-controller.started
+	recoveryDone := make(chan error, 1)
+	go func() { recoveryDone <- service.RecoverIncomplete(context.Background()) }()
+	close(controller.release)
+
+	require.NoError(t, <-manualDone)
+	require.NoError(t, <-recoveryDone)
+	assert.EqualValues(t, 1, controller.removes.Load())
+	assert.EqualValues(t, 1, files.removes.Load())
+	assert.EqualValues(t, 1, downloads.deletes.Load())
+	completed := fx.loadCandidate(candidate.ID)
+	assert.Equal(t, model.CandidateStatusAccepted, completed.Status)
+	assert.Equal(t, ReplacementStageDone, completed.ReplacementStage)
+}
+
+func TestReplacementConcurrentManualCleanupPrepareClaimsOnce(t *testing.T) {
+	fx := newReplacementFixture(t)
+	candidate := seedCleanupCheckpoint(t, fx)
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			results <- fx.service.PrepareRetryCleanup(candidate.ID)
+		}()
+	}
+	close(start)
+	errs := []error{<-results, <-results}
+	var success, conflicts int
+	for _, err := range errs {
+		if err == nil {
+			success++
+		} else if errors.Is(err, repository.ErrCandidateStateConflict) {
+			conflicts++
+		}
+	}
+	assert.Equal(t, 1, success)
+	assert.Equal(t, 1, conflicts)
+	assert.Equal(t, ReplacementStageCleanupQueued, fx.loadCandidate(candidate.ID).ReplacementStage)
+}
+
+func TestReplacementRecoveryContinuesPreparedCleanupAfterRestart(t *testing.T) {
+	fx := newReplacementFixture(t)
+	candidate := seedCleanupCheckpoint(t, fx)
+	require.NoError(t, fx.service.PrepareRetryCleanup(candidate.ID))
+	assert.Equal(t, ReplacementStageCleanupQueued, fx.loadCandidate(candidate.ID).ReplacementStage)
+
+	restarted := NewReplacementService(fx.db, fx.repo, fx.downloads, fx.subs, fx.downloader, fx.controller, fx.promoter)
+	require.NoError(t, restarted.RecoverIncomplete(context.Background()))
+	completed := fx.loadCandidate(candidate.ID)
+	assert.Equal(t, model.CandidateStatusAccepted, completed.Status)
+	assert.Equal(t, ReplacementStageDone, completed.ReplacementStage)
 }
 
 func TestReplacementRecoveryKeepsUnknownStageForManualInspection(t *testing.T) {

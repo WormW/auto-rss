@@ -2,12 +2,15 @@ package task
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 )
+
+var ErrTaskRunning = errors.New("task already running")
 
 // TaskType 任务类型
 type TaskType string
@@ -93,13 +96,25 @@ func (m *Manager) IsRunning() bool {
 
 // StartTask 启动新任务
 func (m *Manager) StartTask(taskType TaskType, subscriptionID uint, name string, fn func(ctx context.Context, task *Task) error) (*Task, error) {
+	return m.StartPreparedTask(taskType, subscriptionID, name, nil, fn)
+}
+
+// StartPreparedTask atomically checks global task availability, prepares any
+// external claim, and installs the task before starting its callback.
+func (m *Manager) StartPreparedTask(taskType TaskType, subscriptionID uint, name string, prepare func() error, fn func(ctx context.Context, task *Task) error) (*Task, error) {
 	m.mu.Lock()
 
 	// 检查是否有任务在运行
 	if m.currentTask != nil && m.currentTask.Status == TaskStatusRunning {
 		runningTaskName := m.currentTask.Name
 		m.mu.Unlock()
-		return nil, fmt.Errorf("已有任务在运行中: %s", runningTaskName)
+		return nil, fmt.Errorf("%w: 已有任务在运行中: %s", ErrTaskRunning, runningTaskName)
+	}
+	if prepare != nil {
+		if err := prepare(); err != nil {
+			m.mu.Unlock()
+			return nil, err
+		}
 	}
 
 	// 创建新任务

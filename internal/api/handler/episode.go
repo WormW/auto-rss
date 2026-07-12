@@ -24,12 +24,14 @@ type EpisodeHandler struct {
 }
 
 type ReplacementActions interface {
-	Replace(ctx context.Context, candidateID uint) error
-	RetryCleanup(ctx context.Context, candidateID uint) error
+	PrepareReplace(candidateID uint) error
+	ContinueReplace(ctx context.Context, candidateID uint) error
+	PrepareRetryCleanup(candidateID uint) error
+	ContinueRetryCleanup(ctx context.Context, candidateID uint) error
 }
 
 type episodeTaskStarter interface {
-	StartTask(taskType task.TaskType, subscriptionID uint, name string, fn func(context.Context, *task.Task) error) (*task.Task, error)
+	StartPreparedTask(taskType task.TaskType, subscriptionID uint, name string, prepare func() error, fn func(context.Context, *task.Task) error) (*task.Task, error)
 }
 
 type EpisodeListItem struct {
@@ -176,14 +178,22 @@ func (h *EpisodeHandler) KeepCandidate(c *gin.Context) {
 }
 
 func (h *EpisodeHandler) Replace(c *gin.Context) {
-	h.startReplacementTask(c, []string{model.CandidateStatusPending, model.CandidateStatusFailed}, true, "替换剧集资源", h.callReplace)
+	h.startReplacementTask(c, []string{model.CandidateStatusPending, model.CandidateStatusFailed}, true, "替换剧集资源", func(candidateID uint) error {
+		return h.replacement.PrepareReplace(candidateID)
+	}, func(ctx context.Context, candidateID uint) error {
+		return h.replacement.ContinueReplace(ctx, candidateID)
+	})
 }
 
 func (h *EpisodeHandler) RetryCleanup(c *gin.Context) {
-	h.startReplacementTask(c, []string{model.CandidateStatusAcceptedCleanupFailed}, false, "重试替换清理", h.callRetryCleanup)
+	h.startReplacementTask(c, []string{model.CandidateStatusAcceptedCleanupFailed}, false, "重试替换清理", func(candidateID uint) error {
+		return h.replacement.PrepareRetryCleanup(candidateID)
+	}, func(ctx context.Context, candidateID uint) error {
+		return h.replacement.ContinueRetryCleanup(ctx, candidateID)
+	})
 }
 
-func (h *EpisodeHandler) startReplacementTask(c *gin.Context, allowedStatuses []string, rejectSiblingReplacement bool, name string, action func(context.Context, uint) error) {
+func (h *EpisodeHandler) startReplacementTask(c *gin.Context, allowedStatuses []string, checkSiblingReplacement bool, name string, prepare func(uint) error, action func(context.Context, uint) error) {
 	subscriptionID, ok := parsePositiveID(c, "id", "subscription")
 	if !ok {
 		return
@@ -208,14 +218,23 @@ func (h *EpisodeHandler) startReplacementTask(c *gin.Context, allowedStatuses []
 		episodeAPIError(c, http.StatusConflict, "Candidate state does not allow this action", "candidate_state_conflict")
 		return
 	}
-	if rejectSiblingReplacement && !h.requireNoSiblingReplacement(c, subscriptionID, episodeNumber, candidateID) {
-		return
-	}
-
-	started, err := h.tasks.StartTask(task.TaskTypeReplacement, subscriptionID, name, func(ctx context.Context, _ *task.Task) error {
+	started, err := h.tasks.StartPreparedTask(task.TaskTypeReplacement, subscriptionID, name, func() error {
+		return prepare(candidateID)
+	}, func(ctx context.Context, _ *task.Task) error {
 		return action(ctx, candidateID)
 	})
 	if err != nil {
+		if replacementPrepareConflict(err) {
+			episodeAPIError(c, http.StatusConflict, "Candidate replacement state changed", "candidate_state_conflict")
+			return
+		}
+		if errors.Is(err, task.ErrTaskRunning) {
+			conflict, lookupErr := h.replacementConflictAfterTaskBusy(subscriptionID, episodeNumber, candidateID, allowedStatuses, checkSiblingReplacement)
+			if lookupErr == nil && conflict {
+				episodeAPIError(c, http.StatusConflict, "Candidate replacement state changed", "candidate_state_conflict")
+				return
+			}
+		}
 		episodeAPIError(c, http.StatusInternalServerError, "Failed to create replacement task", "")
 		return
 	}
@@ -229,21 +248,36 @@ func (h *EpisodeHandler) startReplacementTask(c *gin.Context, allowedStatuses []
 	})
 }
 
-func (h *EpisodeHandler) requireNoSiblingReplacement(c *gin.Context, subscriptionID uint, episodeNumber int, candidateID uint) bool {
+func (h *EpisodeHandler) replacementConflictAfterTaskBusy(subscriptionID uint, episodeNumber int, candidateID uint, allowedStatuses []string, checkSiblingReplacement bool) (bool, error) {
+	candidate, err := h.episodeRepo.GetCandidateByID(candidateID)
+	if err != nil {
+		return false, err
+	}
+	if !candidateStatusAllowed(candidate.Status, allowedStatuses) {
+		return true, nil
+	}
+	if !checkSiblingReplacement && (candidate.ReplacementStage == episode.ReplacementStageCleanupQueued || candidate.ReplacementStage == episode.ReplacementStageCleanupActive) {
+		return true, nil
+	}
+	if !checkSiblingReplacement {
+		return false, nil
+	}
+	return h.hasSiblingReplacement(subscriptionID, episodeNumber, candidateID)
+}
+
+func (h *EpisodeHandler) hasSiblingReplacement(subscriptionID uint, episodeNumber int, candidateID uint) (bool, error) {
 	for offset := 0; ; offset += repository.MaxEpisodeCandidateLimit {
 		candidates, err := h.episodeRepo.ListCandidatesByScope(subscriptionID, episodeNumber, offset, repository.MaxEpisodeCandidateLimit)
 		if err != nil {
-			episodeAPIError(c, http.StatusInternalServerError, "Failed to inspect replacement state", "")
-			return false
+			return false, err
 		}
 		for _, candidate := range candidates {
 			if candidate.ID != candidateID && candidate.Status == model.CandidateStatusReplacing {
-				episodeAPIError(c, http.StatusConflict, "Another candidate replacement is already in progress", "replacement_in_progress")
-				return false
+				return true, nil
 			}
 		}
 		if len(candidates) < repository.MaxEpisodeCandidateLimit {
-			return true
+			return false, nil
 		}
 	}
 }
@@ -270,12 +304,8 @@ func (h *EpisodeHandler) requireCandidateScope(c *gin.Context, subscriptionID ui
 	return candidate, true
 }
 
-func (h *EpisodeHandler) callReplace(ctx context.Context, candidateID uint) error {
-	return h.replacement.Replace(ctx, candidateID)
-}
-
-func (h *EpisodeHandler) callRetryCleanup(ctx context.Context, candidateID uint) error {
-	return h.replacement.RetryCleanup(ctx, candidateID)
+func replacementPrepareConflict(err error) bool {
+	return errors.Is(err, repository.ErrCandidateStateConflict) || errors.Is(err, episode.ErrReplacementInProgress)
 }
 
 func candidateStatusAllowed(status string, allowed []string) bool {
