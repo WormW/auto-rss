@@ -81,14 +81,21 @@
               <div v-if="task.error" style="font-size: 12px; color: #f56c6c; margin-top: 4px;">
                 {{ task.error }}
               </div>
-              <div v-if="task.result" style="font-size: 12px; color: #67c23a; margin-top: 4px;">
+              <div
+                v-if="task.result"
+                :style="{
+                  fontSize: '12px',
+                  color: task.result.total === undefined && collectionTaskHasErrors(task.result) ? '#d03050' : '#67c23a',
+                  marginTop: '4px'
+                }"
+              >
                 <template v-if="task.result.total !== undefined">
                   <!-- 导入任务结果 -->
                   导入: 成功 {{ task.result.success || 0 }} / 跳过 {{ task.result.skipped || 0 }} / 失败 {{ task.result.failed || 0 }} (共{{ task.result.total }})
                 </template>
                 <template v-else>
                   <!-- 采集任务结果 -->
-                  收集: {{ task.result.collected || 0 }} 条
+                  {{ formatCollectionTaskResult(task.result) }}
                 </template>
               </div>
               <div style="font-size: 11px; color: #999; margin-top: 4px;">
@@ -106,6 +113,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { NPopover, NButton, NIcon, NCard, NTag, NProgress, useMessage } from 'naive-ui'
 import { taskApi, type Task } from '../api'
+import { collectionTaskHasErrors, formatCollectionTaskResult } from '../utils/task-result'
 
 const message = useMessage()
 

@@ -1496,11 +1496,11 @@ func (h *SubscriptionHandler) doCollectEpisodes(ctx context.Context, t *task.Tas
 	}
 	manager.UpdateProgress(10, "采集订阅源...")
 	summary, err := h.collector.CollectSubscription(ctx, subscription.ID)
+	manager.SetResult(summary)
 	if err != nil {
 		return fmt.Errorf("manual episode collection failed: %w", err)
 	}
 	manager.UpdateProgress(100, "采集完成")
-	manager.SetResult(summary)
 	return nil
 }
 

@@ -198,8 +198,8 @@ func TestRunMigrationsAddsReplacementOwnershipAfterRecoveryMigrationApplied(t *t
 	if err != nil {
 		t.Fatalf("GetCurrentVersion failed: %v", err)
 	}
-	if version != "202607120002" {
-		t.Fatalf("migration version = %q, want 202607120002", version)
+	if version != "202607130001" {
+		t.Fatalf("migration version = %q, want 202607130001", version)
 	}
 }
 
@@ -638,5 +638,65 @@ func TestRunMigrationsAddsNullableFeedReferences(t *testing.T) {
 	}
 	if !db.Migrator().HasTable(&model.SubscriptionFeedSeenItem{}) {
 		t.Fatal("subscription_feed_seen_items table is missing")
+	}
+}
+
+func TestRunMigrationsBackfillsRSSLatestEpisodeSeparatelyFromBangumi(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("Failed to connect to test database: %v", err)
+	}
+	if err := db.AutoMigrate(
+		&model.Subscription{},
+		&model.SubscriptionFeed{},
+		&model.SubscriptionFeedSeenItem{},
+	); err != nil {
+		t.Fatalf("Failed to migrate legacy schema: %v", err)
+	}
+
+	subscription := model.Subscription{
+		Name:                 "Anime",
+		RssURL:               "https://example.test/rss",
+		EpisodeOffset:        100,
+		TotalEpisodes:        12,
+		LatestEpisode:        104,
+		BangumiLatestEpisode: 4,
+		Enabled:              true,
+		Status:               "active",
+	}
+	if err := db.Create(&subscription).Error; err != nil {
+		t.Fatalf("Failed to create subscription: %v", err)
+	}
+	feed := model.SubscriptionFeed{
+		SubscriptionID:   subscription.ID,
+		Name:             "default",
+		RSSURL:           subscription.RssURL,
+		RSSURLNormalized: subscription.RssURL,
+		EpisodeOffset:    subscription.EpisodeOffset,
+		Enabled:          true,
+	}
+	if err := db.Create(&feed).Error; err != nil {
+		t.Fatalf("Failed to create feed: %v", err)
+	}
+	if err := db.Create(&model.SubscriptionFeedSeenItem{
+		SubscriptionFeedID: feed.ID,
+		ResourceKey:        "hash:rss-episode-3",
+		OriginalEpisode:    103,
+		FirstSeenAt:        time.Now(),
+	}).Error; err != nil {
+		t.Fatalf("Failed to create seen item: %v", err)
+	}
+
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+	if err := db.First(&subscription, subscription.ID).Error; err != nil {
+		t.Fatalf("Failed to reload subscription: %v", err)
+	}
+	if subscription.RSSLatestEpisode != 103 {
+		t.Fatalf("rss latest episode = %d, want 103", subscription.RSSLatestEpisode)
+	}
+	if subscription.LatestEpisode != 104 {
+		t.Fatalf("combined latest episode = %d, want 104", subscription.LatestEpisode)
 	}
 }

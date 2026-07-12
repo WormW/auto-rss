@@ -138,6 +138,7 @@ export interface Subscription {
   total_episodes?: number
   current_episode?: number
   latest_episode?: number
+  rss_latest_episode?: number
   episode_offset?: number
   filter_rules?: string
   enabled?: boolean

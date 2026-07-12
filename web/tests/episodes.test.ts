@@ -4,9 +4,12 @@ import test from 'node:test'
 
 import {
   getEpisodeProgressPercent,
+  getRSSMissingEpisodes,
+  getRelativeAiredEpisode,
   getRelativeCurrentEpisode,
   getRelativeEpisode,
   getRelativeLatestEpisode,
+  getRelativeRSSLatestEpisode,
   isEpisodeProgressComplete
 } from '../src/utils/episodes.ts'
 
@@ -40,6 +43,22 @@ test('相对集数不会小于零且无偏移行为不变', () => {
   assert.equal(getRelativeEpisode(169, 170), 0)
   assert.equal(getRelativeEpisode(12, 0), 12)
   assert.equal(getRelativeEpisode(12, -5), 12)
+})
+
+test('Bangumi 已播进度不会冒充 RSS 可下载进度', () => {
+  const subscription = {
+    current_episode: 101,
+    latest_episode: 104,
+    rss_latest_episode: 103,
+    bangumi_latest_episode: 4,
+    episode_offset: 100,
+    total_episodes: 12
+  }
+
+  assert.equal(getRelativeLatestEpisode(subscription), 4)
+  assert.equal(getRelativeAiredEpisode(subscription), 4)
+  assert.equal(getRelativeRSSLatestEpisode(subscription), 3)
+  assert.deepEqual(getRSSMissingEpisodes(subscription), [2, 3])
 })
 
 test('剧集管理新增交互目标保持至少 40px 点击区域', () => {

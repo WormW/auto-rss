@@ -58,7 +58,7 @@
                   {{ formatAirTime(sub) }}
                 </n-tag>
                 <n-tag size="tiny" :type="isTodayDownloaded(sub) ? 'default' : 'success'">
-                  {{ isTodayDownloaded(sub) ? '已下载' : `第${getRelativeLatestEpisode(sub)}集已更新` }}
+                  {{ isTodayDownloaded(sub) ? '已下载' : `第${getRelativeAiredEpisode(sub)}集已播出` }}
                 </n-tag>
               </div>
               <div class="today-progress">
@@ -254,8 +254,8 @@
                       />
                       <div class="progress-info">
                         <span>{{ getRelativeCurrentEpisode(sub) }} / {{ sub.total_episodes || '?' }}</span>
-                        <span v-if="getRelativeLatestEpisode(sub) > getRelativeCurrentEpisode(sub)" class="latest-ep">
-                          最新 {{ getRelativeLatestEpisode(sub) }}
+                        <span v-if="getRelativeRSSLatestEpisode(sub) > getRelativeCurrentEpisode(sub)" class="latest-ep">
+                          RSS 最新 {{ getRelativeRSSLatestEpisode(sub) }}
                         </span>
                         <span v-if="getMissingEpisodes(sub).length > 0" class="missing-ep" @click="showMissingEpisodes(sub)">
                           缺失 {{ getMissingEpisodes(sub).join(',') }} 集
@@ -1176,8 +1176,11 @@ import {
 } from '@/utils/subscription-feeds'
 import {
   getEpisodeProgressPercent,
+  getRSSMissingEpisodes,
+  getRelativeAiredEpisode,
   getRelativeCurrentEpisode,
   getRelativeLatestEpisode,
+  getRelativeRSSLatestEpisode,
   isEpisodeProgressComplete
 } from '@/utils/episodes'
 import { buildBangumiSubscriptionPatch } from '@/utils/bangumi'
@@ -1464,8 +1467,8 @@ const listColumns = computed<DataTableColumns<Subscription>>(() => [
         />
         <div style="font-size: 12px; color: #666; margin-top: 4px;">
           {getRelativeCurrentEpisode(row)} / {row.total_episodes || '?'}
-          {getRelativeLatestEpisode(row) > getRelativeCurrentEpisode(row) && (
-            <span style="color: #18a058; margin-left: 8px;">最新 {getRelativeLatestEpisode(row)}</span>
+          {getRelativeRSSLatestEpisode(row) > getRelativeCurrentEpisode(row) && (
+            <span style="color: #18a058; margin-left: 8px;">RSS 最新 {getRelativeRSSLatestEpisode(row)}</span>
           )}
         </div>
       </div>
@@ -1664,16 +1667,7 @@ const isTodayDownloaded = (sub: Subscription) => {
 
 // 计算缺失剧集
 const getMissingEpisodes = (sub: Subscription): number[] => {
-  const latest = getRelativeLatestEpisode(sub)
-  if (latest <= 0) return []
-  const current = getRelativeCurrentEpisode(sub)
-  if (current >= latest) return []
-
-  const missing: number[] = []
-  for (let i = current + 1; i <= latest; i++) {
-    missing.push(i)
-  }
-  return missing
+  return getRSSMissingEpisodes(sub)
 }
 
 // 计算进度百分比

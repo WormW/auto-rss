@@ -374,6 +374,7 @@ func TestEpisodeRepositoryRefreshProgressPreservesBangumiLatestEpisode(t *testin
 
 	require.NoError(t, repo.RefreshSubscriptionProgress(sub.ID))
 	require.NoError(t, db.First(&sub, sub.ID).Error)
+	assert.Equal(t, 103, sub.RSSLatestEpisode)
 	assert.Equal(t, 104, sub.LatestEpisode)
 	assert.Equal(t, 4, sub.RelativeLatestEpisode())
 }

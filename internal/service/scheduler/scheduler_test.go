@@ -205,6 +205,32 @@ func TestManualCollectionBackfillsHistoricalMissingEpisodesAfterBaseline(t *test
 	assert.EqualValues(t, 2, downloads)
 }
 
+func TestManualCollectionRejectsSubscriptionWithoutEnabledFeeds(t *testing.T) {
+	fx := newSchedulerLedgerFixture(t, nil)
+	sub := fx.createSubscription(t)
+	feed := fx.defaultFeed(t, sub.ID)
+	feed.Enabled = false
+	require.NoError(t, fx.feedRepo.Update(&feed))
+
+	summary, err := fx.scheduler.CollectSubscription(context.Background(), sub.ID)
+
+	require.ErrorContains(t, err, "no enabled subscription feeds")
+	assert.Zero(t, summary.FeedsChecked)
+}
+
+func TestManualCollectionReportsWhenAllFeedsFail(t *testing.T) {
+	fx := newSchedulerLedgerFixture(t, nil)
+	sub := fx.createSubscription(t)
+	feed := fx.defaultFeed(t, sub.ID)
+	fx.parser.fail(feed.RSSURL, errors.New("upstream timeout"))
+
+	summary, err := fx.scheduler.CollectSubscription(context.Background(), sub.ID)
+
+	require.ErrorContains(t, err, "all subscription feeds failed")
+	assert.Equal(t, 1, summary.FeedsChecked)
+	assert.Equal(t, 1, summary.FeedErrors)
+}
+
 func TestOneFeedFailureDoesNotBlockAnotherFeed(t *testing.T) {
 	fx := newSchedulerLedgerFixture(t, nil)
 	sub := fx.createSubscription(t)

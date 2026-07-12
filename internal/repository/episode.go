@@ -555,13 +555,10 @@ func (r *episodeRepository) RefreshSubscriptionProgressInTx(tx *gorm.DB, subscri
 	}
 
 	continuousOwned := 0
-	latest := subscription.BangumiLatestEpisode
-	if latest < 0 || (subscription.TotalEpisodes > 0 && latest > subscription.TotalEpisodes) {
-		latest = 0
-	}
+	rssLatest := 0
 	for _, episode := range episodes {
-		if episodeCountsAsDiscovered(episode) && episode.Episode > latest {
-			latest = episode.Episode
+		if episodeCountsAsDiscovered(episode) && episode.Episode > rssLatest {
+			rssLatest = episode.Episode
 		}
 		if episode.Episode == continuousOwned+1 && episodeStatusCountsAsOwned(episode.Status) {
 			continuousOwned++
@@ -583,10 +580,17 @@ func (r *episodeRepository) RefreshSubscriptionProgressInTx(tx *gorm.DB, subscri
 	if err := observedQuery.Scan(&latestObserved).Error; err != nil {
 		return err
 	}
-	if latestObserved > latest {
-		latest = latestObserved
+	if latestObserved > rssLatest {
+		rssLatest = latestObserved
+	}
+	latest := rssLatest
+	if subscription.BangumiLatestEpisode >= 0 &&
+		(subscription.TotalEpisodes <= 0 || subscription.BangumiLatestEpisode <= subscription.TotalEpisodes) &&
+		subscription.BangumiLatestEpisode > latest {
+		latest = subscription.BangumiLatestEpisode
 	}
 	currentEpisode := progressWithOffset(continuousOwned, subscription.EpisodeOffset)
+	rssLatestEpisode := progressWithOffset(rssLatest, subscription.EpisodeOffset)
 	latestEpisode := progressWithOffset(latest, subscription.EpisodeOffset)
 	subscription.CurrentEpisode = currentEpisode
 	completedAt := subscription.CompletedAt
@@ -602,9 +606,10 @@ func (r *episodeRepository) RefreshSubscriptionProgressInTx(tx *gorm.DB, subscri
 	return tx.Model(&model.Subscription{}).
 		Where("id = ?", subscriptionID).
 		Updates(map[string]any{
-			"current_episode": currentEpisode,
-			"latest_episode":  latestEpisode,
-			"completed_at":    completedAt,
+			"current_episode":    currentEpisode,
+			"rss_latest_episode": rssLatestEpisode,
+			"latest_episode":     latestEpisode,
+			"completed_at":       completedAt,
 		}).Error
 }
 
@@ -630,8 +635,7 @@ func episodeStatusCountsAsOwned(status string) bool {
 }
 
 func episodeCountsAsDiscovered(episode model.SubscriptionEpisode) bool {
-	return episode.Status != model.EpisodeStatusMissing ||
-		episode.StatusSource != model.EpisodeStatusSourceAutomatic
+	return episode.Status != model.EpisodeStatusMissing
 }
 
 func progressWithOffset(relativeEpisode, offset int) int {

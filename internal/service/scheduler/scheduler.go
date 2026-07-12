@@ -45,6 +45,11 @@ type SubscriptionCollector interface {
 	CollectSubscription(ctx context.Context, subscriptionID uint) (CollectSummary, error)
 }
 
+var (
+	ErrNoEnabledSubscriptionFeeds = errors.New("no enabled subscription feeds")
+	ErrAllSubscriptionFeedsFailed = errors.New("all subscription feeds failed")
+)
+
 const maxConcurrentFeedChecks = 4
 
 type feedFetchResult struct {
@@ -254,6 +259,9 @@ func (s *scheduler) CollectSubscription(ctx context.Context, subscriptionID uint
 			enabled = append(enabled, feed)
 		}
 	}
+	if len(enabled) == 0 {
+		return CollectSummary{}, ErrNoEnabledSubscriptionFeeds
+	}
 	return s.collectFeeds(ctx, subscription, enabled, true)
 }
 
@@ -334,6 +342,9 @@ func (s *scheduler) collectFeeds(
 			Update("last_check_time", latestCheck).Error; err != nil {
 			return summary, err
 		}
+	}
+	if summary.FeedsChecked > 0 && summary.FeedErrors == summary.FeedsChecked {
+		return summary, fmt.Errorf("%w: %d", ErrAllSubscriptionFeedsFailed, summary.FeedErrors)
 	}
 	return summary, nil
 }

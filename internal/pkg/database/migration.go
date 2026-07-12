@@ -240,6 +240,18 @@ func RunMigrations(db *gorm.DB) error {
 				return nil
 			},
 		},
+		{
+			ID: "202607130001", // separate RSS availability from Bangumi aired progress
+			Migrate: func(tx *gorm.DB) error {
+				if err := tx.AutoMigrate(&model.Subscription{}); err != nil {
+					return err
+				}
+				return backfillRSSLatestEpisodes(tx)
+			},
+			Rollback: func(tx *gorm.DB) error {
+				return nil
+			},
+		},
 	})
 
 	// 设置迁移超时
@@ -250,6 +262,66 @@ func RunMigrations(db *gorm.DB) error {
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
 	return m.Migrate()
+}
+
+func backfillRSSLatestEpisodes(db *gorm.DB) error {
+	var subscriptions []model.Subscription
+	if err := db.Order("id ASC").Find(&subscriptions).Error; err != nil {
+		return err
+	}
+
+	for _, subscription := range subscriptions {
+		var ledgerLatest int
+		ledgerQuery := db.Model(&model.SubscriptionEpisode{}).
+			Select("COALESCE(MAX(episode), 0)").
+			Where("subscription_id = ?", subscription.ID).
+			Where("status <> ?", model.EpisodeStatusMissing)
+		if subscription.TotalEpisodes > 0 {
+			ledgerQuery = ledgerQuery.Where("episode <= ?", subscription.TotalEpisodes)
+		}
+		if err := ledgerQuery.Scan(&ledgerLatest).Error; err != nil {
+			return err
+		}
+
+		var observedLatest int
+		observedQuery := db.Model(&model.SubscriptionFeedSeenItem{}).
+			Select("COALESCE(MAX(subscription_feed_seen_items.original_episode - subscription_feeds.episode_offset), 0)").
+			Joins("JOIN subscription_feeds ON subscription_feeds.id = subscription_feed_seen_items.subscription_feed_id").
+			Where("subscription_feeds.subscription_id = ?", subscription.ID).
+			Where("subscription_feed_seen_items.original_episode > subscription_feeds.episode_offset")
+		if subscription.TotalEpisodes > 0 {
+			observedQuery = observedQuery.Where(
+				"subscription_feed_seen_items.original_episode - subscription_feeds.episode_offset <= ?",
+				subscription.TotalEpisodes,
+			)
+		}
+		if err := observedQuery.Scan(&observedLatest).Error; err != nil {
+			return err
+		}
+
+		rssLatest := max(ledgerLatest, observedLatest)
+		combinedLatest := rssLatest
+		if subscription.BangumiLatestEpisode >= 0 &&
+			(subscription.TotalEpisodes <= 0 || subscription.BangumiLatestEpisode <= subscription.TotalEpisodes) {
+			combinedLatest = max(combinedLatest, subscription.BangumiLatestEpisode)
+		}
+		offset := max(subscription.EpisodeOffset, 0)
+		updates := map[string]any{
+			"rss_latest_episode": rawEpisodeWithOffsetForMigration(rssLatest, offset),
+			"latest_episode":     rawEpisodeWithOffsetForMigration(combinedLatest, offset),
+		}
+		if err := db.Model(&model.Subscription{}).Where("id = ?", subscription.ID).Updates(updates).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rawEpisodeWithOffsetForMigration(relativeEpisode, offset int) int {
+	if relativeEpisode <= 0 {
+		return 0
+	}
+	return relativeEpisode + offset
 }
 
 func backfillSubscriptionFeeds(db *gorm.DB) error {

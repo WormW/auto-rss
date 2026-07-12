@@ -607,7 +607,7 @@ func TestCollectEpisodesRollsBackClaimAndKeepsWatermarkOnCreateOrAttachFailure(t
 			}}}
 
 			completed, err := runEpisodeCollectionTask(t, fx.handler, &sub)
-			require.NoError(t, err)
+			require.ErrorContains(t, err, "all subscription feeds failed")
 			result, ok := completed.Result.(scheduler.CollectSummary)
 			require.True(t, ok)
 			assert.Equal(t, 1, result.FeedErrors)
