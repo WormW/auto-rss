@@ -839,20 +839,27 @@ func (s *ReplacementService) cleanupTerminalFailureWithCause(candidate *model.Ep
 		(candidate.RollbackPath != "" && s.files.Exists(candidate.RollbackPath)) {
 		return s.persistTerminalCleanupFailure(candidate, cause, errors.New("terminal cleanup old resource checkpoint is no longer valid"))
 	}
-	if candidate.StagedPath != "" && s.files.Exists(candidate.StagedPath) {
-		if err := s.files.Remove(candidate.StagedPath); err != nil {
-			return s.persistTerminalCleanupFailure(candidate, cause, fmt.Errorf("remove unadopted staged resource: %w", err))
-		}
-	}
+	var replacementDownload *model.Download
 	if candidate.ReplacementDownloadID != nil {
 		download, err := s.downloads.GetByID(*candidate.ReplacementDownloadID)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			candidate.ReplacementDownloadID = nil
 		} else if err != nil {
 			return s.persistTerminalCleanupFailure(candidate, cause, fmt.Errorf("load unadopted replacement download: %w", err))
-		} else if download.ReplacementTorrentOwned {
-			return s.persistTerminalCleanupFailure(candidate, cause, errors.New("replacement torrent is still owned during terminal cleanup"))
-		} else if err := s.discardFailedReplacementDownload(candidate, download); err != nil {
+		} else {
+			replacementDownload = download
+			if err := s.resolveTerminalTorrentOwnership(candidate, download); err != nil {
+				return s.persistTerminalCleanupFailure(candidate, cause, err)
+			}
+		}
+	}
+	if candidate.StagedPath != "" && s.files.Exists(candidate.StagedPath) {
+		if err := s.files.Remove(candidate.StagedPath); err != nil {
+			return s.persistTerminalCleanupFailure(candidate, cause, fmt.Errorf("remove unadopted staged resource: %w", err))
+		}
+	}
+	if replacementDownload != nil {
+		if err := s.discardFailedReplacementDownload(candidate, replacementDownload); err != nil {
 			return s.persistTerminalCleanupFailure(candidate, cause, fmt.Errorf("discard unadopted replacement download: %w", err))
 		}
 	}
@@ -869,6 +876,34 @@ func (s *ReplacementService) cleanupTerminalFailureWithCause(candidate *model.Ep
 		return errors.Join(cause, err)
 	}
 	return cause
+}
+
+func (s *ReplacementService) resolveTerminalTorrentOwnership(candidate *model.EpisodeResourceCandidate, download *model.Download) error {
+	if download == nil || !download.ReplacementTorrentOwned {
+		return nil
+	}
+	info, err := s.torrents.GetTorrentInfo(download.TorrentHash)
+	if errors.Is(err, qbclient.ErrTorrentNotFound) {
+		download.ReplacementTorrentOwned = false
+		if updateErr := s.downloads.Update(download); updateErr != nil {
+			return fmt.Errorf("persist missing terminal torrent ownership: %w", updateErr)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("verify terminal torrent ownership: %w", err)
+	}
+	if err := validateDetachingTorrentOwnership(candidate, download, info); err != nil {
+		return fmt.Errorf("verify terminal torrent ownership: %w", err)
+	}
+	if err := s.torrents.RemoveTorrentTask(download.TorrentHash); err != nil {
+		return fmt.Errorf("remove terminal replacement torrent task: %w", err)
+	}
+	download.ReplacementTorrentOwned = false
+	if err := s.downloads.Update(download); err != nil {
+		return fmt.Errorf("persist terminal torrent ownership: %w", err)
+	}
+	return nil
 }
 
 func (s *ReplacementService) persistTerminalCleanupFailure(candidate *model.EpisodeResourceCandidate, cause, cleanupErr error) error {

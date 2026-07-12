@@ -720,6 +720,138 @@ func TestReplacementTerminalCleanupKeepsCheckpointWhenStagedDeleteFails(t *testi
 	assertReplacementStillUsesOldResource(t, fx, oldPath, qb)
 }
 
+func seedOwnedTerminalCleanupCheckpoint(t *testing.T, fx *replacementFixture) (model.EpisodeResourceCandidate, model.Download, string, string) {
+	t.Helper()
+	oldPath := fx.writeOldFile("old-content")
+	candidate := fx.seedPendingCandidate(oldPath)
+	stagedDir := filepath.Join(filepath.Dir(oldPath), ".auto-rss-replacements", fmt.Sprint(candidate.ID))
+	stagedPath := filepath.Join(stagedDir, "new.mkv")
+	require.NoError(t, os.MkdirAll(stagedDir, 0o755))
+	require.NoError(t, os.WriteFile(stagedPath, []byte("new-content"), 0o644))
+	download := model.Download{
+		SubscriptionID: fx.sub.ID, Title: candidate.Title, Episode: 1, TorrentURL: candidate.TorrentURL,
+		TorrentHash: candidate.TorrentHash, FilePath: stagedPath, RenamedPath: oldPath,
+		Status: model.DownloadStatusDownloading, Purpose: model.DownloadPurposeReplacement,
+		ReplacementCandidateID: &candidate.ID, ReplacementTorrentOwned: true,
+	}
+	require.NoError(t, fx.db.Create(&download).Error)
+	require.NoError(t, fx.db.Model(&candidate).Updates(map[string]any{
+		"status": model.CandidateStatusReplacing, "replacement_stage": ReplacementStageTerminalCleanup,
+		"failure_reason": "promote failed", "replacement_download_id": download.ID,
+		"staged_path": stagedPath, "final_path": oldPath, "old_download_id": fx.old.ID,
+		"old_torrent_hash": fx.old.TorrentHash, "old_resource_path": oldPath,
+		"rollback_path": filepath.Join(filepath.Dir(oldPath), ".auto-rss-rollback", fmt.Sprint(candidate.ID), filepath.Base(oldPath)),
+	}).Error)
+	return candidate, download, oldPath, stagedDir
+}
+
+func TestReplacementTerminalCleanupTreatsMissingOwnedTorrentAsDetached(t *testing.T) {
+	fx := newReplacementFixture(t)
+	candidate, _, oldPath, _ := seedOwnedTerminalCleanupCheckpoint(t, fx)
+	qb := &replacementQBClient{torrentInfoErr: downloaderService.ErrTorrentNotFound}
+	service := NewReplacementService(fx.db, fx.repo, fx.downloads, fx.subs, fx.downloader, qb, fx.promoter)
+
+	require.ErrorContains(t, service.RecoverIncomplete(context.Background()), "promote failed")
+
+	completed := fx.loadCandidate(candidate.ID)
+	assert.Equal(t, model.CandidateStatusFailed, completed.Status)
+	assert.Empty(t, qb.removed)
+	assert.NoFileExists(t, filepath.Join(filepath.Dir(oldPath), ".auto-rss-replacements", fmt.Sprint(candidate.ID), "new.mkv"))
+	assertReplacementStillUsesOldResource(t, fx, oldPath, qb)
+}
+
+func TestReplacementTerminalCleanupRemovesExactOwnedTorrentBeforeStagedFile(t *testing.T) {
+	fx := newReplacementFixture(t)
+	candidate, _, oldPath, stagedDir := seedOwnedTerminalCleanupCheckpoint(t, fx)
+	qb := &replacementQBClient{
+		hash: candidate.TorrentHash, category: replacementTorrentCategoryPrefix + fmt.Sprint(candidate.ID),
+		addedSavePath: stagedDir,
+	}
+	service := NewReplacementService(fx.db, fx.repo, fx.downloads, fx.subs, fx.downloader, qb, fx.promoter)
+
+	require.ErrorContains(t, service.RecoverIncomplete(context.Background()), "promote failed")
+
+	assert.Equal(t, []string{candidate.TorrentHash}, qb.removed)
+	assert.Equal(t, model.CandidateStatusFailed, fx.loadCandidate(candidate.ID).Status)
+	assert.NoFileExists(t, filepath.Join(stagedDir, "new.mkv"))
+	assertReplacementStillUsesOldResource(t, fx, oldPath, qb)
+}
+
+func TestReplacementTerminalCleanupRefusesOwnedTorrentMismatchBeforeStagedDelete(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(qb *replacementQBClient)
+	}{
+		{name: "hash", mutate: func(qb *replacementQBClient) { qb.hash = "other-hash" }},
+		{name: "category", mutate: func(qb *replacementQBClient) { qb.category = "OtherCategory" }},
+		{name: "save path", mutate: func(qb *replacementQBClient) { qb.addedSavePath = filepath.Join(qb.addedSavePath, "other") }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := newReplacementFixture(t)
+			candidate, _, oldPath, stagedDir := seedOwnedTerminalCleanupCheckpoint(t, fx)
+			qb := &replacementQBClient{
+				hash: candidate.TorrentHash, category: replacementTorrentCategoryPrefix + fmt.Sprint(candidate.ID),
+				addedSavePath: stagedDir,
+			}
+			tt.mutate(qb)
+			service := NewReplacementService(fx.db, fx.repo, fx.downloads, fx.subs, fx.downloader, qb, fx.promoter)
+
+			err := service.RecoverIncomplete(context.Background())
+
+			require.ErrorContains(t, err, "ownership")
+			checkpoint := fx.loadCandidate(candidate.ID)
+			assert.Equal(t, model.CandidateStatusReplacing, checkpoint.Status)
+			assert.Equal(t, ReplacementStageTerminalCleanup, checkpoint.ReplacementStage)
+			assert.FileExists(t, checkpoint.StagedPath)
+			assert.Empty(t, qb.removed)
+			assertReplacementStillUsesOldResource(t, fx, oldPath, qb)
+		})
+	}
+}
+
+type failOwnershipClearDownloadRepository struct {
+	repository.DownloadRepository
+	failNext bool
+}
+
+func (r *failOwnershipClearDownloadRepository) Update(download *model.Download) error {
+	if r.failNext && !download.ReplacementTorrentOwned {
+		r.failNext = false
+		return errors.New("injected ownership marker update failure")
+	}
+	return r.DownloadRepository.Update(download)
+}
+
+func TestReplacementTerminalCleanupRecoversAfterRemoveMarkerUpdateFailure(t *testing.T) {
+	fx := newReplacementFixture(t)
+	candidate, download, oldPath, stagedDir := seedOwnedTerminalCleanupCheckpoint(t, fx)
+	qb := &replacementQBClient{
+		hash: candidate.TorrentHash, category: replacementTorrentCategoryPrefix + fmt.Sprint(candidate.ID),
+		addedSavePath: stagedDir,
+	}
+	failingDownloads := &failOwnershipClearDownloadRepository{DownloadRepository: fx.downloads, failNext: true}
+	service := NewReplacementService(fx.db, fx.repo, failingDownloads, fx.subs, fx.downloader, qb, fx.promoter)
+
+	err := service.RecoverIncomplete(context.Background())
+
+	require.ErrorContains(t, err, "ownership marker update failure")
+	checkpoint := fx.loadCandidate(candidate.ID)
+	assert.Equal(t, ReplacementStageTerminalCleanup, checkpoint.ReplacementStage)
+	assert.FileExists(t, checkpoint.StagedPath)
+	persisted, loadErr := fx.downloads.GetByID(download.ID)
+	require.NoError(t, loadErr)
+	assert.True(t, persisted.ReplacementTorrentOwned)
+	assert.Equal(t, []string{candidate.TorrentHash}, qb.removed)
+	qb.torrentInfoErr = downloaderService.ErrTorrentNotFound
+
+	require.ErrorContains(t, service.RecoverIncomplete(context.Background()), "promote failed")
+
+	assert.Equal(t, []string{candidate.TorrentHash}, qb.removed)
+	assert.Equal(t, model.CandidateStatusFailed, fx.loadCandidate(candidate.ID).Status)
+	assertReplacementStillUsesOldResource(t, fx, oldPath, qb)
+}
+
 func TestReplacementRollbackRestoreFailurePreservesRecoverableEvidence(t *testing.T) {
 	fx := newReplacementFixture(t)
 	oldPath := fx.writeOldFile("old-content")
