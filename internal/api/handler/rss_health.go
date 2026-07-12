@@ -17,14 +17,19 @@ import (
 type RSSHealthHandler struct {
 	healthChecker *rss.RSSHealthChecker
 	subRepo       repository.SubscriptionRepository
+	configRepo    repository.ConfigRepository
 }
 
 // NewRSSHealthHandler 创建RSS健康检查处理器实例
-func NewRSSHealthHandler(healthChecker *rss.RSSHealthChecker, subRepo repository.SubscriptionRepository) *RSSHealthHandler {
-	return &RSSHealthHandler{
+func NewRSSHealthHandler(healthChecker *rss.RSSHealthChecker, subRepo repository.SubscriptionRepository, configRepos ...repository.ConfigRepository) *RSSHealthHandler {
+	handler := &RSSHealthHandler{
 		healthChecker: healthChecker,
 		subRepo:       subRepo,
 	}
+	if len(configRepos) > 0 {
+		handler.configRepo = configRepos[0]
+	}
+	return handler
 }
 
 // HealthCheckSummaryResponse 健康检查汇总响应
@@ -47,6 +52,9 @@ type HealthCheckSummary struct {
 // GET /api/v1/rss/health
 func (h *RSSHealthHandler) CheckAll(c *gin.Context) {
 	logger.Info("Checking all RSS subscriptions health", "client_ip", c.ClientIP())
+	if !h.applySystemProxy(c) {
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Minute)
 	defer cancel()
@@ -115,6 +123,9 @@ func (h *RSSHealthHandler) CheckOne(c *gin.Context) {
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
+	if !h.applySystemProxy(c) {
+		return
+	}
 
 	result := h.healthChecker.CheckSubscription(ctx, sub)
 
@@ -135,6 +146,9 @@ func (h *RSSHealthHandler) CheckOne(c *gin.Context) {
 // GET /api/v1/rss/dead
 func (h *RSSHealthHandler) GetDead(c *gin.Context) {
 	logger.Info("Getting dead RSS subscriptions", "client_ip", c.ClientIP())
+	if !h.applySystemProxy(c) {
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Minute)
 	defer cancel()
@@ -174,6 +188,9 @@ type TriggerCheckResponse struct {
 // POST /api/v1/rss/health-check
 func (h *RSSHealthHandler) TriggerCheck(c *gin.Context) {
 	logger.Info("Triggering async RSS health check", "client_ip", c.ClientIP())
+	if !h.applySystemProxy(c) {
+		return
+	}
 
 	manager := task.GetManager()
 
@@ -222,6 +239,24 @@ func (h *RSSHealthHandler) TriggerCheck(c *gin.Context) {
 			Message:   "任务已启动，请通过 /api/v1/tasks/current 查看进度",
 		},
 	})
+}
+
+func (h *RSSHealthHandler) applySystemProxy(c *gin.Context) bool {
+	proxyURL := ""
+	if h.configRepo != nil {
+		if config, err := h.configRepo.Get("system_proxy"); err == nil && config != nil {
+			proxyURL = config.Value
+		}
+	}
+	if err := h.healthChecker.SetProxy(proxyURL); err != nil {
+		logger.Error("Failed to apply RSS health check proxy", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "RSS 代理配置无效",
+		})
+		return false
+	}
+	return true
 }
 
 // runAsyncHealthCheck 执行异步健康检查

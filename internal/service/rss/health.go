@@ -3,7 +3,11 @@ package rss
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
@@ -25,7 +29,9 @@ const (
 type RSSHealthChecker struct {
 	subscriptionRepo repository.SubscriptionRepository
 	feedRepo         SubscriptionFeedReader
+	mu               sync.RWMutex
 	httpClient       *http.Client
+	proxyURL         string
 }
 
 type SubscriptionFeedReader interface {
@@ -64,15 +70,68 @@ func NewHealthChecker(
 		subscriptionRepo: subRepo,
 		feedRepo:         feedRepo,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   30 * time.Second,
+			Transport: newHealthTransport(nil),
 		},
+	}
+}
+
+// SetProxy 设置健康检查请求代理，空值会清除已有代理。
+func (c *RSSHealthChecker) SetProxy(proxyURL string) error {
+	proxyURL = strings.TrimSpace(proxyURL)
+	var proxy func(*http.Request) (*url.URL, error)
+	if proxyURL != "" {
+		parsed, err := url.Parse(proxyURL)
+		if err != nil {
+			return fmt.Errorf("invalid proxy URL: %w", err)
+		}
+		proxy = http.ProxyURL(parsed)
+	}
+
+	c.mu.Lock()
+	if c.proxyURL == proxyURL {
+		c.mu.Unlock()
+		return nil
+	}
+	oldTransport, _ := c.httpClient.Transport.(*http.Transport)
+	c.httpClient = &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: newHealthTransport(proxy),
+	}
+	c.proxyURL = proxyURL
+	c.mu.Unlock()
+
+	if oldTransport != nil {
+		oldTransport.CloseIdleConnections()
+	}
+	return nil
+}
+
+func newHealthTransport(proxy func(*http.Request) (*url.URL, error)) *http.Transport {
+	return &http.Transport{
+		Proxy: proxy,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
 	}
 }
 
 // CheckSubscription 检查单个订阅的健康状态
 func (c *RSSHealthChecker) CheckSubscription(ctx context.Context, sub *model.Subscription) *HealthCheckResult {
 	if c.feedRepo == nil {
-		return c.CheckSubscriptionFeeds(ctx, sub, nil)
+		feeds := []model.SubscriptionFeed{}
+		if strings.TrimSpace(sub.RssURL) != "" {
+			feeds = append(feeds, model.SubscriptionFeed{
+				SubscriptionID: sub.ID,
+				Name:           sub.Name,
+				Fansub:         sub.Fansub,
+				RSSURL:         sub.RssURL,
+				EpisodeOffset:  sub.EpisodeOffset,
+				Enabled:        true,
+			})
+		}
+		return c.CheckSubscriptionFeeds(ctx, sub, feeds)
 	}
 	feeds, err := c.feedRepo.ListBySubscription(sub.ID)
 	if err != nil {
@@ -154,7 +213,10 @@ func (c *RSSHealthChecker) checkFeed(ctx context.Context, feed *model.Subscripti
 	}
 
 	req.Header.Set("User-Agent", "Auto-RSS/1.0")
-	resp, err := c.httpClient.Do(req)
+	c.mu.RLock()
+	client := c.httpClient
+	c.mu.RUnlock()
+	resp, err := client.Do(req)
 	result.ResponseTime = time.Since(start).Milliseconds()
 
 	if err != nil {

@@ -89,12 +89,16 @@ func TestRetryableFailureKeepsEpisodeAttachedThroughRetryCompletion(t *testing.T
 	qb.torrents[0].SavePath = "/downloads/retry-completion"
 	monitor.checkDownloads()
 
-	completed, err := downloadRepo.GetByID(download.ID)
-	require.NoError(t, err)
-	assert.Equal(t, model.DownloadStatusCompleted, completed.Status)
-	afterCompletion, err := episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
-	require.NoError(t, err)
-	assert.Equal(t, model.EpisodeStatusDownloaded, afterCompletion.Status)
+	var completed *model.Download
+	var afterCompletion *model.SubscriptionEpisode
+	require.Eventually(t, func() bool {
+		completed, err = downloadRepo.GetByID(download.ID)
+		if err != nil || completed.Status != model.DownloadStatusCompleted {
+			return false
+		}
+		afterCompletion, err = episodeRepo.GetBySubscriptionAndEpisode(sub.ID, 1)
+		return err == nil && afterCompletion.Status == model.EpisodeStatusDownloaded
+	}, 2*time.Second, 10*time.Millisecond)
 	require.NotNil(t, afterCompletion.ActiveDownloadID)
 	assert.Equal(t, download.ID, *afterCompletion.ActiveDownloadID)
 }

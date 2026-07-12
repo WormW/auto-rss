@@ -260,6 +260,7 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			subscriptions.POST("/:id/episodes/:episode/candidates/:candidate_id/replace", episodeHandler.Replace)
 			subscriptions.POST("/:id/episodes/:episode/candidates/:candidate_id/retry-cleanup", episodeHandler.RetryCleanup)
 			subscriptions.GET("/:id/diagnostics", subscriptionDiagnosticsHandler.Get)
+			subscriptions.POST("/:id/diagnostics/checks/:key", subscriptionDiagnosticsHandler.Check)
 			subscriptions.POST("/:id/diagnostics/retry-failed", subscriptionDiagnosticsHandler.RetryFailed)
 			subscriptions.POST("/:id/toggle", subscriptionHandler.Toggle)
 			subscriptions.POST("/:id/enrich-bangumi", subscriptionHandler.EnrichBangumi)
@@ -308,7 +309,7 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 
 			// RSS 健康检查
 			rssHealthChecker := rss.NewHealthChecker(subscriptionRepo, feedRepo)
-			rssHealthHandler := handler.NewRSSHealthHandler(rssHealthChecker, subscriptionRepo)
+			rssHealthHandler := handler.NewRSSHealthHandler(rssHealthChecker, subscriptionRepo, configRepo)
 
 			rssGroup.GET("/health", rssHealthHandler.CheckAll)
 			rssGroup.GET("/health/:subscription_id", rssHealthHandler.CheckOne)

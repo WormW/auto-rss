@@ -321,6 +321,24 @@ func TestSetup_AuthEnabledProtectsFeatureRoutesAndLeavesAuthRoutesPublic(t *test
 	}
 }
 
+func TestSetup_RegistersSubscriptionDiagnosticCheckRoute(t *testing.T) {
+	r, _, db := setupRouterForTestWithDB(t, false)
+	subscription := model.Subscription{Name: "Diagnostic Route Anime", Enabled: true, Status: "active"}
+	if err := repository.NewSubscriptionRepository(db).Create(&subscription); err != nil {
+		t.Fatalf("failed to create subscription: %v", err)
+	}
+
+	recorder := performRouterRequest(
+		r,
+		http.MethodPost,
+		"/api/v1/subscriptions/"+strconv.FormatUint(uint64(subscription.ID), 10)+"/diagnostics/checks/subscription_enabled",
+		nil,
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected diagnostic check route to return 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestSetup_AuthEnabledLoginAllowsProtectedRoutes(t *testing.T) {
 	r, _ := setupRouterForTest(t, true)
 
