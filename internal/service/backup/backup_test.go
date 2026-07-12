@@ -230,6 +230,149 @@ func TestParsePackageAcceptsVersion10AndRejectsFutureVersions(t *testing.T) {
 	}
 }
 
+func TestBackupLegacyVersion10AllowsSubscriptionKeyCollisionsWithoutOwnership(t *testing.T) {
+	pkg := Package{
+		App:           "auto-rss",
+		SchemaVersion: "1.0",
+		Subscriptions: []SubscriptionRecord{
+			{Subscription: model.Subscription{Name: "Legacy Show A", RssURL: "https://backup.test/legacy", Season: 1}},
+			{Subscription: model.Subscription{Name: "Legacy Show B", RssURL: "https://backup.test/legacy", Season: 1}},
+		},
+	}
+	data, err := json.Marshal(pkg)
+	if err != nil {
+		t.Fatalf("marshal legacy package: %v", err)
+	}
+
+	if _, _, err := ParsePackage(data, SourceAutoRSS); err != nil {
+		t.Fatalf("parse legacy package with duplicate stable keys: %v", err)
+	}
+
+	db := newBackupTestDB(t)
+	if _, err := NewService(db).Import(data, SourceAutoRSS, StrategySkip); err != nil {
+		t.Fatalf("import legacy package with duplicate stable keys: %v", err)
+	}
+	var count int64
+	if err := db.Model(&model.Subscription{}).Count(&count).Error; err != nil {
+		t.Fatalf("count imported subscriptions: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("legacy duplicate import count = %d, want old map semantics count 1", count)
+	}
+}
+
+func TestBackupLegacyVersion10WithoutOwnershipIgnoresTargetOwnershipKeyCollisions(t *testing.T) {
+	db := newBackupTestDB(t)
+	first := seedBackupSubscription(t, db, "https://backup.test/duplicate", 1)
+	seedBackupSubscription(t, db, "https://backup.test/duplicate", 1)
+	ledger := model.SubscriptionEpisode{
+		SubscriptionID: first.ID,
+		Episode:        1,
+		Status:         model.EpisodeStatusDownloaded,
+		StatusSource:   model.EpisodeStatusSourceAutomatic,
+	}
+	if err := db.Create(&ledger).Error; err != nil {
+		t.Fatalf("seed target episode: %v", err)
+	}
+	if err := db.Create(&model.EpisodeResourceCandidate{
+		SubscriptionEpisodeID: ledger.ID,
+		Title:                 "legacy candidate without stable identity",
+		Status:                model.CandidateStatusPending,
+	}).Error; err != nil {
+		t.Fatalf("seed target candidate: %v", err)
+	}
+	if err := db.Create(&model.NotificationSetting{
+		Channel: "telegram",
+		Enabled: true,
+		Config:  `{"token":"old"}`,
+	}).Error; err != nil {
+		t.Fatalf("seed target notification setting: %v", err)
+	}
+
+	pkg := Package{
+		App:           "auto-rss",
+		SchemaVersion: "1.0",
+		Configs:       []ConfigRecord{{Key: "download_path", Value: "/legacy/import"}},
+		NotificationSettings: []NotificationSettingRecord{{
+			Channel: "telegram", Enabled: false, Config: `{"token":"new"}`, Sensitive: true,
+		}},
+	}
+	data, err := json.Marshal(pkg)
+	if err != nil {
+		t.Fatalf("marshal legacy config package: %v", err)
+	}
+	service := NewService(db)
+	plan, err := service.Preview(data, SourceAutoRSS, StrategyOverwrite)
+	if err != nil {
+		t.Fatalf("preview legacy package against duplicate target keys: %v", err)
+	}
+	assertPlanItem(t, plan, "notification_setting", "telegram", "overwrite", true, true)
+	if _, err := service.Import(data, SourceAutoRSS, StrategyOverwrite); err != nil {
+		t.Fatalf("import legacy package against duplicate target keys: %v", err)
+	}
+	var cfg model.Config
+	if err := db.Where("key = ?", "download_path").First(&cfg).Error; err != nil {
+		t.Fatalf("load imported config: %v", err)
+	}
+	if cfg.Value != "/legacy/import" {
+		t.Fatalf("imported config value = %q", cfg.Value)
+	}
+	var setting model.NotificationSetting
+	if err := db.Where("channel = ?", "telegram").First(&setting).Error; err != nil {
+		t.Fatalf("load imported notification setting: %v", err)
+	}
+	if setting.Enabled || setting.Config != `{"token":"new"}` {
+		t.Fatalf("notification setting was not overwritten: %#v", setting)
+	}
+}
+
+func TestBackupExportAllowsSubscriptionKeyCollisionWithoutOwnership(t *testing.T) {
+	db := newBackupTestDB(t)
+	seedBackupSubscription(t, db, "https://backup.test/duplicate", 1)
+	seedBackupSubscription(t, db, "https://backup.test/duplicate", 1)
+
+	pkg, err := NewService(db).Export(false)
+	if err != nil {
+		t.Fatalf("export subscriptions without ownership: %v", err)
+	}
+	if len(pkg.Subscriptions) != 2 || len(pkg.Episodes) != 0 || len(pkg.EpisodeCandidates) != 0 {
+		t.Fatalf("unexpected export contents: subscriptions=%d episodes=%d candidates=%d", len(pkg.Subscriptions), len(pkg.Episodes), len(pkg.EpisodeCandidates))
+	}
+}
+
+func TestBackupImportWithOwnershipRejectsTargetSubscriptionKeyCollision(t *testing.T) {
+	db := newBackupTestDB(t)
+	seedBackupSubscription(t, db, "https://backup.test/rss", 1)
+	seedBackupSubscription(t, db, "https://backup.test/rss", 1)
+	pkg := backupPackageWithCandidate(model.CandidateStatusPending)
+	data, err := json.Marshal(pkg)
+	if err != nil {
+		t.Fatalf("marshal ownership package: %v", err)
+	}
+
+	if _, err := NewService(db).Import(data, SourceAutoRSS, StrategyOverwrite); err == nil || !strings.Contains(err.Error(), "subscription backup key collision") {
+		t.Fatalf("ownership import error = %v, want target subscription key collision", err)
+	}
+}
+
+func TestBackupExportWithOwnershipRejectsSubscriptionKeyCollision(t *testing.T) {
+	db := newBackupTestDB(t)
+	first := seedBackupSubscription(t, db, "https://backup.test/duplicate", 1)
+	seedBackupSubscription(t, db, "https://backup.test/duplicate", 1)
+	if err := db.Create(&model.SubscriptionEpisode{
+		SubscriptionID: first.ID,
+		Episode:        1,
+		Status:         model.EpisodeStatusDownloaded,
+		StatusSource:   model.EpisodeStatusSourceAutomatic,
+	}).Error; err != nil {
+		t.Fatalf("seed ownership episode: %v", err)
+	}
+
+	if _, err := NewService(db).Export(false); err == nil || !strings.Contains(err.Error(), "subscription backup key collision") {
+		t.Fatalf("ownership export error = %v, want subscription key collision", err)
+	}
+}
+
 func TestBackupImportEpisodeStrategiesAndIdempotency(t *testing.T) {
 	for _, strategy := range []string{StrategySkip, StrategyMerge, StrategyOverwrite} {
 		t.Run(strategy, func(t *testing.T) {

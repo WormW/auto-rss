@@ -208,6 +208,7 @@ func (s *Service) Export(includeSensitive bool) (*Package, error) {
 	if err := s.db.Order("subscription_episode_id ASC, id ASC").Find(&candidates).Error; err != nil {
 		return nil, err
 	}
+	hasOwnership := len(episodes) > 0 || len(candidates) > 0
 
 	var relations []model.SubscriptionTagRelation
 	if err := s.db.Find(&relations).Error; err != nil {
@@ -239,7 +240,7 @@ func (s *Service) Export(includeSensitive bool) (*Package, error) {
 		if key == "" {
 			return nil, fmt.Errorf("subscription %d has no stable backup key", sub.ID)
 		}
-		if existingID, exists := seenSubscriptionKeys[key]; exists && existingID != sub.ID {
+		if existingID, exists := seenSubscriptionKeys[key]; hasOwnership && exists && existingID != sub.ID {
 			return nil, fmt.Errorf("subscription backup key collision %q for IDs %d and %d", key, existingID, sub.ID)
 		}
 		seenSubscriptionKeys[key] = sub.ID
@@ -404,7 +405,8 @@ func (s *Service) Preview(data json.RawMessage, sourceFormat, strategy string) (
 	if err != nil {
 		return nil, err
 	}
-	state, err := s.loadCurrentState(s.db)
+	hasOwnership := packageHasOwnership(pkg)
+	state, err := s.loadCurrentState(s.db, hasOwnership, hasOwnership)
 	if err != nil {
 		return nil, err
 	}
@@ -420,7 +422,8 @@ func (s *Service) Import(data json.RawMessage, sourceFormat, strategy string) (*
 
 	var plan *ImportPlan
 	err = s.db.Transaction(func(tx *gorm.DB) error {
-		state, err := s.loadCurrentState(tx)
+		hasOwnership := packageHasOwnership(pkg)
+		state, err := s.loadCurrentState(tx, hasOwnership, hasOwnership)
 		if err != nil {
 			return err
 		}
@@ -1143,7 +1146,7 @@ func mergeSubscription(dst *model.Subscription, src model.Subscription) bool {
 	return changed
 }
 
-func (s *Service) loadCurrentState(db *gorm.DB) (*currentState, error) {
+func (s *Service) loadCurrentState(db *gorm.DB, includeOwnership, requireUnique bool) (*currentState, error) {
 	state := &currentState{
 		configs:       map[string]model.Config{},
 		rssSources:    map[string]model.RSSSource{},
@@ -1194,55 +1197,56 @@ func (s *Service) loadCurrentState(db *gorm.DB) (*currentState, error) {
 	subscriptionKeyByID := make(map[uint]string, len(subscriptions))
 	for _, sub := range subscriptions {
 		key := subscriptionKeyFromModel(sub)
-		if key == "" {
+		if requireUnique && key == "" {
 			return nil, fmt.Errorf("subscription %d has no stable backup key", sub.ID)
 		}
-		if existing, exists := state.subscriptions[key]; exists && existing.ID != sub.ID {
+		if existing, exists := state.subscriptions[key]; requireUnique && exists && existing.ID != sub.ID {
 			return nil, fmt.Errorf("subscription backup key collision %q", key)
 		}
 		state.subscriptions[key] = sub
 		subscriptionKeyByID[sub.ID] = key
 	}
+	if includeOwnership {
+		var episodes []model.SubscriptionEpisode
+		if err := db.Find(&episodes).Error; err != nil {
+			return nil, err
+		}
+		episodeKeyByID := make(map[uint]string, len(episodes))
+		for _, ledger := range episodes {
+			subscriptionKey, ok := subscriptionKeyByID[ledger.SubscriptionID]
+			if !ok {
+				return nil, fmt.Errorf("episode %d references missing subscription %d", ledger.ID, ledger.SubscriptionID)
+			}
+			key := episodeRecordKey(subscriptionKey, ledger.Episode)
+			if existing, exists := state.episodes[key]; exists && existing.ID != ledger.ID {
+				return nil, fmt.Errorf("episode backup key collision %q", key)
+			}
+			state.episodes[key] = ledger
+			episodeKeyByID[ledger.ID] = key
+		}
 
-	var episodes []model.SubscriptionEpisode
-	if err := db.Find(&episodes).Error; err != nil {
-		return nil, err
-	}
-	episodeKeyByID := make(map[uint]string, len(episodes))
-	for _, ledger := range episodes {
-		subscriptionKey, ok := subscriptionKeyByID[ledger.SubscriptionID]
-		if !ok {
-			return nil, fmt.Errorf("episode %d references missing subscription %d", ledger.ID, ledger.SubscriptionID)
+		var candidates []model.EpisodeResourceCandidate
+		if err := db.Find(&candidates).Error; err != nil {
+			return nil, err
 		}
-		key := episodeRecordKey(subscriptionKey, ledger.Episode)
-		if existing, exists := state.episodes[key]; exists && existing.ID != ledger.ID {
-			return nil, fmt.Errorf("episode backup key collision %q", key)
+		for _, candidate := range candidates {
+			episodeKey, ok := episodeKeyByID[candidate.SubscriptionEpisodeID]
+			if !ok {
+				return nil, fmt.Errorf("candidate %d references missing episode %d", candidate.ID, candidate.SubscriptionEpisodeID)
+			}
+			resourceKey := episode.ResourceKey(model.EpisodeResource{
+				Hash: candidate.TorrentHash,
+				URL:  candidate.TorrentURL,
+			})
+			if resourceKey == "" {
+				return nil, fmt.Errorf("candidate %d has no stable resource identity", candidate.ID)
+			}
+			key := candidateStateKey(episodeKey, resourceKey)
+			if existing, exists := state.candidates[key]; exists && existing.ID != candidate.ID {
+				return nil, fmt.Errorf("candidate backup key collision %q", key)
+			}
+			state.candidates[key] = candidate
 		}
-		state.episodes[key] = ledger
-		episodeKeyByID[ledger.ID] = key
-	}
-
-	var candidates []model.EpisodeResourceCandidate
-	if err := db.Find(&candidates).Error; err != nil {
-		return nil, err
-	}
-	for _, candidate := range candidates {
-		episodeKey, ok := episodeKeyByID[candidate.SubscriptionEpisodeID]
-		if !ok {
-			return nil, fmt.Errorf("candidate %d references missing episode %d", candidate.ID, candidate.SubscriptionEpisodeID)
-		}
-		resourceKey := episode.ResourceKey(model.EpisodeResource{
-			Hash: candidate.TorrentHash,
-			URL:  candidate.TorrentURL,
-		})
-		if resourceKey == "" {
-			return nil, fmt.Errorf("candidate %d has no stable resource identity", candidate.ID)
-		}
-		key := candidateStateKey(episodeKey, resourceKey)
-		if existing, exists := state.candidates[key]; exists && existing.ID != candidate.ID {
-			return nil, fmt.Errorf("candidate backup key collision %q", key)
-		}
-		state.candidates[key] = candidate
 	}
 
 	var settings []model.NotificationSetting
@@ -1389,14 +1393,19 @@ func candidateStateKey(episodeKey, resourceKey string) string {
 	return episodeKey + "|resource:" + resourceKey
 }
 
+func packageHasOwnership(pkg *Package) bool {
+	return len(pkg.Episodes) > 0 || len(pkg.EpisodeCandidates) > 0
+}
+
 func validatePackage(pkg *Package) error {
+	hasOwnership := packageHasOwnership(pkg)
 	subscriptionKeys := make(map[string]struct{}, len(pkg.Subscriptions))
 	for i, record := range pkg.Subscriptions {
 		key := subscriptionKeyFromRecord(record)
 		if key == "" {
 			return fmt.Errorf("subscriptions[%d]: missing stable subscription key", i)
 		}
-		if _, exists := subscriptionKeys[key]; exists {
+		if _, exists := subscriptionKeys[key]; hasOwnership && exists {
 			return fmt.Errorf("subscriptions[%d]: subscription key collision %q", i, key)
 		}
 		subscriptionKeys[key] = struct{}{}
