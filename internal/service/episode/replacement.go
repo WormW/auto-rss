@@ -146,32 +146,51 @@ type candidateLockTable struct {
 }
 
 type candidateLockEntry struct {
-	mu   sync.Mutex
-	refs int
+	token chan struct{}
+	refs  int
 }
 
-func (t *candidateLockTable) lock(candidateID uint) func() {
+func (t *candidateLockTable) lock(ctx context.Context, candidateID uint) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	t.mu.Lock()
 	if t.entries == nil {
 		t.entries = make(map[uint]*candidateLockEntry)
 	}
 	entry := t.entries[candidateID]
 	if entry == nil {
-		entry = &candidateLockEntry{}
+		entry = &candidateLockEntry{token: make(chan struct{}, 1)}
+		entry.token <- struct{}{}
 		t.entries[candidateID] = entry
 	}
 	entry.refs++
 	t.mu.Unlock()
 
-	entry.mu.Lock()
-	return func() {
-		entry.mu.Unlock()
-		t.mu.Lock()
-		entry.refs--
-		if entry.refs == 0 {
-			delete(t.entries, candidateID)
-		}
-		t.mu.Unlock()
+	unlock := func() {
+		entry.token <- struct{}{}
+		t.releaseReference(candidateID, entry)
+	}
+	select {
+	case <-entry.token:
+		return unlock, nil
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		t.releaseReference(candidateID, entry)
+		return nil, ctx.Err()
+	case <-entry.token:
+		return unlock, nil
+	}
+}
+
+func (t *candidateLockTable) releaseReference(candidateID uint, entry *candidateLockEntry) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	entry.refs--
+	if entry.refs == 0 {
+		delete(t.entries, candidateID)
 	}
 }
 
@@ -198,9 +217,12 @@ func (s *ReplacementService) PrepareReplace(candidateID uint) error {
 	if err := s.validate(); err != nil {
 		return err
 	}
-	unlock := s.candidateMu.lock(candidateID)
+	unlock, err := s.candidateMu.lock(context.Background(), candidateID)
+	if err != nil {
+		return err
+	}
 	defer unlock()
-	_, err := s.episodes.ClaimCandidateForReplacement(candidateID)
+	_, err = s.episodes.ClaimCandidateForReplacement(candidateID)
 	return err
 }
 
@@ -208,11 +230,17 @@ func (s *ReplacementService) ContinueReplace(ctx context.Context, candidateID ui
 	if err := s.validate(); err != nil {
 		return err
 	}
-	unlock := s.candidateMu.lock(candidateID)
+	unlock, err := s.candidateMu.lock(ctx, candidateID)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	candidate, err := s.episodes.GetCandidateByID(candidateID)
 	if err != nil {
 		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return s.cancelPreparedReplace(candidateID, err)
 	}
 	if candidate.Status == model.CandidateStatusAccepted && candidate.ReplacementStage == ReplacementStageDone {
 		return nil
@@ -234,7 +262,10 @@ func (s *ReplacementService) PrepareRetryCleanup(candidateID uint) error {
 	if err := s.validate(); err != nil {
 		return err
 	}
-	unlock := s.candidateMu.lock(candidateID)
+	unlock, err := s.candidateMu.lock(context.Background(), candidateID)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	return s.claimCleanup(candidateID)
 }
@@ -243,11 +274,17 @@ func (s *ReplacementService) ContinueRetryCleanup(ctx context.Context, candidate
 	if err := s.validate(); err != nil {
 		return err
 	}
-	unlock := s.candidateMu.lock(candidateID)
+	unlock, err := s.candidateMu.lock(ctx, candidateID)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	candidate, err := s.episodes.GetCandidateByID(candidateID)
 	if err != nil {
 		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return s.cancelPreparedCleanup(candidateID, err)
 	}
 	if candidate.Status == model.CandidateStatusAccepted && candidate.ReplacementStage == ReplacementStageDone {
 		return nil
@@ -277,7 +314,11 @@ func (s *ReplacementService) RecoverIncompleteWithCount(ctx context.Context) (in
 	errCh := make(chan error, len(candidates))
 	var activeDownloads sync.WaitGroup
 	advanceCandidate := func(candidate model.EpisodeResourceCandidate) {
-		unlock := s.candidateMu.lock(candidate.ID)
+		unlock, err := s.candidateMu.lock(ctx, candidate.ID)
+		if err != nil {
+			errCh <- fmt.Errorf("candidate %d: %w", candidate.ID, err)
+			return
+		}
 		defer unlock()
 		fresh, err := s.episodes.GetCandidateByID(candidate.ID)
 		if err == nil && fresh.Status == model.CandidateStatusAccepted && fresh.ReplacementStage == ReplacementStageDone {
@@ -344,6 +385,9 @@ func (s *ReplacementService) advance(ctx context.Context, candidate *model.Episo
 	switch candidate.ReplacementStage {
 	case ReplacementStageQueued, ReplacementStageDownloading, "":
 		if err := ctx.Err(); err != nil {
+			if candidate.ReplacementStage == ReplacementStageQueued {
+				return s.cancelPreparedReplace(candidate.ID, err)
+			}
 			return err
 		}
 		finalPath := strings.TrimSpace(candidate.FinalPath)
@@ -834,7 +878,7 @@ func (s *ReplacementService) claimCleanup(candidateID uint) error {
 
 func (s *ReplacementService) cleanupClaimed(ctx context.Context, candidate *model.EpisodeResourceCandidate) error {
 	if err := ctx.Err(); err != nil {
-		return err
+		return s.cancelPreparedCleanup(candidate.ID, err)
 	}
 	fresh, err := s.episodes.GetCandidateByID(candidate.ID)
 	if err != nil {
@@ -896,6 +940,61 @@ func (s *ReplacementService) cleanupClaimed(ctx context.Context, candidate *mode
 		return err
 	}
 	return cleanupStateConflict(fresh)
+}
+
+func (s *ReplacementService) cancelPreparedReplace(candidateID uint, cause error) error {
+	result := s.db.Model(&model.EpisodeResourceCandidate{}).
+		Where("id = ? AND status = ? AND replacement_stage = ?", candidateID, model.CandidateStatusReplacing, ReplacementStageQueued).
+		Updates(map[string]any{
+			"status":            model.CandidateStatusFailed,
+			"replacement_stage": "",
+			"failure_reason":    "replacement task cancelled: " + cause.Error(),
+			"updated_at":        time.Now(),
+		})
+	if result.Error != nil {
+		return errors.Join(cause, result.Error)
+	}
+	if result.RowsAffected == 1 {
+		return cause
+	}
+	candidate, err := s.episodes.GetCandidateByID(candidateID)
+	if err != nil {
+		return errors.Join(cause, err)
+	}
+	if candidate.Status == model.CandidateStatusAccepted && candidate.ReplacementStage == ReplacementStageDone {
+		return nil
+	}
+	if candidate.Status == model.CandidateStatusFailed && candidate.ReplacementStage == "" {
+		return cause
+	}
+	return errors.Join(cause, fmt.Errorf("%w: candidate %d changed before replacement cancellation", repository.ErrCandidateStateConflict, candidateID))
+}
+
+func (s *ReplacementService) cancelPreparedCleanup(candidateID uint, cause error) error {
+	result := s.db.Model(&model.EpisodeResourceCandidate{}).
+		Where("id = ? AND status = ? AND replacement_stage = ?", candidateID, model.CandidateStatusAcceptedCleanupFailed, ReplacementStageCleanupQueued).
+		Updates(map[string]any{
+			"replacement_stage": ReplacementStageCleaning,
+			"failure_reason":    "cleanup task cancelled: " + cause.Error(),
+			"updated_at":        time.Now(),
+		})
+	if result.Error != nil {
+		return errors.Join(cause, result.Error)
+	}
+	if result.RowsAffected == 1 {
+		return cause
+	}
+	candidate, err := s.episodes.GetCandidateByID(candidateID)
+	if err != nil {
+		return errors.Join(cause, err)
+	}
+	if candidate.Status == model.CandidateStatusAccepted && candidate.ReplacementStage == ReplacementStageDone {
+		return nil
+	}
+	if candidate.Status == model.CandidateStatusAcceptedCleanupFailed && candidate.ReplacementStage == ReplacementStageCleaning {
+		return cause
+	}
+	return errors.Join(cause, cleanupStateConflict(candidate))
 }
 
 func (s *ReplacementService) cleanupFailure(candidate *model.EpisodeResourceCandidate, err error) error {

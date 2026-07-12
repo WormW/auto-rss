@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,7 @@ import (
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/repository"
 	downloaderService "github.com/WormW/auto-rss/internal/service/downloader"
+	taskService "github.com/WormW/auto-rss/internal/service/task"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
@@ -1666,6 +1668,18 @@ type countingCleanupDownloadRepository struct {
 	deletes atomic.Int32
 }
 
+type signalingIncompleteRepository struct {
+	repository.EpisodeRepository
+	listed chan struct{}
+	once   sync.Once
+}
+
+func (r *signalingIncompleteRepository) ListIncompleteReplacements() ([]model.EpisodeResourceCandidate, error) {
+	candidates, err := r.EpisodeRepository.ListIncompleteReplacements()
+	r.once.Do(func() { close(r.listed) })
+	return candidates, err
+}
+
 func (r *countingCleanupDownloadRepository) Delete(id uint) error {
 	r.deletes.Add(1)
 	return r.DownloadRepository.Delete(id)
@@ -1694,6 +1708,46 @@ func TestReplacementManualCleanupAndRecoverySerializeExternalEffects(t *testing.
 	assert.EqualValues(t, 1, controller.removes.Load())
 	assert.EqualValues(t, 1, files.removes.Load())
 	assert.EqualValues(t, 1, downloads.deletes.Load())
+	completed := fx.loadCandidate(candidate.ID)
+	assert.Equal(t, model.CandidateStatusAccepted, completed.Status)
+	assert.Equal(t, ReplacementStageDone, completed.ReplacementStage)
+}
+
+func TestReplacementRecoveryCancellationDoesNotWaitForManualCandidateLock(t *testing.T) {
+	fx := newReplacementFixture(t)
+	candidate := seedCleanupCheckpoint(t, fx)
+	controller := &blockingCountingTorrentController{
+		TorrentTaskController: fx.controller,
+		started:               make(chan struct{}),
+		release:               make(chan struct{}),
+	}
+	repo := &signalingIncompleteRepository{EpisodeRepository: fx.repo, listed: make(chan struct{})}
+	service := NewReplacementService(fx.db, repo, fx.downloads, fx.subs, fx.downloader, controller, fx.promoter)
+	manualDone := make(chan error, 1)
+	go func() { manualDone <- service.RetryCleanup(context.Background(), candidate.ID) }()
+	<-controller.started
+
+	recoveryCtx, cancelRecovery := context.WithCancel(context.Background())
+	recoveryDone := make(chan error, 1)
+	go func() { recoveryDone <- service.RecoverIncomplete(recoveryCtx) }()
+	<-repo.listed
+	cancelRecovery()
+
+	var recoveryErr error
+	returnedBeforeRelease := false
+	select {
+	case recoveryErr = <-recoveryDone:
+		returnedBeforeRelease = true
+	case <-time.After(time.Second):
+	}
+	close(controller.release)
+	require.NoError(t, <-manualDone)
+	if !returnedBeforeRelease {
+		recoveryErr = <-recoveryDone
+		t.Fatal("recovery cancellation waited for the manual candidate lock")
+	}
+	require.ErrorIs(t, recoveryErr, context.Canceled)
+	assert.EqualValues(t, 1, controller.removes.Load())
 	completed := fx.loadCandidate(candidate.ID)
 	assert.Equal(t, model.CandidateStatusAccepted, completed.Status)
 	assert.Equal(t, ReplacementStageDone, completed.ReplacementStage)
@@ -1736,6 +1790,131 @@ func TestReplacementRecoveryContinuesPreparedCleanupAfterRestart(t *testing.T) {
 	completed := fx.loadCandidate(candidate.ID)
 	assert.Equal(t, model.CandidateStatusAccepted, completed.Status)
 	assert.Equal(t, ReplacementStageDone, completed.ReplacementStage)
+}
+
+func waitTaskManagerIdle(t *testing.T, manager *taskService.Manager) {
+	t.Helper()
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	for manager.IsRunning() {
+		select {
+		case <-deadline.C:
+			t.Fatal("task manager did not become idle")
+		default:
+			runtime.Gosched()
+		}
+	}
+}
+
+func TestReplacementCancelledPreparedTaskRollsBackClaimAndCanRetry(t *testing.T) {
+	fx := newReplacementFixture(t)
+	candidate := fx.seedPendingCandidate(fx.writeOldFile("old-content"))
+	manager := taskService.NewManager()
+	continueGate := make(chan struct{})
+	continueResult := make(chan error, 1)
+
+	started, err := manager.StartPreparedTask(taskService.TaskTypeReplacement, fx.sub.ID, "replace", func() error {
+		return fx.service.PrepareReplace(candidate.ID)
+	}, func(ctx context.Context, _ *taskService.Task) error {
+		<-continueGate
+		err := fx.service.ContinueReplace(ctx, candidate.ID)
+		continueResult <- err
+		return err
+	})
+	require.NoError(t, err)
+	require.NotNil(t, started)
+	assert.Equal(t, ReplacementStageQueued, fx.loadCandidate(candidate.ID).ReplacementStage)
+	require.NoError(t, manager.CancelTask())
+	close(continueGate)
+	require.ErrorIs(t, <-continueResult, context.Canceled)
+	waitTaskManagerIdle(t, manager)
+	require.NotEmpty(t, manager.GetTaskHistory())
+	assert.Equal(t, taskService.TaskStatusCancelled, manager.GetTaskHistory()[0].Status)
+
+	cancelled := fx.loadCandidate(candidate.ID)
+	assert.Equal(t, model.CandidateStatusFailed, cancelled.Status)
+	assert.Empty(t, cancelled.ReplacementStage)
+	assert.Contains(t, cancelled.FailureReason, context.Canceled.Error())
+	assert.Empty(t, fx.events)
+
+	retried := make(chan struct{})
+	second, err := manager.StartPreparedTask(taskService.TaskTypeReplacement, fx.sub.ID, "replace retry", func() error {
+		return fx.service.PrepareReplace(candidate.ID)
+	}, func(context.Context, *taskService.Task) error {
+		close(retried)
+		return nil
+	})
+	require.NoError(t, err)
+	require.NotNil(t, second)
+	select {
+	case <-retried:
+	case <-time.After(time.Second):
+		t.Fatal("replacement task did not restart after cancellation")
+	}
+	assert.Empty(t, fx.events)
+}
+
+func TestCleanupCancelledPreparedTaskRollsBackClaimAndCanRetry(t *testing.T) {
+	fx := newReplacementFixture(t)
+	candidate := seedCleanupCheckpoint(t, fx)
+	manager := taskService.NewManager()
+	continueGate := make(chan struct{})
+	continueResult := make(chan error, 1)
+
+	started, err := manager.StartPreparedTask(taskService.TaskTypeReplacement, fx.sub.ID, "cleanup", func() error {
+		return fx.service.PrepareRetryCleanup(candidate.ID)
+	}, func(ctx context.Context, _ *taskService.Task) error {
+		<-continueGate
+		err := fx.service.ContinueRetryCleanup(ctx, candidate.ID)
+		continueResult <- err
+		return err
+	})
+	require.NoError(t, err)
+	require.NotNil(t, started)
+	assert.Equal(t, ReplacementStageCleanupQueued, fx.loadCandidate(candidate.ID).ReplacementStage)
+	require.NoError(t, manager.CancelTask())
+	close(continueGate)
+	require.ErrorIs(t, <-continueResult, context.Canceled)
+	waitTaskManagerIdle(t, manager)
+	require.NotEmpty(t, manager.GetTaskHistory())
+	assert.Equal(t, taskService.TaskStatusCancelled, manager.GetTaskHistory()[0].Status)
+
+	cancelled := fx.loadCandidate(candidate.ID)
+	assert.Equal(t, model.CandidateStatusAcceptedCleanupFailed, cancelled.Status)
+	assert.Equal(t, ReplacementStageCleaning, cancelled.ReplacementStage)
+	assert.Contains(t, cancelled.FailureReason, context.Canceled.Error())
+	assert.Empty(t, fx.events)
+
+	retried := make(chan struct{})
+	second, err := manager.StartPreparedTask(taskService.TaskTypeReplacement, fx.sub.ID, "cleanup retry", func() error {
+		return fx.service.PrepareRetryCleanup(candidate.ID)
+	}, func(context.Context, *taskService.Task) error {
+		close(retried)
+		return nil
+	})
+	require.NoError(t, err)
+	require.NotNil(t, second)
+	select {
+	case <-retried:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup task did not restart after cancellation")
+	}
+	assert.Empty(t, fx.events)
+}
+
+func TestCancelledCleanupContinuationWaitingForLockDoesNotRollbackOtherFlow(t *testing.T) {
+	fx := newReplacementFixture(t)
+	candidate := seedCleanupCheckpoint(t, fx)
+	require.NoError(t, fx.service.PrepareRetryCleanup(candidate.ID))
+	unlock, err := fx.service.candidateMu.lock(context.Background(), candidate.ID)
+	require.NoError(t, err)
+	defer unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = fx.service.ContinueRetryCleanup(ctx, candidate.ID)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, ReplacementStageCleanupQueued, fx.loadCandidate(candidate.ID).ReplacementStage)
 }
 
 func TestReplacementRecoveryKeepsUnknownStageForManualInspection(t *testing.T) {
@@ -1934,7 +2113,7 @@ func TestReplacementAcceptedCleanupFailedUnknownStageHasNoCleanupSideEffects(t *
 	require.NoError(t, downloadErr)
 }
 
-func TestReplacementCanceledBeforeDownloadRemainsRecoverable(t *testing.T) {
+func TestReplacementCanceledBeforeDownloadReturnsToRetryableState(t *testing.T) {
 	fx := newReplacementFixture(t)
 	candidate := fx.seedPendingCandidate(fx.writeOldFile("old-content"))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1944,9 +2123,12 @@ func TestReplacementCanceledBeforeDownloadRemainsRecoverable(t *testing.T) {
 
 	require.ErrorIs(t, err, context.Canceled)
 	got := fx.loadCandidate(candidate.ID)
-	assert.Equal(t, model.CandidateStatusReplacing, got.Status)
-	assert.Equal(t, ReplacementStageQueued, got.ReplacementStage)
+	assert.Equal(t, model.CandidateStatusFailed, got.Status)
+	assert.Empty(t, got.ReplacementStage)
+	assert.Contains(t, got.FailureReason, context.Canceled.Error())
 	assert.Empty(t, fx.events)
+	require.NoError(t, fx.service.PrepareReplace(candidate.ID))
+	assert.Equal(t, ReplacementStageQueued, fx.loadCandidate(candidate.ID).ReplacementStage)
 }
 
 func (fx *replacementFixture) seedReplacementDownload(candidate model.EpisodeResourceCandidate, finalPath string) model.Download {

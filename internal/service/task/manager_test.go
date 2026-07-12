@@ -485,3 +485,32 @@ func TestManagerStartPreparedTaskSuccessfulPrepareStartsExactlyOneTask(t *testin
 	}
 	assert.EqualValues(t, 1, prepareCalls.Load())
 }
+
+func TestManagerStartPreparedTaskConvertsPreparePanicAndRemainsUsable(t *testing.T) {
+	manager := NewManager()
+
+	started, err := manager.StartPreparedTask(TaskTypeReplacement, 7, "panic prepare", func() error {
+		panic("injected prepare panic")
+	}, func(context.Context, *Task) error {
+		t.Fatal("callback must not run after prepare panic")
+		return nil
+	})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "prepare task panic prepare")
+	assert.ErrorContains(t, err, "injected prepare panic")
+	assert.Nil(t, started)
+	assert.Nil(t, manager.GetCurrentTask())
+
+	callbackStarted := make(chan struct{})
+	next, err := manager.StartTask(TaskTypeCollect, 8, "after panic", func(context.Context, *Task) error {
+		close(callbackStarted)
+		return nil
+	})
+	require.NoError(t, err)
+	require.NotNil(t, next)
+	select {
+	case <-callbackStarted:
+	case <-time.After(time.Second):
+		t.Fatal("manager did not start a task after prepare panic")
+	}
+}

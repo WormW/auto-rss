@@ -153,6 +153,42 @@ func TestSetupStartsReplacementRecoveryAsynchronouslyOnce(t *testing.T) {
 	assert.EqualValues(t, 1, calls.Load())
 }
 
+func TestStartReplacementRecoveryShutdownTimeoutIsBounded(t *testing.T) {
+	db := newTestDB(t)
+	cfg := newRouterTestConfig(false)
+	appCtx := newTestAppContext(db, cfg)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	exited := make(chan struct{})
+	recovery := func(context.Context) (int, error) {
+		close(started)
+		<-release
+		close(exited)
+		return 0, nil
+	}
+	startReplacementRecovery(appCtx, recovery, 25*time.Millisecond)
+	<-started
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		appCtx.Shutdown()
+		close(shutdownDone)
+	}()
+	select {
+	case <-shutdownDone:
+	case <-time.After(time.Second):
+		close(release)
+		<-exited
+		t.Fatal("shutdown blocked past the replacement recovery timeout")
+	}
+	close(release)
+	select {
+	case <-exited:
+	case <-time.After(time.Second):
+		t.Fatal("replacement recovery did not exit after blocker release")
+	}
+}
+
 func newRouterTestConfig(authEnabled bool) *config.Config {
 	return &config.Config{
 		DBPath:                         ":memory:",

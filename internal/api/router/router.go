@@ -43,8 +43,11 @@ var newScheduler = func(db *gorm.DB, subscriptionRepo repository.SubscriptionRep
 }
 
 type setupDependencies struct {
-	replacementRecovery func(context.Context) (int, error)
+	replacementRecovery                func(context.Context) (int, error)
+	replacementRecoveryShutdownTimeout time.Duration
 }
+
+const defaultReplacementRecoveryShutdownTimeout = 5 * time.Second
 
 // Setup 设置路由
 func Setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClient, appCtx *app.Context, renameTemplate string) (*gin.Engine, error) {
@@ -442,7 +445,11 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		logger.Error("Failed to start RSS scheduler, API continues without scheduler", "error", err)
 	}
 	appCtx.RegisterShutdownHook(rssScheduler.Stop)
-	startReplacementRecovery(appCtx, replacementRecovery)
+	recoveryShutdownTimeout := dependencies.replacementRecoveryShutdownTimeout
+	if recoveryShutdownTimeout <= 0 {
+		recoveryShutdownTimeout = defaultReplacementRecoveryShutdownTimeout
+	}
+	startReplacementRecovery(appCtx, replacementRecovery, recoveryShutdownTimeout)
 
 	// 初始化健康检查器
 	healthChecker := handler.NewHealthChecker(db, qbClient)
@@ -478,15 +485,24 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	return r, nil
 }
 
-func startReplacementRecovery(appCtx *app.Context, recoverIncomplete func(context.Context) (int, error)) {
+func startReplacementRecovery(appCtx *app.Context, recoverIncomplete func(context.Context) (int, error), shutdownTimeout time.Duration) {
 	if appCtx == nil || recoverIncomplete == nil {
 		return
+	}
+	if shutdownTimeout <= 0 {
+		shutdownTimeout = defaultReplacementRecoveryShutdownTimeout
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	appCtx.RegisterShutdownHook(func() {
 		cancel()
-		<-done
+		timer := time.NewTimer(shutdownTimeout)
+		defer timer.Stop()
+		select {
+		case <-done:
+		case <-timer.C:
+			logger.Warn("Timed out waiting for replacement startup recovery shutdown", "timeout", shutdownTimeout)
+		}
 	})
 	logger.Info("Replacement startup recovery started")
 	go func() {

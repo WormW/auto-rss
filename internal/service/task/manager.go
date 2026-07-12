@@ -61,12 +61,14 @@ var (
 	once     sync.Once
 )
 
+func NewManager() *Manager {
+	return &Manager{maxHistory: 10}
+}
+
 // GetManager 获取任务管理器单例
 func GetManager() *Manager {
 	once.Do(func() {
-		instance = &Manager{
-			maxHistory: 10,
-		}
+		instance = NewManager()
 	})
 	return instance
 }
@@ -102,72 +104,73 @@ func (m *Manager) StartTask(taskType TaskType, subscriptionID uint, name string,
 // StartPreparedTask atomically checks global task availability, prepares any
 // external claim, and installs the task before starting its callback.
 func (m *Manager) StartPreparedTask(taskType TaskType, subscriptionID uint, name string, prepare func() error, fn func(ctx context.Context, task *Task) error) (*Task, error) {
-	m.mu.Lock()
+	var started *Task
+	var taskCtx context.Context
+	prepareErr := func() error {
+		m.mu.Lock()
+		defer m.mu.Unlock()
 
-	// 检查是否有任务在运行
-	if m.currentTask != nil && m.currentTask.Status == TaskStatusRunning {
-		runningTaskName := m.currentTask.Name
-		m.mu.Unlock()
-		return nil, fmt.Errorf("%w: 已有任务在运行中: %s", ErrTaskRunning, runningTaskName)
-	}
-	if prepare != nil {
-		if err := prepare(); err != nil {
-			m.mu.Unlock()
-			return nil, err
+		if m.currentTask != nil && m.currentTask.Status == TaskStatusRunning {
+			return fmt.Errorf("%w: 已有任务在运行中: %s", ErrTaskRunning, m.currentTask.Name)
 		}
-	}
+		if err := runTaskPrepare(name, prepare); err != nil {
+			return err
+		}
 
-	// 创建新任务
-	now := time.Now()
-	task := &Task{
-		ID:             fmt.Sprintf("%s_%d", taskType, now.UnixNano()),
-		Type:           taskType,
-		Status:         TaskStatusRunning,
-		SubscriptionID: subscriptionID,
-		Name:           name,
-		Progress:       0,
-		Message:        "任务开始",
-		StartedAt:      &now,
+		now := time.Now()
+		started = &Task{
+			ID:             fmt.Sprintf("%s_%d", taskType, now.UnixNano()),
+			Type:           taskType,
+			Status:         TaskStatusRunning,
+			SubscriptionID: subscriptionID,
+			Name:           name,
+			Progress:       0,
+			Message:        "任务开始",
+			StartedAt:      &now,
+		}
+		var cancel context.CancelFunc
+		taskCtx, cancel = context.WithCancel(context.Background())
+		m.currentTask = started
+		m.cancelFunc = cancel
+		return nil
+	}()
+	if prepareErr != nil {
+		return nil, prepareErr
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	m.currentTask = task
-	m.cancelFunc = cancel
-	m.mu.Unlock()
 
 	logger.Info("Task started",
-		"task_id", task.ID,
-		"type", task.Type,
-		"name", task.Name)
+		"task_id", started.ID,
+		"type", started.Type,
+		"name", started.Name)
 
 	// 异步执行任务
 	go func() {
-		err := fn(ctx, task)
+		err := fn(taskCtx, started)
 
 		m.mu.Lock()
 		defer m.mu.Unlock()
 
 		now := time.Now()
-		task.CompletedAt = &now
+		started.CompletedAt = &now
 
-		if ctx.Err() == context.Canceled {
-			task.Status = TaskStatusCancelled
-			task.Message = "任务已取消"
-			logger.Info("Task cancelled", "task_id", task.ID)
+		if taskCtx.Err() == context.Canceled {
+			started.Status = TaskStatusCancelled
+			started.Message = "任务已取消"
+			logger.Info("Task cancelled", "task_id", started.ID)
 		} else if err != nil {
-			task.Status = TaskStatusFailed
-			task.Error = err.Error()
-			task.Message = "任务失败"
-			logger.Error("Task failed", "task_id", task.ID, "error", err.Error())
+			started.Status = TaskStatusFailed
+			started.Error = err.Error()
+			started.Message = "任务失败"
+			logger.Error("Task failed", "task_id", started.ID, "error", err.Error())
 		} else {
-			task.Status = TaskStatusCompleted
-			task.Progress = 100
-			task.Message = "任务完成"
-			logger.Info("Task completed", "task_id", task.ID)
+			started.Status = TaskStatusCompleted
+			started.Progress = 100
+			started.Message = "任务完成"
+			logger.Info("Task completed", "task_id", started.ID)
 		}
 
 		// 添加到历史记录
-		m.taskHistory = append([]*Task{task}, m.taskHistory...)
+		m.taskHistory = append([]*Task{started}, m.taskHistory...)
 		if len(m.taskHistory) > m.maxHistory {
 			m.taskHistory = m.taskHistory[:m.maxHistory]
 		}
@@ -177,7 +180,21 @@ func (m *Manager) StartPreparedTask(taskType TaskType, subscriptionID uint, name
 		m.cancelFunc = nil
 	}()
 
-	return task, nil
+	return started, nil
+}
+
+// A prepare function owns its domain claim semantics. A panic is reported but
+// cannot be generically compensated because the claim may already be durable.
+func runTaskPrepare(name string, prepare func() error) (err error) {
+	if prepare == nil {
+		return nil
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("prepare task %s panicked: %v", name, recovered)
+		}
+	}()
+	return prepare()
 }
 
 // CancelTask 取消当前任务
