@@ -3,7 +3,6 @@ package repository
 import (
 	"fmt"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,9 +16,12 @@ import (
 
 func setupEpisodeRepository(t *testing.T) (*gorm.DB, EpisodeRepository) {
 	t.Helper()
-	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	databasePath := filepath.Join(t.TempDir(), "episode.db")
+	db, err := gorm.Open(sqlite.Open(databasePath), &gorm.Config{})
 	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sqlDB.Close() })
 	require.NoError(t, db.AutoMigrate(
 		&model.Subscription{},
 		&model.Download{},
@@ -358,6 +360,9 @@ func TestEpisodeRepositoryKeepCandidateConcurrentWALRequestsAreIdempotent(t *tes
 	open := func() *gorm.DB {
 		db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 		require.NoError(t, err)
+		sqlDB, err := db.DB()
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = sqlDB.Close() })
 		return db
 	}
 	dbOne := open()
