@@ -3,10 +3,14 @@ import test from 'node:test'
 
 import type { EpisodeResourceCandidate, SubscriptionEpisode } from '../src/api/episode.ts'
 import {
+  candidateAvailableActions,
   canRestoreMissing,
+  continuousOwnedEpisode,
   describeCandidateDifference,
   episodeStatusLabel,
   episodeStatusType,
+  filterEpisodes,
+  planEpisodeStatusUpdate,
   isEpisodeOwned
 } from '../src/utils/episode-ledger.ts'
 
@@ -146,4 +150,50 @@ test('候选资源比较完整保留前缀相同但版本不同的长标题', ()
   assert.equal(result.title.current, currentTitle)
   assert.equal(result.title.candidate, candidateTitle)
   assert.equal(result.title.different, true)
+})
+
+test('连续进度在首个缺口停止并忽略输入顺序', () => {
+  const episodes = [
+    episode({ episode: 4, status: 'downloaded' }),
+    episode({ episode: 2, status: 'ignored' }),
+    episode({ episode: 1, status: 'marked_downloaded' }),
+    episode({ episode: 3, status: 'missing' })
+  ]
+
+  assert.equal(continuousOwnedEpisode(episodes), 2)
+})
+
+test('剧集筛选支持状态和待处理候选', () => {
+  const episodes = [
+    episode({ episode: 1, status: 'downloaded' }),
+    episode({ episode: 2, status: 'missing', action_required_candidate_count: 2 }),
+    episode({ episode: 3, status: 'ignored', action_required_candidate_count: 1 })
+  ]
+
+  assert.deepEqual(filterEpisodes(episodes, 'missing').map(item => item.episode), [2])
+  assert.deepEqual(filterEpisodes(episodes, 'candidate').map(item => item.episode), [2, 3])
+  assert.deepEqual(filterEpisodes(episodes, 'all').map(item => item.episode), [1, 2, 3])
+})
+
+test('批量恢复缺失会拆分可执行、无变化和被活动下载阻止的集数', () => {
+  const episodes = [
+    episode({ episode: 1, status: 'downloaded' }),
+    episode({ episode: 2, status: 'missing' }),
+    episode({ episode: 3, status: 'downloading', active_download_id: 9 })
+  ]
+
+  assert.deepEqual(planEpisodeStatusUpdate(episodes, [1, 2, 3, 4, 4], 'missing'), {
+    eligible: [1, 4],
+    blocked: [3],
+    unchanged: [2]
+  })
+})
+
+test('候选状态只暴露后端允许的操作', () => {
+  assert.deepEqual(candidateAvailableActions('pending'), ['keep', 'replace'])
+  assert.deepEqual(candidateAvailableActions('failed'), ['retry_replace'])
+  assert.deepEqual(candidateAvailableActions('replacing'), ['progress'])
+  assert.deepEqual(candidateAvailableActions('accepted_cleanup_failed'), ['retry_cleanup'])
+  assert.deepEqual(candidateAvailableActions('accepted'), [])
+  assert.deepEqual(candidateAvailableActions('kept_existing'), [])
 })

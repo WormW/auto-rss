@@ -289,6 +289,20 @@
                       <div class="action-buttons">
                         <n-tooltip trigger="hover">
                           <template #trigger>
+                            <n-button
+                              text
+                              size="small"
+                              class="episode-manager-trigger"
+                              aria-label="剧集管理"
+                              @click="handleEpisodeManager(sub)"
+                            >
+                              <template #icon><n-icon size="16"><ProfileOutlined /></n-icon></template>
+                            </n-button>
+                          </template>
+                          剧集管理
+                        </n-tooltip>
+                        <n-tooltip trigger="hover">
+                          <template #trigger>
                             <n-button text size="small" @click="handleOffsetEdit(sub)">
                               <template #icon><n-icon size="16"><CalculatorOutlined /></n-icon></template>
                             </n-button>
@@ -443,6 +457,20 @@
                     <div class="action-buttons">
                       <n-tooltip trigger="hover">
                         <template #trigger>
+                          <n-button
+                            text
+                            size="small"
+                            class="episode-manager-trigger"
+                            aria-label="剧集管理"
+                            @click="handleEpisodeManager(sub)"
+                          >
+                            <template #icon><n-icon size="16"><ProfileOutlined /></n-icon></template>
+                          </n-button>
+                        </template>
+                        剧集管理
+                      </n-tooltip>
+                      <n-tooltip trigger="hover">
+                        <template #trigger>
                           <n-button text size="small" @click="handleDiagnostics(sub)">
                             <template #icon><n-icon size="16"><ToolOutlined /></n-icon></template>
                           </n-button>
@@ -504,6 +532,11 @@
 
     <!-- 番剧搜索组件 -->
     <AnimeSearch ref="animeSearchRef" @subscribe="handleSearchSubscribe" />
+
+    <EpisodeManagerDrawer
+      v-model:show="showEpisodeManager"
+      :subscription="episodeManagerSub"
+    />
 
     <!-- 偏移量快速编辑弹窗 -->
     <n-modal v-model:show="showOffsetModal" preset="dialog" title="调整集数偏移">
@@ -1099,9 +1132,11 @@ import {
   PauseCircleOutlined,
   FolderOpenOutlined,
   InfoCircleOutlined,
-  ToolOutlined
+  ToolOutlined,
+  ProfileOutlined
 } from '@vicons/antd'
 import AnimeSearch from '@/components/AnimeSearch.vue'
+import EpisodeManagerDrawer from '@/components/EpisodeManagerDrawer.vue'
 import {
   getEpisodeProgressPercent,
   getRelativeCurrentEpisode,
@@ -1143,6 +1178,8 @@ const showMissingModal = ref(false)
 const missingEpisodesSub = ref<Subscription | null>(null)
 const showPreviewModal = ref(false)
 const previewSub = ref<Subscription | null>(null)
+const showEpisodeManager = ref(false)
+const episodeManagerSub = ref<Subscription | null>(null)
 
 // 文件夹扫描弹窗
 const showScanModal = ref(false)
@@ -1439,9 +1476,25 @@ const listColumns = computed<DataTableColumns<Subscription>>(() => [
     title: '操作',
     key: 'actions',
     fixed: 'right',
-    width: 180,
+    width: 220,
     render: (row) => (
       <NSpace>
+        <NTooltip trigger="hover">
+          {{
+            trigger: () => (
+              <NButton
+                text
+                size="small"
+                class="episode-manager-trigger"
+                aria-label="剧集管理"
+                onClick={() => handleEpisodeManager(row)}
+              >
+                <NIcon size={16}><ProfileOutlined /></NIcon>
+              </NButton>
+            ),
+            default: () => '剧集管理'
+          }}
+        </NTooltip>
         <NButton text size="small" onClick={() => handleDiagnostics(row)}>
           <NIcon size={16}><ToolOutlined /></NIcon>
         </NButton>
@@ -1937,6 +1990,11 @@ const handleEdit = (sub: Subscription) => {
   }
   showRssStep.value = false
   showModal.value = true
+}
+
+const handleEpisodeManager = (sub: Subscription) => {
+  episodeManagerSub.value = sub
+  showEpisodeManager.value = true
 }
 
 const handleGetRssData = async () => {

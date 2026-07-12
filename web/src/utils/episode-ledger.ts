@@ -1,12 +1,23 @@
 import type { TagProps } from 'naive-ui'
 
 import type {
+  CandidateStatus,
+  EditableEpisodeStatus,
   EpisodeResourceCandidate,
   EpisodeStatus,
   SubscriptionEpisode
 } from '../api/episode.ts'
 
 type EpisodeStatusTagType = NonNullable<TagProps['type']>
+
+export type EpisodeFilter = 'all' | 'candidate' | EpisodeStatus
+export type CandidateAction = 'keep' | 'replace' | 'retry_replace' | 'retry_cleanup' | 'progress'
+
+export interface EpisodeStatusUpdatePlan {
+  eligible: number[]
+  blocked: number[]
+  unchanged: number[]
+}
 
 export interface ResourceDifferenceField {
   current: string
@@ -69,9 +80,67 @@ export const isEpisodeOwned = (status: EpisodeStatus): boolean => {
   return status === 'downloaded' || status === 'marked_downloaded' || status === 'ignored'
 }
 
+export const continuousOwnedEpisode = (episodes: SubscriptionEpisode[]): number => {
+  let continuous = 0
+  const ordered = [...episodes].sort((left, right) => left.episode - right.episode)
+  for (const episode of ordered) {
+    if (episode.episode === continuous + 1 && isEpisodeOwned(episode.status)) {
+      continuous++
+    }
+  }
+  return continuous
+}
+
+export const filterEpisodes = (
+  episodes: SubscriptionEpisode[],
+  filter: EpisodeFilter
+): SubscriptionEpisode[] => {
+  if (filter === 'all') return episodes
+  if (filter === 'candidate') {
+    return episodes.filter(episode => episode.action_required_candidate_count > 0)
+  }
+  return episodes.filter(episode => episode.status === filter)
+}
+
 export const canRestoreMissing = (episode: SubscriptionEpisode): boolean => {
   if (episode.status === 'missing') return false
   return episode.status !== 'downloading' || episode.active_download_id == null
+}
+
+export const planEpisodeStatusUpdate = (
+  episodes: SubscriptionEpisode[],
+  selectedEpisodes: number[],
+  targetStatus: EditableEpisodeStatus
+): EpisodeStatusUpdatePlan => {
+  const byNumber = new Map(episodes.map(episode => [episode.episode, episode]))
+  const plan: EpisodeStatusUpdatePlan = { eligible: [], blocked: [], unchanged: [] }
+
+  for (const episodeNumber of [...new Set(selectedEpisodes)]) {
+    const episode = byNumber.get(episodeNumber)
+    if (episode?.status === targetStatus) {
+      plan.unchanged.push(episodeNumber)
+    } else if (targetStatus === 'missing' && episode && !canRestoreMissing(episode)) {
+      plan.blocked.push(episodeNumber)
+    } else {
+      plan.eligible.push(episodeNumber)
+    }
+  }
+  return plan
+}
+
+export const candidateAvailableActions = (status: CandidateStatus): CandidateAction[] => {
+  switch (status) {
+    case 'pending':
+      return ['keep', 'replace']
+    case 'failed':
+      return ['retry_replace']
+    case 'replacing':
+      return ['progress']
+    case 'accepted_cleanup_failed':
+      return ['retry_cleanup']
+    default:
+      return []
+  }
 }
 
 export const describeCandidateDifference = (
