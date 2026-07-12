@@ -587,20 +587,32 @@ func TestQBReplacementDownloaderPayloadCleanupRefusesNormalDownload(t *testing.T
 	fx := newReplacementFixture(t)
 	qb := &replacementQBClient{}
 	production := NewQBReplacementDownloader(fx.db, fx.downloads, repository.NewConfigRepository(fx.db), qb, "", fx.root)
+	normalDownload := &model.Download{SubscriptionID: fx.sub.ID, Title: "normal", TorrentURL: "magnet:normal", TorrentHash: "old-hash", Purpose: model.DownloadPurposeNormal}
+	require.NoError(t, fx.db.Create(normalDownload).Error)
 
-	err := production.CleanupFailedDownload(&model.Download{TorrentHash: "old-hash", Purpose: model.DownloadPurposeNormal})
+	err := production.CleanupFailedDownload(normalDownload)
 
 	require.ErrorContains(t, err, "refusing payload cleanup")
 	assert.Empty(t, qb.deleted)
 	candidate := fx.seedUntrackedMarkedCandidate()
-	require.NoError(t, production.CleanupFailedDownload(&model.Download{
+	qb.category = replacementTorrentCategoryPrefix + fmt.Sprint(candidate.ID)
+	qb.hash = "new-hash"
+	replacementDownload := &model.Download{
+		SubscriptionID: fx.sub.ID, Title: "replacement", TorrentURL: candidate.TorrentURL,
 		TorrentHash: "new-hash", Purpose: model.DownloadPurposeReplacement, ReplacementCandidateID: &candidate.ID,
-	}))
+		ReplacementTorrentOwned: true,
+	}
+	require.NoError(t, fx.db.Create(replacementDownload).Error)
+	require.NoError(t, production.CleanupFailedDownload(replacementDownload))
 	assert.Equal(t, []string{"new-hash"}, qb.deleted)
-	require.NoError(t, fx.db.Model(&candidate).Update("old_torrent_hash", "old-hash").Error)
-	err = production.CleanupFailedDownload(&model.Download{
-		TorrentHash: "old-hash", Purpose: model.DownloadPurposeReplacement, ReplacementCandidateID: &candidate.ID,
-	})
+	require.NoError(t, fx.db.Model(&candidate).Update("old_torrent_hash", "old-active-hash").Error)
+	require.NoError(t, fx.db.Model(replacementDownload).Updates(map[string]any{
+		"torrent_hash": "old-active-hash", "replacement_torrent_owned": true,
+	}).Error)
+	replacementDownload.TorrentHash = "old-active-hash"
+	replacementDownload.ReplacementTorrentOwned = true
+	qb.hash = "old-active-hash"
+	err = production.CleanupFailedDownload(replacementDownload)
 	require.ErrorContains(t, err, "old active torrent")
 	assert.Equal(t, []string{"new-hash"}, qb.deleted)
 }
@@ -636,6 +648,159 @@ func TestQBReplacementDownloaderRecoveryReusesPersistedDownload(t *testing.T) {
 	assert.FileExists(t, stagedPath)
 }
 
+func TestQBReplacementDownloaderRejectsPreexistingTorrentWithoutPayloadDelete(t *testing.T) {
+	fx := newReplacementFixture(t)
+	oldPath := fx.writeOldFile("old-content")
+	candidate := fx.seedPendingCandidate(oldPath)
+	require.NoError(t, fx.db.Model(&candidate).Updates(map[string]any{
+		"status": model.CandidateStatusReplacing, "replacement_stage": ReplacementStageDownloading,
+	}).Error)
+	candidate.Status = model.CandidateStatusReplacing
+	candidate.ReplacementStage = ReplacementStageDownloading
+	qb := &replacementQBClient{
+		hash: candidate.TorrentHash, fileName: "downloaded.mkv",
+		exclusiveErr: downloaderService.ErrTorrentAlreadyExists,
+	}
+	production := NewQBReplacementDownloader(fx.db, fx.downloads, repository.NewConfigRepository(fx.db), qb, "", fx.root)
+	stagedDir := filepath.Join(filepath.Dir(oldPath), ".auto-rss-replacements", fmt.Sprint(candidate.ID))
+
+	download, _, err := production.DownloadToStage(context.Background(), candidate, stagedDir)
+
+	require.ErrorIs(t, err, downloaderService.ErrTorrentAlreadyExists)
+	require.NotNil(t, download)
+	assert.Equal(t, 1, qb.exclusiveCalls)
+	assert.Empty(t, qb.deleted)
+	content, readErr := os.ReadFile(oldPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, "old-content", string(content))
+}
+
+func TestReplacementRecoversDetachAfterCompletedCheckpointFailure(t *testing.T) {
+	fx := newReplacementFixture(t)
+	oldPath := fx.writeOldFile("old-content")
+	candidate := fx.seedPendingCandidate(oldPath)
+	qb := &replacementQBClient{hash: candidate.TorrentHash, fileName: "downloaded.mkv"}
+	failingDownloads := &failCompletedReplacementUpdateRepository{DownloadRepository: fx.downloads, failNext: true}
+	production := NewQBReplacementDownloader(
+		fx.db, failingDownloads, repository.NewConfigRepository(fx.db), qb, "", fx.root,
+	)
+	service := NewReplacementService(fx.db, fx.repo, failingDownloads, fx.subs, production, qb, fx.promoter)
+
+	err := service.Replace(context.Background(), candidate.ID)
+
+	require.ErrorContains(t, err, "injected completed checkpoint failure")
+	checkpoint := fx.loadCandidate(candidate.ID)
+	assert.Equal(t, model.CandidateStatusReplacing, checkpoint.Status)
+	assert.Equal(t, ReplacementStageStaged, checkpoint.ReplacementStage)
+	assert.NotEmpty(t, checkpoint.StagedPath)
+	assert.NotEmpty(t, checkpoint.FinalPath)
+	require.NotNil(t, checkpoint.ReplacementDownloadID)
+	assert.FileExists(t, checkpoint.StagedPath)
+
+	recovered := NewReplacementService(fx.db, fx.repo, fx.downloads, fx.subs, production, qb, fx.promoter)
+	require.NoError(t, recovered.RecoverIncomplete(context.Background()))
+
+	got := fx.loadCandidate(candidate.ID)
+	assert.Equal(t, model.CandidateStatusAccepted, got.Status)
+	assert.Equal(t, ReplacementStageDone, got.ReplacementStage)
+	download, downloadErr := fx.downloads.GetByID(*got.ReplacementDownloadID)
+	require.NoError(t, downloadErr)
+	assert.Equal(t, model.DownloadStatusCompleted, download.Status)
+	assert.Equal(t, oldPath, download.RenamedPath)
+}
+
+func TestReplacementDeletePayloadFailureRemainsRecoverable(t *testing.T) {
+	fx := newReplacementFixture(t)
+	oldPath := fx.writeOldFile("old-content")
+	candidate := fx.seedPendingCandidate(oldPath)
+	qb := &replacementQBClient{
+		hash: candidate.TorrentHash, fileName: "downloaded.mkv",
+		torrentInfoErr: errors.New("download failed"), deleteErr: errors.New("delete payload failed"),
+	}
+	production := NewQBReplacementDownloader(fx.db, fx.downloads, repository.NewConfigRepository(fx.db), qb, "", fx.root)
+	service := NewReplacementService(fx.db, fx.repo, fx.downloads, fx.subs, production, qb, fx.promoter)
+
+	err := service.Replace(context.Background(), candidate.ID)
+
+	require.ErrorContains(t, err, "download failed")
+	require.ErrorContains(t, err, "delete payload failed")
+	checkpoint := fx.loadCandidate(candidate.ID)
+	assert.Equal(t, model.CandidateStatusReplacing, checkpoint.Status)
+	assert.Equal(t, ReplacementStageDownloadCleanup, checkpoint.ReplacementStage)
+	require.NotNil(t, checkpoint.ReplacementDownloadID)
+	assert.Contains(t, checkpoint.FailureReason, "delete payload failed")
+	assert.Equal(t, []string{candidate.TorrentHash}, qb.deleted)
+	content, readErr := os.ReadFile(oldPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, "old-content", string(content))
+
+	qb.deleteErr = nil
+	require.ErrorContains(t, service.RecoverIncomplete(context.Background()), "download failed")
+	got := fx.loadCandidate(candidate.ID)
+	assert.Equal(t, model.CandidateStatusFailed, got.Status)
+	assert.Equal(t, []string{candidate.TorrentHash, candidate.TorrentHash}, qb.deleted)
+	require.NoError(t, service.RecoverIncomplete(context.Background()))
+	assert.Equal(t, []string{candidate.TorrentHash, candidate.TorrentHash}, qb.deleted)
+}
+
+func TestReplacementUntrackedResolutionDirectoryMismatchCleansOwnedTorrent(t *testing.T) {
+	fx := newReplacementFixture(t)
+	candidate := fx.seedUntrackedMarkedCandidate()
+	require.NoError(t, fx.db.Model(&candidate).Updates(map[string]any{
+		"title": "Replacement Show 1080p.mkv", "final_path": "",
+	}).Error)
+	candidate.Title = "Replacement Show 1080p.mkv"
+	candidate.FinalPath = ""
+	qb := &replacementQBClient{hash: candidate.TorrentHash, fileName: "downloaded.2160p.mkv"}
+	template := "${title}/${resolution}/${title} S${seasonFormat}E${episodeFormat}"
+	production := NewQBReplacementDownloader(fx.db, fx.downloads, repository.NewConfigRepository(fx.db), qb, template, fx.root)
+	service := NewReplacementService(fx.db, fx.repo, fx.downloads, fx.subs, production, qb, fx.promoter)
+
+	err := service.Replace(context.Background(), candidate.ID)
+
+	require.ErrorContains(t, err, "planned final path")
+	assert.Equal(t, []string{candidate.TorrentHash}, qb.deleted)
+	assert.Empty(t, qb.removed)
+	plannedFinal := filepath.Join(fx.root, "Replacement Show", "1080p", "Replacement Show S01E01.mkv")
+	assert.Equal(t, filepath.Join(filepath.Dir(plannedFinal), ".auto-rss-replacements", fmt.Sprint(candidate.ID)), qb.addedSavePath)
+	assert.Equal(t, filepath.Dir(plannedFinal), filepath.Dir(filepath.Dir(qb.addedSavePath)))
+	assert.Equal(t, model.CandidateStatusFailed, fx.loadCandidate(candidate.ID).Status)
+}
+
+func TestQBReplacementDownloaderValidatesSymlinkAncestorsBeforeCreatingStage(t *testing.T) {
+	fx := newReplacementFixture(t)
+	candidate := fx.seedUntrackedMarkedCandidate()
+	require.NoError(t, fx.db.Model(&candidate).Updates(map[string]any{
+		"status": model.CandidateStatusReplacing, "replacement_stage": ReplacementStageDownloading, "final_path": "",
+	}).Error)
+	candidate.Status = model.CandidateStatusReplacing
+	candidate.ReplacementStage = ReplacementStageDownloading
+	candidate.FinalPath = ""
+	outside := t.TempDir()
+	require.NoError(t, os.Symlink(outside, filepath.Join(fx.root, "Replacement Show")))
+	qb := &replacementQBClient{hash: candidate.TorrentHash, fileName: "downloaded.mkv"}
+	production := NewQBReplacementDownloader(fx.db, fx.downloads, repository.NewConfigRepository(fx.db), qb, "", fx.root)
+
+	_, _, err := production.DownloadToStage(context.Background(), candidate, "")
+
+	require.ErrorContains(t, err, "symlink")
+	assert.Zero(t, qb.exclusiveCalls)
+	assert.NoDirExists(t, filepath.Join(outside, "Season 1"))
+}
+
+type failCompletedReplacementUpdateRepository struct {
+	repository.DownloadRepository
+	failNext bool
+}
+
+func (r *failCompletedReplacementUpdateRepository) Update(download *model.Download) error {
+	if r.failNext && download.Purpose == model.DownloadPurposeReplacement && download.Status == model.DownloadStatusCompleted {
+		r.failNext = false
+		return errors.New("injected completed checkpoint failure")
+	}
+	return r.DownloadRepository.Update(download)
+}
+
 func TestReplacementRecoveryRetriesCleanupAndIsIdempotent(t *testing.T) {
 	fx := newReplacementFixture(t)
 	candidate := fx.seedPendingCandidate(fx.writeOldFile("old-content"))
@@ -658,12 +823,38 @@ func TestReplacementRecoveryKeepsUnknownStageForManualInspection(t *testing.T) {
 		"status": model.CandidateStatusReplacing, "replacement_stage": "future_unknown_stage",
 	}).Error)
 
-	require.NoError(t, fx.service.RecoverIncomplete(context.Background()))
+	require.ErrorContains(t, fx.service.RecoverIncomplete(context.Background()), "unknown replacement stage")
 
 	got := fx.loadCandidate(candidate.ID)
 	assert.Equal(t, model.CandidateStatusReplacing, got.Status)
 	assert.Equal(t, "future_unknown_stage", got.ReplacementStage)
 	assert.Contains(t, got.FailureReason, "unknown replacement stage")
+}
+
+func TestReplacementAcceptedCleanupFailedUnknownStageHasNoCleanupSideEffects(t *testing.T) {
+	fx := newReplacementFixture(t)
+	oldPath := fx.writeOldFile("old-content")
+	candidate := fx.seedPendingCandidate(oldPath)
+	rollback := filepath.Join(filepath.Dir(oldPath), ".auto-rss-rollback", fmt.Sprint(candidate.ID), filepath.Base(oldPath))
+	require.NoError(t, fx.db.Model(&candidate).Updates(map[string]any{
+		"status":            model.CandidateStatusAcceptedCleanupFailed,
+		"replacement_stage": "unknown_cleanup_checkpoint",
+		"old_download_id":   fx.old.ID,
+		"old_torrent_hash":  fx.old.TorrentHash,
+		"rollback_path":     rollback,
+	}).Error)
+
+	err := fx.service.RecoverIncomplete(context.Background())
+
+	require.ErrorContains(t, err, "unknown replacement stage")
+	got := fx.loadCandidate(candidate.ID)
+	assert.Equal(t, model.CandidateStatusAcceptedCleanupFailed, got.Status)
+	assert.Equal(t, "unknown_cleanup_checkpoint", got.ReplacementStage)
+	assert.Contains(t, got.FailureReason, "unknown replacement stage")
+	assert.Empty(t, fx.controller.removed)
+	assert.Empty(t, fx.events)
+	_, downloadErr := fx.downloads.GetByID(fx.old.ID)
+	require.NoError(t, downloadErr)
 }
 
 func TestReplacementCanceledBeforeDownloadRemainsRecoverable(t *testing.T) {
@@ -695,18 +886,26 @@ func (fx *replacementFixture) seedReplacementDownload(candidate model.EpisodeRes
 }
 
 type replacementQBClient struct {
-	hash     string
-	fileName string
-	state    string
-	addCalls int
-	removed  []string
-	deleted  []string
+	hash           string
+	fileName       string
+	state          string
+	addCalls       int
+	exclusiveCalls int
+	exclusiveErr   error
+	torrentInfoErr error
+	removeErr      error
+	deleteErr      error
+	addedSavePath  string
+	category       string
+	removed        []string
+	deleted        []string
 }
 
 func (q *replacementQBClient) Login(string, string, string) error          { return nil }
 func (q *replacementQBClient) TestConnection(string, string, string) error { return nil }
 func (q *replacementQBClient) AddTorrent(_ string, savePath string, _ string) (string, error) {
 	q.addCalls++
+	q.addedSavePath = savePath
 	if err := os.MkdirAll(savePath, 0o755); err != nil {
 		return "", err
 	}
@@ -715,10 +914,23 @@ func (q *replacementQBClient) AddTorrent(_ string, savePath string, _ string) (s
 	}
 	return q.hash, nil
 }
+func (q *replacementQBClient) AddTorrentExclusive(url, savePath, category, expectedHash string) (string, error) {
+	q.exclusiveCalls++
+	if q.exclusiveErr != nil {
+		return "", q.exclusiveErr
+	}
+	q.category = category
+	return q.AddTorrent(url, savePath, category)
+}
 func (q *replacementQBClient) AddTorrentFile(string, []byte, string, string) (string, error) {
 	return "", errors.New("not used")
 }
 func (q *replacementQBClient) GetTorrentInfo(string) (*downloaderService.TorrentInfo, error) {
+	if q.torrentInfoErr != nil {
+		err := q.torrentInfoErr
+		q.torrentInfoErr = nil
+		return nil, err
+	}
 	state := q.state
 	if state == "" {
 		state = downloaderService.StateCompleted
@@ -727,7 +939,7 @@ func (q *replacementQBClient) GetTorrentInfo(string) (*downloaderService.Torrent
 	if state == downloaderService.StateCompleted {
 		progress = 1
 	}
-	return &downloaderService.TorrentInfo{Hash: q.hash, Name: q.fileName, Progress: progress, State: state}, nil
+	return &downloaderService.TorrentInfo{Hash: q.hash, Name: q.fileName, Progress: progress, State: state, Category: q.category}, nil
 }
 func (q *replacementQBClient) GetTorrentsByCategory(string) ([]*downloaderService.TorrentInfo, error) {
 	return nil, nil
@@ -739,11 +951,11 @@ func (q *replacementQBClient) PauseTorrent(string) error                      { 
 func (q *replacementQBClient) ResumeTorrent(string) error                     { return nil }
 func (q *replacementQBClient) RemoveTorrentTask(hash string) error {
 	q.removed = append(q.removed, hash)
-	return nil
+	return q.removeErr
 }
 func (q *replacementQBClient) DeleteTorrentWithPayload(hash string) error {
 	q.deleted = append(q.deleted, hash)
-	return nil
+	return q.deleteErr
 }
 func (q *replacementQBClient) GetTorrentFiles(string) ([]downloaderService.TorrentFile, error) {
 	return []downloaderService.TorrentFile{{Name: q.fileName, Size: 11, Progress: 1}}, nil

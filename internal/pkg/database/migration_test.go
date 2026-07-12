@@ -163,6 +163,9 @@ func TestRunMigrationsAddsReplacementRecoverySnapshotColumnsToExistingLedger(t *
 	if !db.Migrator().HasIndex(&model.EpisodeResourceCandidate{}, "idx_episode_candidate_single_replacing") {
 		t.Fatal("expected unique replacing candidate index")
 	}
+	if !db.Migrator().HasColumn(&model.Download{}, "replacement_torrent_owned") {
+		t.Fatal("expected replacement_torrent_owned ownership marker")
+	}
 }
 
 func TestRunMigrationsBackfillsEpisodeLedgerWithoutInferringGaps(t *testing.T) {

@@ -543,6 +543,9 @@ func (m *collectEpisodesSmallTorrentQBClient) AddTorrent(torrentURL string, save
 	m.addCalls++
 	return "added-hash", nil
 }
+func (m *collectEpisodesSmallTorrentQBClient) AddTorrentExclusive(torrentURL, savePath, category, expectedHash string) (string, error) {
+	return m.AddTorrent(torrentURL, savePath, category)
+}
 func (m *collectEpisodesSmallTorrentQBClient) AddTorrentFile(filename string, fileContent []byte, savePath string, category string) (string, error) {
 	m.addCalls++
 	return "added-file-hash", nil

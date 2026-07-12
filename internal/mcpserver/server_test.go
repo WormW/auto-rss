@@ -620,6 +620,9 @@ func (c *fakeMCPQBClient) AddTorrent(torrentURL string, savePath string, categor
 	}
 	return "fake-hash", nil
 }
+func (c *fakeMCPQBClient) AddTorrentExclusive(torrentURL, savePath, category, expectedHash string) (string, error) {
+	return c.AddTorrent(torrentURL, savePath, category)
+}
 
 func (c *fakeMCPQBClient) AddTorrentFile(filename string, fileContent []byte, savePath string, category string) (string, error) {
 	return "", nil

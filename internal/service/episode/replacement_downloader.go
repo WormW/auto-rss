@@ -94,27 +94,51 @@ func (d *qbReplacementDownloader) DownloadToStage(ctx context.Context, candidate
 		if err := d.downloads.Create(download); err != nil {
 			return nil, "", err
 		}
-		checkpoint := d.db.Model(&model.EpisodeResourceCandidate{}).
-			Where("id = ? AND status = ? AND replacement_stage = ? AND replacement_download_id IS NULL", candidate.ID, model.CandidateStatusReplacing, ReplacementStageDownloading).
-			Update("replacement_download_id", download.ID)
-		if checkpoint.Error != nil || checkpoint.RowsAffected != 1 {
-			_ = d.downloads.Delete(download.ID)
-			if checkpoint.Error != nil {
-				return nil, "", checkpoint.Error
-			}
-			return nil, "", errors.New("replacement candidate checkpoint changed before qBittorrent add")
-		}
-		candidate.ReplacementDownloadID = &download.ID
 	}
 
-	if stagedDir == "" {
-		provisional := replacementFileName(d.renameTemplate, &subscription, download, candidate.Title, "")
-		stagedDir = filepath.Join(root, filepath.Dir(provisional), ".auto-rss-replacements", fmt.Sprint(candidate.ID))
+	plannedFromMetadata := strings.TrimSpace(candidate.FinalPath) == ""
+	finalPath := strings.TrimSpace(candidate.FinalPath)
+	if plannedFromMetadata {
+		extension := filepath.Ext(candidate.Title)
+		if !replacementVideoFile(candidate.Title) {
+			extension = ".mkv"
+		}
+		relative := replacementFileName(d.renameTemplate, &subscription, download, candidate.Title, extension)
+		finalPath = filepath.Join(root, filepath.FromSlash(relative))
 	}
-	stagedDir, err = filepath.Abs(stagedDir)
-	if err != nil || !pathWithin(root, stagedDir) {
+	finalPath, err = filepath.Abs(finalPath)
+	if err != nil || !pathWithin(root, finalPath) {
+		return download, "", fmt.Errorf("replacement final path escapes download root: %s", finalPath)
+	}
+	if err := validateRenameEndpoint(finalPath, false); err != nil {
+		return download, "", err
+	}
+	expectedStagedDir := filepath.Join(filepath.Dir(finalPath), ".auto-rss-replacements", fmt.Sprint(candidate.ID))
+	if stagedDir != "" {
+		stagedDir, err = filepath.Abs(stagedDir)
+		if err != nil || filepath.Clean(stagedDir) != filepath.Clean(expectedStagedDir) {
+			return download, "", fmt.Errorf("replacement staging directory is not beside planned final path: %s", stagedDir)
+		}
+	} else {
+		stagedDir = expectedStagedDir
+	}
+	if !pathWithin(root, stagedDir) {
 		return download, "", fmt.Errorf("replacement staging directory escapes download root: %s", stagedDir)
 	}
+	if err := validateRenameEndpoint(stagedDir, false); err != nil {
+		return download, "", err
+	}
+	checkpoint := d.db.Model(&model.EpisodeResourceCandidate{}).
+		Where("id = ? AND status = ? AND replacement_stage = ?", candidate.ID, model.CandidateStatusReplacing, ReplacementStageDownloading).
+		Updates(map[string]any{"replacement_download_id": download.ID, "final_path": finalPath})
+	if checkpoint.Error != nil || checkpoint.RowsAffected != 1 {
+		if checkpoint.Error != nil {
+			return download, "", checkpoint.Error
+		}
+		return download, "", errors.New("replacement candidate checkpoint changed before qBittorrent add")
+	}
+	candidate.ReplacementDownloadID = &download.ID
+	candidate.FinalPath = finalPath
 	if err := os.MkdirAll(stagedDir, 0o755); err != nil {
 		return download, "", err
 	}
@@ -124,7 +148,12 @@ func (d *qbReplacementDownloader) DownloadToStage(ctx context.Context, candidate
 
 	hash := strings.TrimSpace(download.TorrentHash)
 	if hash == "" || hash == queuedHash {
-		hash, err = d.qb.AddTorrent(candidate.TorrentURL, stagedDir, replacementTorrentCategoryPrefix+fmt.Sprint(candidate.ID))
+		hash, err = d.qb.AddTorrentExclusive(
+			candidate.TorrentURL,
+			stagedDir,
+			replacementTorrentCategoryPrefix+fmt.Sprint(candidate.ID),
+			candidate.TorrentHash,
+		)
 		if err != nil {
 			download.Status = model.DownloadStatusFailed
 			download.ErrorMessage = err.Error()
@@ -139,6 +168,7 @@ func (d *qbReplacementDownloader) DownloadToStage(ctx context.Context, candidate
 			return download, "", errors.New("qBittorrent did not return a replacement torrent hash")
 		}
 		download.TorrentHash = hash
+		download.ReplacementTorrentOwned = true
 		if err := d.downloads.Update(download); err != nil {
 			return download, "", err
 		}
@@ -148,6 +178,7 @@ func (d *qbReplacementDownloader) DownloadToStage(ctx context.Context, candidate
 			return download, "", fmt.Errorf("detach replacement torrent: %w", err)
 		}
 		download.Status = model.DownloadStatusCompleted
+		download.ReplacementTorrentOwned = false
 		if err := d.downloads.Update(download); err != nil {
 			return download, "", err
 		}
@@ -173,18 +204,12 @@ func (d *qbReplacementDownloader) DownloadToStage(ctx context.Context, candidate
 		return download, "", fmt.Errorf("replacement staged file validation failed: %w", err)
 	}
 
-	extension := filepath.Ext(fileName)
-	finalPath := strings.TrimSpace(candidate.FinalPath)
-	if finalPath == "" {
-		relative := replacementFileName(d.renameTemplate, &subscription, download, fileName, extension)
-		finalPath = filepath.Join(root, filepath.FromSlash(relative))
-	}
-	finalPath, err = filepath.Abs(finalPath)
-	if err != nil || !pathWithin(root, finalPath) {
-		return download, "", fmt.Errorf("replacement final path escapes download root: %s", finalPath)
-	}
-	if err := validateRenameEndpoint(finalPath, false); err != nil {
-		return download, "", err
+	if plannedFromMetadata {
+		actualRelative := replacementFileName(d.renameTemplate, &subscription, download, fileName, filepath.Ext(fileName))
+		actualFinal := filepath.Join(root, filepath.FromSlash(actualRelative))
+		if filepath.Clean(actualFinal) != filepath.Clean(finalPath) {
+			return download, "", fmt.Errorf("actual rename target %s differs from planned final path %s", actualFinal, finalPath)
+		}
 	}
 	stagedPath := filepath.Join(stagedDir, filepath.Base(finalPath))
 	download.FilePath = stagedPath
@@ -200,11 +225,31 @@ func (d *qbReplacementDownloader) DownloadToStage(ctx context.Context, candidate
 	if err := validateStagedPath(stagedPath, stagedDir); err != nil {
 		return download, "", err
 	}
+	checkpoint = d.db.Model(&model.EpisodeResourceCandidate{}).
+		Where("id = ? AND status = ? AND replacement_stage = ?", candidate.ID, model.CandidateStatusReplacing, ReplacementStageDownloading).
+		Updates(map[string]any{
+			"replacement_download_id": download.ID,
+			"staged_path":             stagedPath,
+			"final_path":              finalPath,
+			"replacement_stage":       ReplacementStageDetaching,
+		})
+	if checkpoint.Error != nil {
+		return download, "", checkpoint.Error
+	}
+	if checkpoint.RowsAffected != 1 {
+		return download, "", errors.New("replacement candidate changed before detach checkpoint")
+	}
 	if err := d.qb.RemoveTorrentTask(hash); err != nil {
 		return download, "", fmt.Errorf("detach replacement torrent: %w", err)
 	}
+	if err := d.db.Model(&model.EpisodeResourceCandidate{}).
+		Where("id = ? AND status = ? AND replacement_stage = ?", candidate.ID, model.CandidateStatusReplacing, ReplacementStageDetaching).
+		Update("replacement_stage", ReplacementStageStaged).Error; err != nil {
+		return download, "", err
+	}
 	now := time.Now()
 	download.Status = model.DownloadStatusCompleted
+	download.ReplacementTorrentOwned = false
 	download.DownloadedAt = &now
 	if err := d.downloads.Update(download); err != nil {
 		return download, "", err
@@ -312,21 +357,50 @@ func (d *qbReplacementDownloader) CleanupFailedDownload(download *model.Download
 	if download == nil {
 		return nil
 	}
-	if download.Purpose != model.DownloadPurposeReplacement || download.ReplacementCandidateID == nil {
+	if download.ID == 0 {
+		return errors.New("refusing payload cleanup without persisted ownership")
+	}
+	persisted, err := d.downloads.GetByID(download.ID)
+	if err != nil {
+		return fmt.Errorf("verify persisted replacement ownership: %w", err)
+	}
+	if persisted.Purpose != model.DownloadPurposeReplacement || persisted.ReplacementCandidateID == nil ||
+		download.ReplacementCandidateID == nil || *persisted.ReplacementCandidateID != *download.ReplacementCandidateID {
 		return errors.New("refusing payload cleanup for non-replacement download")
 	}
-	hash := strings.TrimSpace(download.TorrentHash)
+	if !persisted.ReplacementTorrentOwned {
+		return nil
+	}
+	hash := strings.TrimSpace(persisted.TorrentHash)
 	if hash == "" || strings.HasPrefix(hash, "replacement:") {
 		return nil
 	}
 	var candidate model.EpisodeResourceCandidate
-	if err := d.db.Select("old_torrent_hash").First(&candidate, *download.ReplacementCandidateID).Error; err != nil {
+	if err := d.db.Select("old_torrent_hash").First(&candidate, *persisted.ReplacementCandidateID).Error; err != nil {
 		return fmt.Errorf("verify replacement cleanup ownership: %w", err)
 	}
 	if candidate.OldTorrentHash != "" && strings.EqualFold(strings.TrimSpace(candidate.OldTorrentHash), hash) {
 		return errors.New("refusing payload cleanup for old active torrent")
 	}
-	return d.qb.DeleteTorrentWithPayload(hash)
+	info, infoErr := d.qb.GetTorrentInfo(hash)
+	if errors.Is(infoErr, qbclient.ErrTorrentNotFound) {
+		persisted.ReplacementTorrentOwned = false
+		persisted.Status = model.DownloadStatusFailed
+		return d.downloads.Update(persisted)
+	}
+	if infoErr != nil {
+		return fmt.Errorf("verify owned replacement torrent: %w", infoErr)
+	}
+	expectedCategory := replacementTorrentCategoryPrefix + fmt.Sprint(*persisted.ReplacementCandidateID)
+	if info == nil || !strings.EqualFold(strings.TrimSpace(info.Hash), hash) || info.Category != expectedCategory {
+		return fmt.Errorf("replacement torrent ownership category changed: expected %s", expectedCategory)
+	}
+	if err := d.qb.DeleteTorrentWithPayload(hash); err != nil {
+		return err
+	}
+	persisted.ReplacementTorrentOwned = false
+	persisted.Status = model.DownloadStatusFailed
+	return d.downloads.Update(persisted)
 }
 
 func pathWithin(root, path string) bool {

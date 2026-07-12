@@ -735,6 +735,9 @@ func (q *schedulerQBClient) AddTorrent(string, string, string) (string, error) {
 	q.addCalls++
 	return "", nil
 }
+func (q *schedulerQBClient) AddTorrentExclusive(url, savePath, category, expectedHash string) (string, error) {
+	return q.AddTorrent(url, savePath, category)
+}
 
 func (q *schedulerQBClient) DeleteTorrentWithPayload(string) error {
 	q.deleteCalls++

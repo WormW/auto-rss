@@ -15,14 +15,16 @@ import (
 )
 
 const (
-	ReplacementStageQueued      = "queued"
-	ReplacementStageDownloading = "downloading"
-	ReplacementStageStaged      = "staged"
-	ReplacementStageOldBackedUp = "old_backed_up"
-	ReplacementStagePromoted    = "promoted"
-	ReplacementStageSwitched    = "switched"
-	ReplacementStageCleaning    = "cleaning"
-	ReplacementStageDone        = "done"
+	ReplacementStageQueued          = "queued"
+	ReplacementStageDownloading     = "downloading"
+	ReplacementStageDownloadCleanup = "download_cleanup"
+	ReplacementStageDetaching       = "detaching"
+	ReplacementStageStaged          = "staged"
+	ReplacementStageOldBackedUp     = "old_backed_up"
+	ReplacementStagePromoted        = "promoted"
+	ReplacementStageSwitched        = "switched"
+	ReplacementStageCleaning        = "cleaning"
+	ReplacementStageDone            = "done"
 )
 
 var ErrReplacementInProgress = repository.ErrReplacementInProgress
@@ -184,8 +186,11 @@ func (s *ReplacementService) advance(ctx context.Context, candidate *model.Episo
 	if candidate == nil {
 		return errors.New("replacement candidate is required")
 	}
-	if candidate.Status == model.CandidateStatusAcceptedCleanupFailed || candidate.ReplacementStage == ReplacementStageSwitched || candidate.ReplacementStage == ReplacementStageCleaning {
-		return s.cleanup(ctx, candidate)
+	if candidate.Status == model.CandidateStatusAcceptedCleanupFailed {
+		if candidate.ReplacementStage == ReplacementStageSwitched || candidate.ReplacementStage == ReplacementStageCleaning {
+			return s.cleanup(ctx, candidate)
+		}
+		return s.recordUnknownStage(candidate)
 	}
 	_, oldDownload, err := s.loadResources(candidate)
 	if err != nil {
@@ -227,7 +232,27 @@ func (s *ReplacementService) advance(ctx context.Context, candidate *model.Episo
 				if newDownload.ID != 0 {
 					candidate.ReplacementDownloadID = &newDownload.ID
 				}
-				_ = s.downloader.CleanupFailedDownload(newDownload)
+			}
+			fresh, freshErr := s.episodes.GetCandidateByID(candidate.ID)
+			if freshErr == nil {
+				*candidate = *fresh
+			}
+			if freshErr == nil && (fresh.ReplacementStage == ReplacementStageDetaching || fresh.ReplacementStage == ReplacementStageStaged) && fresh.StagedPath != "" {
+				fresh.FailureReason = downloadErr.Error()
+				if saveErr := s.episodes.UpdateCandidate(fresh); saveErr != nil {
+					return errors.Join(downloadErr, saveErr)
+				}
+				return downloadErr
+			}
+			cleanupErr := s.downloader.CleanupFailedDownload(newDownload)
+			if cleanupErr != nil {
+				candidate.Status = model.CandidateStatusReplacing
+				candidate.ReplacementStage = ReplacementStageDownloadCleanup
+				candidate.FailureReason = errors.Join(downloadErr, cleanupErr).Error()
+				if saveErr := s.episodes.UpdateCandidate(candidate); saveErr != nil {
+					return errors.Join(downloadErr, cleanupErr, saveErr)
+				}
+				return errors.Join(downloadErr, cleanupErr)
 			}
 			return s.recordFailure(candidate, downloadErr)
 		}
@@ -238,19 +263,16 @@ func (s *ReplacementService) advance(ctx context.Context, candidate *model.Episo
 			finalPath = replacementDownloadPath(newDownload)
 		}
 		if finalPath == "" {
-			_ = s.downloader.CleanupFailedDownload(newDownload)
-			return s.recordFailure(candidate, errors.New("replacement final path is unavailable"))
+			return s.failDownloadedCandidate(candidate, newDownload, errors.New("replacement final path is unavailable"))
 		}
 		if err := validateRenameEndpoint(finalPath, false); err != nil {
-			_ = s.downloader.CleanupFailedDownload(newDownload)
-			return s.recordFailure(candidate, err)
+			return s.failDownloadedCandidate(candidate, newDownload, err)
 		}
 		if stagedDir == "" {
 			stagedDir = filepath.Join(filepath.Dir(finalPath), ".auto-rss-replacements", fmt.Sprint(candidate.ID))
 		}
 		if err := validateStagedPath(stagedPath, stagedDir); err != nil {
-			_ = s.downloader.CleanupFailedDownload(newDownload)
-			return s.recordFailure(candidate, err)
+			return s.failDownloadedCandidate(candidate, newDownload, err)
 		}
 		candidate.ReplacementDownloadID = &newDownload.ID
 		candidate.StagedPath = stagedPath
@@ -259,7 +281,55 @@ func (s *ReplacementService) advance(ctx context.Context, candidate *model.Episo
 		if err := s.episodes.UpdateCandidate(candidate); err != nil {
 			return err
 		}
-		fallthrough
+		return s.advance(ctx, candidate)
+	case ReplacementStageDownloadCleanup:
+		if candidate.ReplacementDownloadID == nil {
+			return s.recordUnknownStage(candidate)
+		}
+		download, err := s.downloads.GetByID(*candidate.ReplacementDownloadID)
+		if err != nil {
+			return err
+		}
+		cause := errors.New(candidate.FailureReason)
+		if err := s.downloader.CleanupFailedDownload(download); err != nil {
+			candidate.FailureReason = errors.Join(cause, err).Error()
+			if saveErr := s.episodes.UpdateCandidate(candidate); saveErr != nil {
+				return errors.Join(err, saveErr)
+			}
+			return err
+		}
+		return s.recordFailure(candidate, cause)
+	case ReplacementStageDetaching:
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if candidate.ReplacementDownloadID == nil {
+			return s.recordUnknownStage(candidate)
+		}
+		newDownload, err := s.downloads.GetByID(*candidate.ReplacementDownloadID)
+		if err != nil {
+			return err
+		}
+		if newDownload.ReplacementTorrentOwned {
+			if err := s.torrents.RemoveTorrentTask(newDownload.TorrentHash); err != nil {
+				candidate.FailureReason = err.Error()
+				if saveErr := s.episodes.UpdateCandidate(candidate); saveErr != nil {
+					return errors.Join(err, saveErr)
+				}
+				return err
+			}
+			newDownload.ReplacementTorrentOwned = false
+		}
+		newDownload.Status = model.DownloadStatusCompleted
+		if err := s.downloads.Update(newDownload); err != nil {
+			return err
+		}
+		candidate.ReplacementStage = ReplacementStageStaged
+		candidate.FailureReason = ""
+		if err := s.episodes.UpdateCandidate(candidate); err != nil {
+			return err
+		}
+		return s.advance(ctx, candidate)
 	case ReplacementStageStaged:
 		if err := ctx.Err(); err != nil {
 			return err
@@ -333,9 +403,33 @@ func (s *ReplacementService) advance(ctx context.Context, candidate *model.Episo
 	case ReplacementStageDone:
 		return nil
 	default:
-		candidate.FailureReason = "unknown replacement stage: " + candidate.ReplacementStage
-		return s.episodes.UpdateCandidate(candidate)
+		return s.recordUnknownStage(candidate)
 	}
+}
+
+func (s *ReplacementService) failDownloadedCandidate(candidate *model.EpisodeResourceCandidate, download *model.Download, cause error) error {
+	if download != nil && download.ID != 0 {
+		candidate.ReplacementDownloadID = &download.ID
+	}
+	if cleanupErr := s.downloader.CleanupFailedDownload(download); cleanupErr != nil {
+		candidate.Status = model.CandidateStatusReplacing
+		candidate.ReplacementStage = ReplacementStageDownloadCleanup
+		candidate.FailureReason = errors.Join(cause, cleanupErr).Error()
+		if saveErr := s.episodes.UpdateCandidate(candidate); saveErr != nil {
+			return errors.Join(cause, cleanupErr, saveErr)
+		}
+		return errors.Join(cause, cleanupErr)
+	}
+	return s.recordFailure(candidate, cause)
+}
+
+func (s *ReplacementService) recordUnknownStage(candidate *model.EpisodeResourceCandidate) error {
+	err := fmt.Errorf("unknown replacement stage: %s", candidate.ReplacementStage)
+	candidate.FailureReason = err.Error()
+	if saveErr := s.episodes.UpdateCandidate(candidate); saveErr != nil {
+		return errors.Join(err, saveErr)
+	}
+	return err
 }
 
 func (s *ReplacementService) finishPromoted(ctx context.Context, candidate *model.EpisodeResourceCandidate) error {
@@ -417,6 +511,7 @@ func (s *ReplacementService) switchDatabase(candidate *model.EpisodeResourceCand
 		}
 		now := time.Now()
 		download.Status = model.DownloadStatusCompleted
+		download.ReplacementTorrentOwned = false
 		download.FilePath = candidate.FinalPath
 		download.RenamedPath = candidate.FinalPath
 		download.DownloadedAt = &now

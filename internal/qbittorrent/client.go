@@ -1,9 +1,15 @@
 package qbittorrent
 
+import "errors"
+
+var ErrTorrentAlreadyExists = errors.New("torrent already exists")
+var ErrTorrentNotFound = errors.New("torrent not found")
+
 type Client interface {
 	Login(host, username, password string) error
 	TestConnection(host, username, password string) error
 	AddTorrent(torrentURL string, savePath string, category string) (string, error)
+	AddTorrentExclusive(torrentURL string, savePath string, category string, expectedHash string) (string, error)
 	AddTorrentFile(filename string, fileContent []byte, savePath string, category string) (string, error)
 	GetTorrentInfo(hash string) (*TorrentInfo, error)
 	GetTorrentsByCategory(category string) ([]*TorrentInfo, error)

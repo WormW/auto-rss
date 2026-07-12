@@ -73,6 +73,9 @@ type mockQBClient struct {
 func (m *mockQBClient) AddTorrent(url, savePath, category string) (string, error) {
 	return "", nil
 }
+func (m *mockQBClient) AddTorrentExclusive(url, savePath, category, expectedHash string) (string, error) {
+	return m.AddTorrent(url, savePath, category)
+}
 
 func (m *mockQBClient) AddTorrentFile(filename string, content []byte, savePath, category string) (string, error) {
 	return "", nil

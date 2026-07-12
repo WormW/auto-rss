@@ -227,6 +227,9 @@ func (m *smallTorrentGuardQBClient) AddTorrent(torrentURL string, savePath strin
 	m.addCalls++
 	return "added-hash", nil
 }
+func (m *smallTorrentGuardQBClient) AddTorrentExclusive(torrentURL, savePath, category, expectedHash string) (string, error) {
+	return m.AddTorrent(torrentURL, savePath, category)
+}
 func (m *smallTorrentGuardQBClient) AddTorrentFile(filename string, fileContent []byte, savePath string, category string) (string, error) {
 	return "added-file-hash", nil
 }

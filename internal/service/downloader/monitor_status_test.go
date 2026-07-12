@@ -2,8 +2,14 @@ package downloader
 
 import (
 	"testing"
+	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"github.com/WormW/auto-rss/internal/repository"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 func TestMapQBStateToStatus(t *testing.T) {
@@ -34,6 +40,61 @@ func TestMapQBStateToStatus(t *testing.T) {
 		})
 	}
 }
+
+func TestDownloadMonitorReconcileIgnoresReplacementDownloads(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/replacement-monitor.db"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Download{}, &model.Subscription{}, &model.Config{}))
+	candidateID := uint(77)
+	replacement := model.Download{
+		SubscriptionID: 1, Title: "replacement", Episode: 1,
+		TorrentURL: "magnet:replacement", TorrentHash: "replacement-hash",
+		Status: model.DownloadStatusDownloading, Purpose: model.DownloadPurposeReplacement,
+		ReplacementCandidateID: &candidateID, CreatedAt: time.Now().Add(-2 * ReconcileGracePeriod),
+	}
+	require.NoError(t, db.Create(&replacement).Error)
+	oldCheckpoint := time.Now().Add(-2 * ReconcileGracePeriod)
+	require.NoError(t, db.Model(&replacement).UpdateColumns(map[string]any{"created_at": oldCheckpoint, "updated_at": oldCheckpoint}).Error)
+	downloadRepo := repository.NewDownloadRepository(db)
+	lifecycle := &replacementMonitorLifecycle{downloads: downloadRepo}
+	notifications := &replacementMonitorNotifications{}
+	monitor := NewDownloadMonitor(
+		db, &retryLedgerQBClient{}, downloadRepo,
+		repository.NewSubscriptionRepository(db), repository.NewConfigRepository(db), "", lifecycle,
+	)
+	monitor.SetNotificationService(notifications)
+	monitor.downloadsPaused = func() bool { return false }
+
+	monitor.checkDownloads()
+
+	persisted, err := downloadRepo.GetByID(replacement.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.DownloadStatusDownloading, persisted.Status)
+	assert.Zero(t, lifecycle.failureCalls)
+	assert.Zero(t, notifications.calls)
+}
+
+type replacementMonitorLifecycle struct {
+	downloads    repository.DownloadRepository
+	failureCalls int
+}
+
+func (*replacementMonitorLifecycle) MarkDownloadCompleted(*model.Download, *model.Subscription, time.Time) error {
+	return nil
+}
+func (*replacementMonitorLifecycle) MarkDownloadCompletedInTx(*gorm.DB, *model.Download, *model.Subscription, time.Time) error {
+	return nil
+}
+func (*replacementMonitorLifecycle) MarkDownloadFailed(uint) error { return nil }
+func (l *replacementMonitorLifecycle) PersistDownloadFailure(download *model.Download, _ bool) error {
+	l.failureCalls++
+	return l.downloads.Update(download)
+}
+func (*replacementMonitorLifecycle) DetachDownload(uint) error { return nil }
+
+type replacementMonitorNotifications struct{ calls int }
+
+func (n *replacementMonitorNotifications) Send(model.NotificationPayload) { n.calls++ }
 
 func TestReplacementMonitorIsolationSkipsNormalCompletionHandler(t *testing.T) {
 	if shouldRunCompletionHandler(&model.Download{Purpose: model.DownloadPurposeReplacement}) {

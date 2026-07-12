@@ -185,7 +185,7 @@ func RunMigrations(db *gorm.DB) error {
 		{
 			ID: "202607120001", // add replacement recovery snapshots
 			Migrate: func(tx *gorm.DB) error {
-				if err := tx.AutoMigrate(&model.EpisodeResourceCandidate{}); err != nil {
+				if err := tx.AutoMigrate(&model.EpisodeResourceCandidate{}, &model.Download{}); err != nil {
 					return err
 				}
 				return tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_episode_candidate_single_replacing

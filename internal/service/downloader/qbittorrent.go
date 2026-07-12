@@ -2,6 +2,7 @@ package downloader
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -20,6 +21,9 @@ const (
 type QBittorrentClient = qbclient.Client
 type TorrentInfo = qbclient.TorrentInfo
 type TorrentFile = qbclient.TorrentFile
+
+var ErrTorrentAlreadyExists = qbclient.ErrTorrentAlreadyExists
+var ErrTorrentNotFound = qbclient.ErrTorrentNotFound
 
 type qbittorrentClient struct {
 	host        string
@@ -150,6 +154,74 @@ func (c *qbittorrentClient) AddTorrent(torrentURL string, savePath string, categ
 	return "", nil
 }
 
+// AddTorrentExclusive adds a torrent only when this call can prove ownership
+// of a task that did not exist in the global pre-add snapshot.
+func (c *qbittorrentClient) AddTorrentExclusive(torrentURL, savePath, category, expectedHash string) (string, error) {
+	before, err := c.getAllTorrents()
+	if err != nil {
+		return "", fmt.Errorf("snapshot torrents before exclusive add: %w", err)
+	}
+	existing := make(map[string]struct{}, len(before))
+	for _, torrent := range before {
+		hash := strings.ToLower(strings.TrimSpace(torrent.Hash))
+		if hash != "" {
+			existing[hash] = struct{}{}
+		}
+	}
+	expectedHash = strings.ToLower(strings.TrimSpace(expectedHash))
+	if expectedHash == "" {
+		expectedHash = strings.ToLower(strings.TrimSpace(utils.ExtractHashFromURL(torrentURL)))
+	}
+	if expectedHash != "" {
+		if _, found := existing[expectedHash]; found {
+			return "", fmt.Errorf("%w: %s", ErrTorrentAlreadyExists, expectedHash)
+		}
+	}
+
+	formData := map[string]string{"urls": torrentURL, "savepath": savePath}
+	if category != "" {
+		formData["category"] = category
+	}
+	resp, err := c.client.R().SetFormData(formData).Post(c.host + "/api/v2/torrents/add")
+	if err != nil {
+		return "", fmt.Errorf("exclusive add torrent request failed: %w", err)
+	}
+	if resp.StatusCode() != 200 {
+		return "", fmt.Errorf("exclusive add torrent failed: status code %d, body: %s", resp.StatusCode(), string(resp.Body()))
+	}
+
+	deadline := time.Now().Add(torrentAddPollTimeout)
+	for {
+		after, snapshotErr := c.getAllTorrents()
+		if snapshotErr == nil {
+			owned := make([]string, 0, 1)
+			for _, torrent := range after {
+				hash := strings.ToLower(strings.TrimSpace(torrent.Hash))
+				if hash == "" || torrent.Category != category {
+					continue
+				}
+				if _, preexisting := existing[hash]; preexisting {
+					continue
+				}
+				if expectedHash != "" && hash != expectedHash {
+					continue
+				}
+				owned = append(owned, hash)
+			}
+			if len(owned) == 1 {
+				return owned[0], nil
+			}
+			if len(owned) > 1 {
+				return "", errors.New("exclusive add ownership is ambiguous")
+			}
+		}
+		if time.Now().After(deadline) {
+			return "", errors.New("exclusive add ownership was not confirmed")
+		}
+		time.Sleep(torrentAddPollInterval)
+	}
+}
+
 // getAllTorrents 获取所有种子
 func (c *qbittorrentClient) getAllTorrents() ([]*TorrentInfo, error) {
 	var torrents []map[string]interface{}
@@ -205,7 +277,7 @@ func (c *qbittorrentClient) GetTorrentInfo(hash string) (*TorrentInfo, error) {
 	}
 
 	if len(torrents) == 0 {
-		return nil, fmt.Errorf("torrent not found")
+		return nil, ErrTorrentNotFound
 	}
 
 	torrent := torrents[0]

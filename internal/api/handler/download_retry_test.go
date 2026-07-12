@@ -58,6 +58,9 @@ func (m *mockQBittorrentClient) AddTorrent(torrentURL, downloadPath, category st
 	}
 	return "new-hash-123", nil
 }
+func (m *mockQBittorrentClient) AddTorrentExclusive(torrentURL, downloadPath, category, expectedHash string) (string, error) {
+	return m.AddTorrent(torrentURL, downloadPath, category)
+}
 
 func (m *mockQBittorrentClient) GetTorrentInfo(hash string) (*downloader.TorrentInfo, error) {
 	return nil, nil

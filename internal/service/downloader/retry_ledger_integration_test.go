@@ -645,6 +645,9 @@ func (q *retryLedgerQBClient) AddTorrent(_ string, _ string, category string) (s
 	q.torrents = append(q.torrents, &TorrentInfo{Hash: q.returnHash, State: StateDownloading, Category: category})
 	return q.returnHash, nil
 }
+func (q *retryLedgerQBClient) AddTorrentExclusive(url, savePath, category, expectedHash string) (string, error) {
+	return q.AddTorrent(url, savePath, category)
+}
 func (q *retryLedgerQBClient) AddTorrentFile(_ string, _ []byte, _ string, category string) (string, error) {
 	return q.AddTorrent("", "", category)
 }

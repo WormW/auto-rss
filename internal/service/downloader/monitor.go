@@ -481,8 +481,18 @@ func (m *DownloadMonitor) checkDownloads() {
 	if m.statusSync != nil {
 		downloading, _, _ := m.downloadRepo.List(0, 10000, "downloading")
 		stalled, _, _ := m.downloadRepo.List(0, 10000, "stalled")
-		m.statusSync.Reconcile(torrents, downloading, stalled)
+		m.statusSync.Reconcile(torrents, withoutReplacementDownloads(downloading), withoutReplacementDownloads(stalled))
 	}
+}
+
+func withoutReplacementDownloads(downloads []model.Download) []model.Download {
+	filtered := downloads[:0]
+	for i := range downloads {
+		if downloads[i].Purpose != model.DownloadPurposeReplacement {
+			filtered = append(filtered, downloads[i])
+		}
+	}
+	return filtered
 }
 
 func shouldRunCompletionHandler(download *model.Download) bool {
