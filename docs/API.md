@@ -194,6 +194,52 @@ ws://localhost:7892/ws/notifications?token=<access_token>
 | `POST` | `/subscriptions/import` | 导入订阅 |
 | `GET` | `/subscriptions/statistics` | 获取订阅统计 |
 
+#### 剧集台账与资源候选
+
+剧集台账以订阅内的相对集数为唯一身份。RSS 或手动采集发现同集不同资源时，不会自动删除或替换已有下载，而是创建待人工处理的资源候选。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/subscriptions/:id/episodes` | 获取剧集台账及每集待处理候选数 |
+| `PUT` | `/subscriptions/:id/episodes/status` | 批量标记为缺失、已下载或忽略 |
+| `GET` | `/subscriptions/:id/episodes/:episode/candidates` | 分页获取某集资源候选 |
+| `POST` | `/subscriptions/:id/episodes/:episode/candidates/:candidate_id/keep` | 保留现有资源 |
+| `POST` | `/subscriptions/:id/episodes/:episode/candidates/:candidate_id/replace` | 异步采用候选资源；`failed` 候选也通过此接口重试 |
+| `POST` | `/subscriptions/:id/episodes/:episode/candidates/:candidate_id/retry-cleanup` | 仅重试已采用候选的旧资源清理 |
+
+批量状态请求最多包含 500 集，`status` 只接受 `missing`、`marked_downloaded` 或 `ignored`：
+
+```json
+{
+  "episodes": [1, 2, 3],
+  "status": "marked_downloaded"
+}
+```
+
+候选列表支持 `limit` 和 `offset`；`limit` 为 1 到 500。替换和清理重试成功受理后返回 HTTP `202`：
+
+```json
+{
+  "code": 0,
+  "message": "Accepted",
+  "data": {
+    "task_id": "task-id",
+    "status": "running"
+  }
+}
+```
+
+客户端通过现有 `/tasks/current` 和 `/tasks/history` 查询进度。人工替换会先下载并暂存候选资源，成功切换后才清理旧任务和旧文件；服务重启后会继续恢复未完成的替换阶段。
+
+以下状态冲突返回 HTTP `409`：
+
+| `error` | 场景 |
+|---------|------|
+| `active_download_must_be_resolved` | 活动下载仍关联剧集时尝试标记为 `missing` |
+| `candidate_state_conflict` | 候选已被处理、同集已有替换进行中，或替换/清理准备阶段发生并发状态变化 |
+
+收到 `409` 后应刷新剧集和候选状态，不应盲目重复提交。候选不属于 URL 指定的订阅或集数时返回 `404`。
+
 常用字段：
 
 | 字段 | 类型 | 说明 |
@@ -610,7 +656,7 @@ RSS 健康 API 已有 handler 级测试和路由级集成验证，覆盖单订�
 GET /api/v1/backup/export?include_sensitive=false
 ```
 
-默认导出订阅、RSS 源、分组、标签、重命名模板、系统配置和通知配置；密码、Token、通知密钥等敏感字段默认替换为 `__AUTO_RSS_REDACTED__`，因此默认备份包不会包含可直接恢复的敏感值。只有显式传入 `include_sensitive=true` 时才会包含敏感字段。
+默认导出订阅、剧集台账、资源候选、RSS 源、分组、标签、重命名模板、系统配置和通知配置；密码、Token、通知密钥等敏感字段默认替换为 `__AUTO_RSS_REDACTED__`，因此默认备份包不会包含可直接恢复的敏感值。只有显式传入 `include_sensitive=true` 时才会包含敏感字段。
 
 导入预览或执行导入：
 
@@ -620,13 +666,17 @@ GET /api/v1/backup/export?include_sensitive=false
   "strategy": "skip",
   "data": {
     "app": "auto-rss",
-    "schema_version": "1.0",
-    "subscriptions": []
+    "schema_version": "1.1",
+    "subscriptions": [],
+    "episodes": [],
+    "episode_candidates": []
   }
 }
 ```
 
 `source_format` 支持 `auto`、`auto-rss`、`auto-bangumi`。`strategy` 支持 `skip`、`merge`、`overwrite`。脱敏字段在导入时始终跳过。
+
+Auto-RSS schema `1.1` 使用稳定的订阅键关联 `episodes` 和 `episode_candidates`，不导出数据库运行时 ID。正在下载的剧集会规范化为可恢复的缺失状态；候选的替换阶段、替换下载 ID、旧下载 ID、暂存路径、回滚路径、最终路径和旧任务 Hash 等运行时状态不会进入备份。导入时也会再次清除这些字段，避免在另一台设备上引用无效任务或本地文件路径。schema `1.0` 仍可导入，但不包含剧集拥有状态和候选。
 
 ---
 
