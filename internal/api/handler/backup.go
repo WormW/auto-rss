@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -106,8 +107,16 @@ func (h *BackupHandler) Import(c *gin.Context) {
 }
 
 func bindBackupImportRequest(c *gin.Context, req *backupImportRequest) bool {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBackupRequestBytes)
-	if err := c.ShouldBindJSON(req); err != nil {
+	if c.Request.ContentLength > maxBackupRequestBytes {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{
+			"code":    http.StatusRequestEntityTooLarge,
+			"message": "请求参数错误: http: request body too large",
+		})
+		return false
+	}
+
+	body, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, maxBackupRequestBytes))
+	if err != nil {
 		status := http.StatusBadRequest
 		var maxBytesError *http.MaxBytesError
 		if errors.As(err, &maxBytesError) {
@@ -116,6 +125,27 @@ func bindBackupImportRequest(c *gin.Context, req *backupImportRequest) bool {
 		c.JSON(status, gin.H{
 			"code":    status,
 			"message": "请求参数错误: " + err.Error(),
+		})
+		return false
+	}
+	if int64(len(body)) > maxBackupRequestBytes {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{
+			"code":    http.StatusRequestEntityTooLarge,
+			"message": "请求参数错误: http: request body too large",
+		})
+		return false
+	}
+	if err := json.Unmarshal(body, req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    http.StatusBadRequest,
+			"message": "请求参数错误: " + err.Error(),
+		})
+		return false
+	}
+	if len(req.Data) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    http.StatusBadRequest,
+			"message": "请求参数错误: data is required",
 		})
 		return false
 	}
