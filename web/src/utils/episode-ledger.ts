@@ -43,6 +43,16 @@ export interface PaginatedItems<T> {
   total: number
 }
 
+export interface EpisodeSelectionResult {
+  selected: number[]
+  rejected: number[]
+}
+
+export interface LookaheadPage<T> {
+  items: T[]
+  hasMore: boolean
+}
+
 const UNKNOWN_VALUE = '未知'
 
 const statusLabels: Record<EpisodeStatus, string> = {
@@ -120,6 +130,37 @@ export const appendUniqueById = <T extends { id: number }>(current: T[], incomin
     }
   }
   return merged
+}
+
+export const appendEpisodeSelection = (
+  current: number[],
+  incoming: number[],
+  limit: number
+): EpisodeSelectionResult => {
+  const normalizedLimit = Math.max(0, Math.floor(limit) || 0)
+  const selected: number[] = []
+  const rejected: number[] = []
+  const seen = new Set<number>()
+
+  for (const episode of [...current, ...incoming]) {
+    if (seen.has(episode)) continue
+    seen.add(episode)
+    if (selected.length < normalizedLimit) selected.push(episode)
+    else rejected.push(episode)
+  }
+
+  return {
+    selected: selected.sort((left, right) => left - right),
+    rejected
+  }
+}
+
+export const takeLookaheadPage = <T>(items: T[], pageSize: number): LookaheadPage<T> => {
+  const normalizedPageSize = Math.max(1, Math.floor(pageSize) || 1)
+  return {
+    items: items.slice(0, normalizedPageSize),
+    hasMore: items.length > normalizedPageSize
+  }
 }
 
 export const normalizedValuesDiffer = (

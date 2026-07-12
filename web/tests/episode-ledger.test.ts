@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import type { EpisodeResourceCandidate, SubscriptionEpisode } from '../src/api/episode.ts'
 import {
+  appendEpisodeSelection,
   appendUniqueById,
   candidateAvailableActions,
   canRestoreMissing,
@@ -15,7 +16,8 @@ import {
   paginateItems,
   planEpisodeStatusUpdate,
   isEpisodeOwned,
-  safeExternalURL
+  safeExternalURL,
+  takeLookaheadPage
 } from '../src/utils/episode-ledger.ts'
 
 const episode = (overrides: Partial<SubscriptionEpisode> = {}): SubscriptionEpisode => ({
@@ -246,4 +248,28 @@ test('字幕组和语言差异使用原始值 trim 后比较', () => {
   assert.equal(normalizedValuesDiffer(' Group ', 'Group'), false)
   assert.equal(normalizedValuesDiffer('', null), false)
   assert.equal(normalizedValuesDiffer('CHS', 'CHT'), true)
+})
+
+test('跨页、单选和手工添加共用最多 500 集的选择上限', () => {
+  const existing = Array.from({ length: 499 }, (_, index) => index + 1)
+  const result = appendEpisodeSelection(existing, [499, 500, 501], 500)
+
+  assert.equal(result.selected.length, 500)
+  assert.equal(result.selected.at(-1), 500)
+  assert.deepEqual(result.rejected, [501])
+
+  const full = appendEpisodeSelection(result.selected, [600], 500)
+  assert.deepEqual(full.selected, result.selected)
+  assert.deepEqual(full.rejected, [600])
+})
+
+test('候选分页使用 101 条 lookahead 且只展示前 100 条', () => {
+  const exact = takeLookaheadPage(Array.from({ length: 100 }, (_, index) => index + 1), 100)
+  assert.equal(exact.items.length, 100)
+  assert.equal(exact.hasMore, false)
+
+  const lookahead = takeLookaheadPage(Array.from({ length: 101 }, (_, index) => index + 1), 100)
+  assert.equal(lookahead.items.length, 100)
+  assert.equal(lookahead.items.at(-1), 100)
+  assert.equal(lookahead.hasMore, true)
 })

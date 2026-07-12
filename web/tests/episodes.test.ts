@@ -77,9 +77,58 @@ test('候选分页和任务轮询在刷新及切换 scope 时保持隔离', () =
 
   assert.match(drawer, /const candidateOffset = ref\(0\)/)
   assert.match(drawer, /const offset = append \? candidateOffset\.value : 0/)
-  assert.match(drawer, /candidateOffset\.value = append \? candidateOffset\.value \+ batch\.length : batch\.length/)
+  assert.match(drawer, /candidateOffset\.value = append[\s\S]*?candidateOffset\.value \+ page\.items\.length[\s\S]*?: page\.items\.length/)
   assert.match(drawer, /watch\(selectedCandidateScopeKey,[\s\S]*?candidateActionLoading\.value = ''/)
   assert.match(drawer, /if \(taskPollScopeKey === selectedCandidateScopeKey\.value\) return/)
-  assert.match(drawer, /if \(!task && selectedCandidate\.value && selectedCandidate\.value\.status !== 'replacing'\)/)
+  assert.match(drawer, /else if \(!task && selectedCandidate\.value && !candidateTaskIsRunning\(selectedCandidate\.value\)\)/)
   assert.match(drawer, /await episodeApi\.keepExisting[\s\S]*?emit\('changed'\)[\s\S]*?await Promise\.all/)
+})
+
+test('批量状态 mutation 在 drawer 和订阅 scope 间隔离', () => {
+  const drawer = readFileSync(
+    new URL('../src/components/EpisodeManagerDrawer.vue', import.meta.url),
+    'utf8'
+  )
+  const applyStatus = drawer.slice(
+    drawer.indexOf('async function applyStatus'),
+    drawer.indexOf('async function openCandidates')
+  )
+
+  assert.match(drawer, /let episodeMutationGeneration = 0/)
+  assert.match(drawer, /function invalidateEpisodeMutation\(\)/)
+  assert.match(drawer, /已选择 \{\{ selectedEpisodeNumbers\.length \}\} \/ \{\{ MAX_EPISODE_SELECTION \}\} 集/)
+  assert.match(applyStatus, /const subscriptionId = props\.subscription\?\.id/)
+  assert.match(applyStatus, /const generation = \+\+episodeMutationGeneration/)
+  assert.match(applyStatus, /episodeApi\.updateStatus\(subscriptionId,/)
+  assert.match(applyStatus, /if \(!episodeMutationIsCurrent\(generation, subscriptionId\)\) return/)
+  assert.match(applyStatus, /catch \(error: any\) \{\s*if \(episodeMutationIsCurrent\(generation, subscriptionId\)\)/)
+  assert.match(applyStatus, /finally \{\s*if \(episodeMutationIsCurrent\(generation, subscriptionId\)\)/)
+})
+
+test('替换任务保留跨页候选关联并容忍 task 快照缺口', () => {
+  const drawer = readFileSync(
+    new URL('../src/components/EpisodeManagerDrawer.vue', import.meta.url),
+    'utf8'
+  )
+  const startReplacement = drawer.slice(
+    drawer.indexOf('async function startReplacement'),
+    drawer.indexOf('async function retryCleanup')
+  )
+  const retryCleanup = drawer.slice(
+    drawer.indexOf('async function retryCleanup'),
+    drawer.indexOf('function candidateScope')
+  )
+
+  assert.doesNotMatch(startReplacement, /loadCandidates\(/)
+  assert.doesNotMatch(retryCleanup, /loadCandidates\(/)
+  assert.match(startReplacement, /updateSelectedCandidateTaskState\('replacing', 'queued'\)/)
+  assert.match(retryCleanup, /updateSelectedCandidateTaskState\('accepted_cleanup_failed', 'cleanup_queued'\)/)
+  assert.match(drawer, /candidatePageOffset:/)
+  assert.match(drawer, /async function refreshCandidatePage/)
+  assert.match(drawer, /const TASK_MISSING_REFRESH_THRESHOLD = 3/)
+  assert.match(drawer, /const TASK_MISSING_FAILURE_THRESHOLD = 6/)
+  assert.match(drawer, /taskMissingPollCount\+\+/)
+  assert.match(drawer, /limit: CANDIDATE_REQUEST_LIMIT/)
+  assert.match(drawer, /const CANDIDATE_REQUEST_LIMIT = CANDIDATE_PAGE_SIZE \+ 1/)
+  assert.match(drawer, /<n-button :disabled="Boolean\(candidateActionLoading\)" @click="closeCandidateModal">关闭<\/n-button>/)
 })

@@ -99,7 +99,9 @@
           >
             选择当前页
           </n-checkbox>
-          <span class="selection-count numeric">已选择 {{ selectedEpisodeNumbers.length }} 集</span>
+          <span class="selection-count numeric">
+            已选择 {{ selectedEpisodeNumbers.length }} / {{ MAX_EPISODE_SELECTION }} 集
+          </span>
           <div class="batch-actions">
             <n-button
               size="small"
@@ -329,7 +331,7 @@
 
     <template v-if="selectedCandidate && !candidateLoading && !candidateError" #footer>
       <div class="candidate-actions">
-        <n-button @click="closeCandidateModal">关闭</n-button>
+        <n-button :disabled="Boolean(candidateActionLoading)" @click="closeCandidateModal">关闭</n-button>
         <n-button
           v-if="availableCandidateActions.includes('keep')"
           :loading="candidateActionLoading === 'keep'"
@@ -414,6 +416,7 @@ import {
   type Task
 } from '@/api'
 import {
+  appendEpisodeSelection,
   appendUniqueById,
   candidateAvailableActions,
   continuousOwnedEpisode,
@@ -424,6 +427,7 @@ import {
   paginateItems,
   planEpisodeStatusUpdate,
   safeExternalURL,
+  takeLookaheadPage,
   type EpisodeFilter
 } from '@/utils/episode-ledger'
 
@@ -448,8 +452,19 @@ interface ComparisonRow {
   candidateTitle?: string
 }
 
+interface CandidateScope {
+  subscriptionId: number
+  episode: number
+  candidateId: number
+  candidatePageOffset: number
+}
+
 const EPISODE_PAGE_SIZE = 120
+const MAX_EPISODE_SELECTION = 500
 const CANDIDATE_PAGE_SIZE = 100
+const CANDIDATE_REQUEST_LIMIT = CANDIDATE_PAGE_SIZE + 1
+const TASK_MISSING_REFRESH_THRESHOLD = 3
+const TASK_MISSING_FAILURE_THRESHOLD = 6
 
 const props = defineProps<{
   show: boolean
@@ -488,8 +503,10 @@ const candidateActionLoading = ref<'keep' | 'replace' | 'cleanup' | ''>('')
 const replacementTask = ref<Task | null>(null)
 const activeTaskId = ref('')
 let episodeRequestGeneration = 0
+let episodeMutationGeneration = 0
 let candidateRequestGeneration = 0
 let taskPollGeneration = 0
+let taskMissingPollCount = 0
 let taskPollTimer: ReturnType<typeof setTimeout> | null = null
 let taskPollScopeKey = ''
 
@@ -649,6 +666,7 @@ watch(
   ([show, subscriptionId], previous) => {
     if (!show || !subscriptionId) {
       invalidateEpisodeRequests()
+      invalidateEpisodeMutation()
       closeCandidateModal()
       return
     }
@@ -688,11 +706,13 @@ watch(() => selectedCandidate.value?.status, status => {
 
 onBeforeUnmount(() => {
   invalidateEpisodeRequests()
+  invalidateEpisodeMutation()
   closeCandidateModal()
 })
 
 function resetDrawerState() {
   invalidateEpisodeRequests()
+  invalidateEpisodeMutation()
   episodes.value = []
   loadError.value = ''
   operationNotice.value = null
@@ -707,6 +727,7 @@ function resetDrawerState() {
 function handleDrawerVisibility(value: boolean) {
   if (!value) {
     invalidateEpisodeRequests()
+    invalidateEpisodeMutation()
     closeCandidateModal()
   }
   emit('update:show', value)
@@ -748,6 +769,16 @@ function episodeRequestIsCurrent(generation: number, subscriptionId: number) {
     props.show && props.subscription?.id === subscriptionId
 }
 
+function invalidateEpisodeMutation() {
+  episodeMutationGeneration++
+  updatingStatus.value = ''
+}
+
+function episodeMutationIsCurrent(generation: number, subscriptionId: number) {
+  return generation === episodeMutationGeneration &&
+    props.show && props.subscription?.id === subscriptionId
+}
+
 function statusCount(status: EpisodeStatus) {
   return episodes.value.filter(item => item.status === status).length
 }
@@ -764,14 +795,22 @@ function isSelected(episodeNumber: number) {
   return selectedEpisodeSet.value.has(episodeNumber)
 }
 
-function setEpisodeSelected(episodeNumber: number, checked: boolean) {
+function setEpisodeSelected(episodeNumber: number, checked: boolean): boolean {
   if (checked) {
-    if (!isSelected(episodeNumber)) {
-      selectedEpisodeNumbers.value = [...selectedEpisodeNumbers.value, episodeNumber].sort((a, b) => a - b)
+    const selection = appendEpisodeSelection(
+      selectedEpisodeNumbers.value,
+      [episodeNumber],
+      MAX_EPISODE_SELECTION
+    )
+    selectedEpisodeNumbers.value = selection.selected
+    if (selection.rejected.length > 0) {
+      showSelectionLimitWarning(selection.rejected.length)
+      return false
     }
   } else {
     selectedEpisodeNumbers.value = selectedEpisodeNumbers.value.filter(number => number !== episodeNumber)
   }
+  return true
 }
 
 function toggleEpisode(episodeNumber: number) {
@@ -781,12 +820,22 @@ function toggleEpisode(episodeNumber: number) {
 function toggleCurrentPage(checked: boolean) {
   const visible = new Set(currentPageEpisodeNumbers.value)
   if (checked) {
-    selectedEpisodeNumbers.value = [...new Set([
-      ...selectedEpisodeNumbers.value,
-      ...currentPageEpisodeNumbers.value
-    ])].sort((a, b) => a - b)
+    const selection = appendEpisodeSelection(
+      selectedEpisodeNumbers.value,
+      currentPageEpisodeNumbers.value,
+      MAX_EPISODE_SELECTION
+    )
+    selectedEpisodeNumbers.value = selection.selected
+    if (selection.rejected.length > 0) showSelectionLimitWarning(selection.rejected.length)
   } else {
     selectedEpisodeNumbers.value = selectedEpisodeNumbers.value.filter(number => !visible.has(number))
+  }
+}
+
+function showSelectionLimitWarning(rejectedCount: number) {
+  operationNotice.value = {
+    type: 'warning',
+    text: `单次最多选择 ${MAX_EPISODE_SELECTION} 集，已保留前 ${MAX_EPISODE_SELECTION} 集，另有 ${rejectedCount} 集未选择。`
   }
 }
 
@@ -796,10 +845,10 @@ function addManualEpisode() {
     operationNotice.value = { type: 'warning', text: '集数必须是 1 到 10000 之间的整数。' }
     return
   }
+  if (!setEpisodeSelected(value, true)) return
   if (!episodeNumberSet.value.has(value) && !localEpisodeSet.value.has(value)) {
     localEpisodeNumbers.value = [...localEpisodeNumbers.value, value].sort((a, b) => a - b)
   }
-  setEpisodeSelected(value, true)
   activeFilter.value = 'all'
   const visibleIndex = visibleEpisodes.value.findIndex(item => item.episode === value)
   episodePage.value = visibleIndex >= 0 ? Math.floor(visibleIndex / EPISODE_PAGE_SIZE) + 1 : 1
@@ -808,7 +857,12 @@ function addManualEpisode() {
 }
 
 async function applyStatus(status: EditableEpisodeStatus) {
-  if (!props.subscription || updatingStatus.value) return
+  const subscriptionId = props.subscription?.id
+  if (!subscriptionId || updatingStatus.value) return
+  if (selectedEpisodeNumbers.value.length > MAX_EPISODE_SELECTION) {
+    showSelectionLimitWarning(selectedEpisodeNumbers.value.length - MAX_EPISODE_SELECTION)
+    return
+  }
   const plan = planEpisodeStatusUpdate(episodes.value, selectedEpisodeNumbers.value, status)
   if (plan.eligible.length === 0) {
     if (plan.blocked.length > 0) {
@@ -822,10 +876,12 @@ async function applyStatus(status: EditableEpisodeStatus) {
     return
   }
 
+  const generation = ++episodeMutationGeneration
   updatingStatus.value = status
   operationNotice.value = null
   try {
-    await episodeApi.updateStatus(props.subscription.id, plan.eligible, status)
+    await episodeApi.updateStatus(subscriptionId, plan.eligible, status)
+    if (!episodeMutationIsCurrent(generation, subscriptionId)) return
     selectedEpisodeNumbers.value = plan.blocked
     const skipped = plan.blocked.length + plan.unchanged.length
     operationNotice.value = skipped > 0
@@ -837,9 +893,11 @@ async function applyStatus(status: EditableEpisodeStatus) {
     emit('changed')
     await loadEpisodes()
   } catch (error: any) {
-    operationNotice.value = { type: 'error', text: apiErrorMessage(error, '批量更新失败') }
+    if (episodeMutationIsCurrent(generation, subscriptionId)) {
+      operationNotice.value = { type: 'error', text: apiErrorMessage(error, '批量更新失败') }
+    }
   } finally {
-    updatingStatus.value = ''
+    if (episodeMutationIsCurrent(generation, subscriptionId)) updatingStatus.value = ''
   }
 }
 
@@ -865,14 +923,16 @@ async function loadCandidates(episodeNumber: number, append: boolean) {
   }
   try {
     const response = await episodeApi.listCandidates(subscriptionId, episodeNumber, {
-      limit: CANDIDATE_PAGE_SIZE,
+      limit: CANDIDATE_REQUEST_LIMIT,
       offset
     })
     if (!candidateRequestIsCurrent(generation, subscriptionId, episodeNumber)) return
-    const batch = response.data || []
-    candidates.value = append ? appendUniqueById(candidates.value, batch) : batch
-    candidateOffset.value = append ? candidateOffset.value + batch.length : batch.length
-    candidateHasMore.value = batch.length === CANDIDATE_PAGE_SIZE
+    const page = takeLookaheadPage(response.data || [], CANDIDATE_PAGE_SIZE)
+    candidates.value = append ? appendUniqueById(candidates.value, page.items) : page.items
+    candidateOffset.value = append
+      ? candidateOffset.value + page.items.length
+      : page.items.length
+    candidateHasMore.value = page.hasMore
     const actionable = candidates.value.find(candidate => candidateAvailableActions(candidate.status).length > 0)
     const selectionExists = candidates.value.some(candidate => candidate.id === selectedCandidateId.value)
     if (!selectionExists) {
@@ -990,9 +1050,8 @@ async function startReplacement() {
       message: '任务已启动'
     }
     message.success('替换任务已启动')
-    await loadCandidates(scope.episode, false)
-    if (!candidateScopeIsCurrent(scope)) return false
-    startTaskPolling()
+    updateSelectedCandidateTaskState('replacing', 'queued')
+    startTaskPolling(scope)
     return true
   } catch (error: any) {
     if (candidateScopeIsCurrent(scope)) message.error(apiErrorMessage(error, '启动替换任务失败'))
@@ -1020,9 +1079,8 @@ async function retryCleanup() {
       message: '清理任务已启动'
     }
     message.success('清理任务已启动')
-    await loadCandidates(scope.episode, false)
-    if (!candidateScopeIsCurrent(scope)) return
-    startTaskPolling()
+    updateSelectedCandidateTaskState('accepted_cleanup_failed', 'cleanup_queued')
+    startTaskPolling(scope)
   } catch (error: any) {
     if (candidateScopeIsCurrent(scope)) message.error(apiErrorMessage(error, '启动清理重试失败'))
   } finally {
@@ -1030,22 +1088,59 @@ async function retryCleanup() {
   }
 }
 
-function candidateScope() {
-  if (!props.subscription || !selectedEpisode.value || !selectedCandidate.value) return null
-  return {
-    subscriptionId: props.subscription.id,
-    episode: selectedEpisode.value.episode,
-    candidateId: selectedCandidate.value.id
+function updateSelectedCandidateTaskState(status: CandidateStatus, stage: ReplacementStage) {
+  const candidateId = selectedCandidateId.value
+  candidates.value = candidates.value.map(candidate => candidate.id === candidateId
+    ? { ...candidate, status, replacement_stage: stage }
+    : candidate)
+}
+
+async function refreshCandidatePage(scope: CandidateScope): Promise<boolean> {
+  const generation = ++candidateRequestGeneration
+  candidateLoading.value = false
+  candidateLoadingMore.value = false
+  try {
+    const response = await episodeApi.listCandidates(scope.subscriptionId, scope.episode, {
+      limit: CANDIDATE_REQUEST_LIMIT,
+      offset: scope.candidatePageOffset
+    })
+    if (!candidateRequestIsCurrent(generation, scope.subscriptionId, scope.episode) ||
+      !candidateScopeIsCurrent(scope)) return false
+    const page = takeLookaheadPage(response.data || [], CANDIDATE_PAGE_SIZE)
+    candidates.value = appendUniqueById(candidates.value, page.items)
+    if (scope.candidatePageOffset + page.items.length >= candidateOffset.value) {
+      candidateOffset.value = Math.max(
+        candidateOffset.value,
+        scope.candidatePageOffset + page.items.length
+      )
+      candidateHasMore.value = page.hasMore
+    }
+    return true
+  } catch (error: any) {
+    if (candidateScopeIsCurrent(scope)) {
+      message.error(apiErrorMessage(error, '刷新资源候选状态失败'))
+    }
+    return false
   }
 }
 
-function candidateScopeIsCurrent(scope: NonNullable<ReturnType<typeof candidateScope>>) {
+function candidateScope(): CandidateScope | null {
+  if (!props.subscription || !selectedEpisode.value || !selectedCandidate.value) return null
+  const candidateIndex = candidates.value.findIndex(candidate => candidate.id === selectedCandidate.value?.id)
+  return {
+    subscriptionId: props.subscription.id,
+    episode: selectedEpisode.value.episode,
+    candidateId: selectedCandidate.value.id,
+    candidatePageOffset: Math.floor(Math.max(0, candidateIndex) / CANDIDATE_PAGE_SIZE) * CANDIDATE_PAGE_SIZE
+  }
+}
+
+function candidateScopeIsCurrent(scope: CandidateScope) {
   return props.show && candidateModalOpen.value && props.subscription?.id === scope.subscriptionId &&
     selectedEpisode.value?.episode === scope.episode && selectedCandidateId.value === scope.candidateId
 }
 
-function startTaskPolling() {
-  const scope = candidateScope()
+function startTaskPolling(scope: CandidateScope | null = candidateScope()) {
   if (!scope) return
   if (taskPollScopeKey === selectedCandidateScopeKey.value) return
   stopTaskPolling()
@@ -1057,6 +1152,7 @@ function startTaskPolling() {
 function stopTaskPolling() {
   taskPollGeneration++
   taskPollScopeKey = ''
+  taskMissingPollCount = 0
   if (taskPollTimer) {
     clearTimeout(taskPollTimer)
     taskPollTimer = null
@@ -1065,7 +1161,7 @@ function stopTaskPolling() {
 
 async function pollReplacementTask(
   generation: number,
-  scope: NonNullable<ReturnType<typeof candidateScope>>
+  scope: CandidateScope
 ) {
   if (!taskPollIsCurrent(generation, scope)) return
   try {
@@ -1084,20 +1180,24 @@ async function pollReplacementTask(
         : null
 
     if (task && !activeTaskId.value) activeTaskId.value = task.id
-    if (task) replacementTask.value = task
+    if (task) {
+      taskMissingPollCount = 0
+      replacementTask.value = task
+    }
 
     if (task && ['completed', 'failed', 'cancelled'].includes(task.status)) {
-      stopTaskPolling()
-      if (task.status === 'completed') message.success('资源候选任务已完成')
-      else if (task.status === 'failed') message.error(task.error || '资源候选任务失败')
-      else message.warning('资源候选任务已取消')
-      emit('changed')
-      await loadEpisodes()
-      await loadCandidates(scope.episode, false)
+      await finishTaskPolling(task, scope)
       return
     }
 
-    if (!task && selectedCandidate.value && selectedCandidate.value.status !== 'replacing') {
+    if (!task && taskId) {
+      taskMissingPollCount++
+      if (taskMissingPollCount === TASK_MISSING_REFRESH_THRESHOLD ||
+        taskMissingPollCount >= TASK_MISSING_FAILURE_THRESHOLD) {
+        const handled = await reconcileMissingTask(generation, scope)
+        if (handled) return
+      }
+    } else if (!task && selectedCandidate.value && !candidateTaskIsRunning(selectedCandidate.value)) {
       replacementTask.value = null
       activeTaskId.value = ''
       stopTaskPolling()
@@ -1118,9 +1218,67 @@ async function pollReplacementTask(
 
 function taskPollIsCurrent(
   generation: number,
-  scope: NonNullable<ReturnType<typeof candidateScope>>
+  scope: CandidateScope
 ) {
   return generation === taskPollGeneration && candidateScopeIsCurrent(scope)
+}
+
+async function finishTaskPolling(task: Task, scope: CandidateScope) {
+  stopTaskPolling()
+  if (task.status === 'completed') message.success('资源候选任务已完成')
+  else if (task.status === 'failed') message.error(task.error || '资源候选任务失败')
+  else message.warning('资源候选任务已取消')
+  emit('changed')
+  await Promise.all([loadEpisodes(), refreshCandidatePage(scope)])
+}
+
+async function reconcileMissingTask(generation: number, scope: CandidateScope): Promise<boolean> {
+  await refreshCandidatePage(scope)
+  if (!taskPollIsCurrent(generation, scope)) return true
+
+  const candidate = selectedCandidate.value
+  if (candidate && !candidateTaskIsRunning(candidate)) {
+    const completed = candidate.status === 'accepted'
+    if (replacementTask.value) {
+      replacementTask.value = {
+        ...replacementTask.value,
+        status: completed ? 'completed' : 'failed',
+        message: completed ? '候选状态已确认完成' : '候选状态已确认终止',
+        error: completed ? undefined : candidate.failure_reason || '资源候选任务未完成'
+      }
+    }
+    stopTaskPolling()
+    if (completed) message.success('资源候选任务已完成')
+    else message.error(candidate.failure_reason || '资源候选任务未完成')
+    emit('changed')
+    await loadEpisodes()
+    return true
+  }
+
+  if (taskMissingPollCount >= TASK_MISSING_FAILURE_THRESHOLD) {
+    if (replacementTask.value) {
+      replacementTask.value = {
+        ...replacementTask.value,
+        status: 'failed',
+        message: '无法确认任务状态',
+        error: '任务状态连续缺失，请稍后重新打开候选详情确认。'
+      }
+    }
+    stopTaskPolling()
+    message.error('连续多次无法确认资源候选任务状态，请稍后重试')
+    emit('changed')
+    await loadEpisodes()
+    return true
+  }
+
+  return false
+}
+
+function candidateTaskIsRunning(candidate: EpisodeResourceCandidate): boolean {
+  return candidate.status === 'replacing' || (
+    candidate.status === 'accepted_cleanup_failed' &&
+    ['cleanup_queued', 'cleanup_active', 'cleaning'].includes(candidate.replacement_stage)
+  )
 }
 
 function candidateStatusLabel(status: CandidateStatus) {
