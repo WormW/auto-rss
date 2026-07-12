@@ -74,8 +74,9 @@ type Subscription struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 
-	Downloads []Download `json:"downloads,omitempty" gorm:"foreignKey:SubscriptionID"`
-	RSSSource *RSSSource `json:"rss_source,omitempty" gorm:"foreignKey:RSSSourceID"`
+	Downloads []Download         `json:"downloads,omitempty" gorm:"foreignKey:SubscriptionID"`
+	Feeds     []SubscriptionFeed `json:"feeds,omitempty" gorm:"foreignKey:SubscriptionID"`
+	RSSSource *RSSSource         `json:"rss_source,omitempty" gorm:"foreignKey:RSSSourceID"`
 }
 
 // IsCalendarOnly reports whether the subscription is only used for calendar

@@ -52,6 +52,10 @@ type EpisodeResource struct {
 type EpisodeResourceCandidate struct {
 	ID                    uint       `json:"id" gorm:"primaryKey"`
 	SubscriptionEpisodeID uint       `json:"subscription_episode_id" gorm:"uniqueIndex:idx_episode_candidate_resource,priority:1;index;not null"`
+	SubscriptionFeedID    *uint      `json:"subscription_feed_id" gorm:"index;constraint:OnDelete:SET NULL"`
+	SourceFeedName        string     `json:"source_feed_name" gorm:"size:100"`
+	SourceFansub          string     `json:"source_fansub" gorm:"size:100"`
+	SourceEpisodeOffset   int        `json:"source_episode_offset"`
 	ResourceKey           string     `json:"resource_key" gorm:"uniqueIndex:idx_episode_candidate_resource,priority:2;size:512"`
 	TorrentHash           string     `json:"torrent_hash" gorm:"size:128"`
 	TorrentURL            string     `json:"torrent_url" gorm:"type:text"`

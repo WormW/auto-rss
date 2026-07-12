@@ -18,6 +18,7 @@ const (
 type Download struct {
 	ID                        uint       `json:"id" gorm:"primaryKey"`
 	SubscriptionID            uint       `json:"subscription_id" gorm:"index:idx_sub_status,priority:1"`
+	SubscriptionFeedID        *uint      `json:"subscription_feed_id" gorm:"index;constraint:OnDelete:SET NULL"`
 	Title                     string     `json:"title" gorm:"not null"`
 	Episode                   int        `json:"episode"`
 	Fansub                    string     `json:"fansub" gorm:"index"`                                      // 字幕组名称

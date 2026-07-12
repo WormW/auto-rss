@@ -535,3 +535,108 @@ func TestBackfillSubscriptionEpisodesRollsBackAllChangesOnFailure(t *testing.T) 
 		t.Fatal("RSS baseline marker should be rolled back")
 	}
 }
+
+func TestRunMigrationsBackfillsDefaultSubscriptionFeed(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("Failed to connect to test database: %v", err)
+	}
+	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}); err != nil {
+		t.Fatalf("Failed to migrate legacy schema: %v", err)
+	}
+
+	waterline := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	subscription := model.Subscription{
+		Name:               "Offset Anime",
+		RssURL:             " https://EXAMPLE.test:443/feed?b=2&a=1 ",
+		Fansub:             "Group A",
+		EpisodeOffset:      100,
+		LastRSSPubTime:     &waterline,
+		RSSBaselinePending: true,
+		Status:             "active",
+		Enabled:            true,
+	}
+	if err := db.Create(&subscription).Error; err != nil {
+		t.Fatalf("Failed to create subscription: %v", err)
+	}
+
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+
+	var feeds []model.SubscriptionFeed
+	if err := db.Find(&feeds).Error; err != nil {
+		t.Fatalf("Failed to load subscription feeds: %v", err)
+	}
+	if len(feeds) != 1 {
+		t.Fatalf("feed count = %d, want 1", len(feeds))
+	}
+	feed := feeds[0]
+	if feed.SubscriptionID != subscription.ID || feed.Name != "Group A" || feed.Fansub != "Group A" {
+		t.Fatalf("unexpected feed ownership: %#v", feed)
+	}
+	if feed.EpisodeOffset != 100 {
+		t.Fatalf("episode offset = %d, want 100", feed.EpisodeOffset)
+	}
+	if feed.LastRSSPubTime == nil || !feed.LastRSSPubTime.Equal(waterline) {
+		t.Fatalf("waterline = %v, want %v", feed.LastRSSPubTime, waterline)
+	}
+	if !feed.BaselinePending {
+		t.Fatal("backfilled feed must inherit the subscription baseline marker")
+	}
+	if feed.RSSURLNormalized != "https://example.test/feed?a=1&b=2" {
+		t.Fatalf("normalized URL = %q", feed.RSSURLNormalized)
+	}
+}
+
+func TestRunMigrationsSubscriptionFeedBackfillIsIdempotent(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("Failed to connect to test database: %v", err)
+	}
+	if err := db.AutoMigrate(&model.Subscription{}, &model.Download{}); err != nil {
+		t.Fatalf("Failed to migrate legacy schema: %v", err)
+	}
+	subscription := model.Subscription{Name: "Anime", RssURL: "https://example.test/rss", Enabled: true}
+	if err := db.Create(&subscription).Error; err != nil {
+		t.Fatalf("Failed to create subscription: %v", err)
+	}
+
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("first RunMigrations failed: %v", err)
+	}
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("second RunMigrations failed: %v", err)
+	}
+
+	var count int64
+	if err := db.Model(&model.SubscriptionFeed{}).Where("subscription_id = ?", subscription.ID).Count(&count).Error; err != nil {
+		t.Fatalf("Failed to count subscription feeds: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("feed count = %d, want 1", count)
+	}
+}
+
+func TestRunMigrationsAddsNullableFeedReferences(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("Failed to connect to test database: %v", err)
+	}
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+
+	if !db.Migrator().HasColumn(&model.Download{}, "subscription_feed_id") {
+		t.Fatal("downloads.subscription_feed_id is missing")
+	}
+	if !db.Migrator().HasColumn(&model.EpisodeResourceCandidate{}, "subscription_feed_id") {
+		t.Fatal("episode_resource_candidates.subscription_feed_id is missing")
+	}
+	if !db.Migrator().HasColumn(&model.EpisodeResourceCandidate{}, "source_feed_name") {
+		t.Fatal("episode_resource_candidates.source_feed_name is missing")
+	}
+	if !db.Migrator().HasTable(&model.SubscriptionFeedSeenItem{}) {
+		t.Fatal("subscription_feed_seen_items table is missing")
+	}
+}

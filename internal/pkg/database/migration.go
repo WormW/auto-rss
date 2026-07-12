@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
+	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/go-gormigrate/gormigrate/v2"
 	"gorm.io/gorm"
 )
@@ -183,6 +184,26 @@ func RunMigrations(db *gorm.DB) error {
 			},
 		},
 		{
+			ID: "202607110002", // add per-subscription RSS feeds
+			Migrate: func(tx *gorm.DB) error {
+				if err := tx.AutoMigrate(
+					&model.SubscriptionFeed{},
+					&model.SubscriptionFeedSeenItem{},
+					&model.Download{},
+					&model.EpisodeResourceCandidate{},
+				); err != nil {
+					return err
+				}
+				return backfillSubscriptionFeeds(tx)
+			},
+			Rollback: func(tx *gorm.DB) error {
+				return tx.Migrator().DropTable(
+					&model.SubscriptionFeedSeenItem{},
+					&model.SubscriptionFeed{},
+				)
+			},
+		},
+		{
 			ID: "202607120001", // add replacement recovery snapshots
 			Migrate: func(tx *gorm.DB) error {
 				if err := tx.AutoMigrate(&model.EpisodeResourceCandidate{}); err != nil {
@@ -229,6 +250,50 @@ func RunMigrations(db *gorm.DB) error {
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
 	return m.Migrate()
+}
+
+func backfillSubscriptionFeeds(db *gorm.DB) error {
+	var subscriptions []model.Subscription
+	if err := db.Where("rss_url <> ''").Order("id ASC").Find(&subscriptions).Error; err != nil {
+		return err
+	}
+
+	for _, subscription := range subscriptions {
+		normalizedURL := utils.NormalizeFeedURL(subscription.RssURL)
+		if normalizedURL == "" || subscription.IsCalendarOnly() {
+			continue
+		}
+		episodeOffset := subscription.EpisodeOffset
+		if episodeOffset < 0 {
+			episodeOffset = 0
+		}
+		feed := model.SubscriptionFeed{
+			SubscriptionID:   subscription.ID,
+			Name:             fallbackFeedName(subscription.Fansub),
+			Fansub:           subscription.Fansub,
+			RSSURL:           strings.TrimSpace(subscription.RssURL),
+			RSSURLNormalized: normalizedURL,
+			EpisodeOffset:    episodeOffset,
+			Enabled:          subscription.Enabled && subscription.Status == "active",
+			LastRSSPubTime:   subscription.LastRSSPubTime,
+			BaselinePending:  subscription.RSSBaselinePending,
+		}
+		if err := db.Where(
+			"subscription_id = ? AND rss_url_normalized = ?",
+			feed.SubscriptionID,
+			feed.RSSURLNormalized,
+		).FirstOrCreate(&feed).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func fallbackFeedName(fansub string) string {
+	if name := strings.TrimSpace(fansub); name != "" {
+		return name
+	}
+	return "默认 RSS"
 }
 
 func backfillSubscriptionEpisodes(db *gorm.DB) error {
