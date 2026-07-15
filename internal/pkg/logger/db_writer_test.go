@@ -1,12 +1,16 @@
 package logger
 
 import (
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/WormW/auto-rss/internal/model"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 func TestDBWriterReserveCleanupHonorsInterval(t *testing.T) {
@@ -36,4 +40,58 @@ func TestDBWriterReserveCleanupAllowsOneConcurrentCaller(t *testing.T) {
 	wg.Wait()
 
 	require.EqualValues(t, 1, winners.Load())
+}
+
+func TestDBWriterWriteReservesCleanupAfterSuccessfulInsert(t *testing.T) {
+	db := newDBWriterTestDB(t)
+	writer := NewDBWriter(db)
+	writer.cleanupInterval = time.Hour
+	payload := []byte(`{"level":"info","msg":"HTTP Request","caller":"internal/api/middleware/logger.go","path":"/api/v1/subscriptions"}`)
+
+	n, err := writer.Write(payload)
+
+	require.NoError(t, err)
+	require.Equal(t, len(payload), n)
+	require.Eventually(t, func() bool {
+		var count int64
+		if err := db.Model(&model.Log{}).Count(&count).Error; err != nil {
+			return false
+		}
+		return count == 1 && cleanupReserved(writer)
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestDBWriterWriteDoesNotReserveCleanupWhenInsertFails(t *testing.T) {
+	db := newDBWriterTestDB(t)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	writer := NewDBWriter(db)
+	writer.cleanupInterval = time.Hour
+	payload := []byte(`{"level":"info","msg":"HTTP Request","caller":"internal/api/middleware/logger.go","path":"/api/v1/subscriptions"}`)
+
+	n, err := writer.Write(payload)
+
+	require.NoError(t, err)
+	require.Equal(t, len(payload), n)
+	require.Never(t, func() bool {
+		return cleanupReserved(writer)
+	}, 100*time.Millisecond, 10*time.Millisecond)
+}
+
+func newDBWriterTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "logs.db")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Log{}))
+	return db
+}
+
+func cleanupReserved(writer *DBWriter) bool {
+	writer.cleanupMu.Lock()
+	defer writer.cleanupMu.Unlock()
+
+	return !writer.lastCleanup.IsZero()
 }
