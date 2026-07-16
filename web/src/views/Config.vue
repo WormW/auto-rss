@@ -452,15 +452,12 @@
             <div v-if="recoveryResult.orphan_files.length" class="recovery-section">
               <div class="recovery-section-title">未匹配文件</div>
               <div class="recovery-orphan-list">
-                <code
-                  v-for="file in recoveryResult.orphan_files.slice(0, 20)"
-                  :key="file"
-                >
+                <code v-for="file in recoveryOrphanPreview.files" :key="file">
                   {{ file }}
                 </code>
               </div>
-              <div v-if="recoveryResult.orphan_files.length > 20" class="recovery-more">
-                另有 {{ recoveryResult.orphan_files.length - 20 }} 个未匹配文件
+              <div v-if="recoveryOrphanPreview.omitted" class="recovery-more">
+                另有 {{ recoveryOrphanPreview.omitted }} 个未匹配文件
               </div>
             </div>
           </div>
@@ -511,6 +508,17 @@ import {
   type Subscription,
   type SmartFetchConfig
 } from '@/api'
+import {
+  countRecoveryChanges,
+  countRecoveryMissing,
+  episodeChanged,
+  getRecoveryAppliedWarning,
+  getRecoveryEmptyDescription,
+  getRecoveryOrphanPreview,
+  hasNoRecoverySubscriptionMatches,
+  hasRecoveryChanges,
+  latestChanged
+} from '@/utils/recovery-preview'
 
 const message = useMessage()
 
@@ -601,31 +609,23 @@ const recoveryScopeLabel = computed(() => {
 })
 
 const recoveryChangeCount = computed(() => {
-  if (!recoveryResult.value) return 0
-  return recoveryResult.value.subscriptions.reduce((total, subscription) => {
-    return total +
-      subscription.downloads_to_update.length +
-      subscription.downloads_to_create.length +
-      (episodeChanged(subscription) ? 1 : 0) +
-      (latestChanged(subscription) ? 1 : 0)
-  }, 0)
+  return countRecoveryChanges(recoveryResult.value)
 })
 
 const recoveryMissingCount = computed(() => {
-  if (!recoveryResult.value) return 0
-  return recoveryResult.value.subscriptions.reduce((total, subscription) => {
-    return total + subscription.downloads_missing.length
-  }, 0)
+  return countRecoveryMissing(recoveryResult.value)
 })
 
 const recoveryResultHasNoSubscriptionMatches = computed(() => {
-  if (!recoveryResult.value) return false
-  return recoveryResult.value.subscriptions.length === 0
+  return hasNoRecoverySubscriptionMatches(recoveryResult.value)
 })
 
 const recoveryEmptyDescription = computed(() => {
-  const scope = selectedRecoverySubscriptionId.value ? recoveryScopeLabel.value : '全部订阅'
-  return `${scope}没有匹配到可对账的订阅文件`
+  return getRecoveryEmptyDescription(selectedRecoverySubscriptionId.value, recoveryScopeLabel.value)
+})
+
+const recoveryOrphanPreview = computed(() => {
+  return getRecoveryOrphanPreview(recoveryResult.value)
 })
 
 // 加载重命名模板预设
@@ -1036,8 +1036,9 @@ const runRecoveryPreview = async () => {
     const subscriptionId = selectedRecoverySubscriptionId.value || undefined
     const response: any = await recoveryApi.scanDryRun(subscriptionId)
     recoveryResult.value = response.data as RecoveryScanResult
-    if (recoveryResult.value?.applied) {
-      message.warning('恢复扫描返回已应用状态，请检查服务端配置')
+    const appliedWarning = getRecoveryAppliedWarning(recoveryResult.value)
+    if (appliedWarning) {
+      message.warning(appliedWarning)
       return
     }
     message.success('恢复扫描预览已生成')
@@ -1051,22 +1052,6 @@ const runRecoveryPreview = async () => {
 
 const handleRecoveryScopeChange = () => {
   recoveryResult.value = null
-}
-
-const episodeChanged = (subscription: RecoverySubscriptionScanResult) => {
-  return subscription.current_episode_old !== subscription.current_episode_new
-}
-
-const latestChanged = (subscription: RecoverySubscriptionScanResult) => {
-  return subscription.latest_episode_old !== subscription.latest_episode_new
-}
-
-const hasRecoveryChanges = (subscription: RecoverySubscriptionScanResult) => {
-  return episodeChanged(subscription) ||
-    latestChanged(subscription) ||
-    subscription.downloads_to_update.length > 0 ||
-    subscription.downloads_to_create.length > 0 ||
-    subscription.downloads_missing.length > 0
 }
 
 const padNumber = (value: number) => String(value).padStart(2, '0')
