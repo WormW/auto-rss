@@ -560,9 +560,9 @@ func TestSetup_RoutesRecoveryScanDryRunWithIsolatedFixtures(t *testing.T) {
 	}
 
 	var response struct {
-		Code    int                 `json:"code"`
-		Message string              `json:"message"`
-		Data    recovery.ScanResult `json:"data"`
+		Code    int                         `json:"code"`
+		Message string                      `json:"message"`
+		Data    handler.RecoveryScanPreview `json:"data"`
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("failed to parse recovery dry-run response: %v", err)
@@ -575,11 +575,14 @@ func TestSetup_RoutesRecoveryScanDryRunWithIsolatedFixtures(t *testing.T) {
 	if result.Applied || result.BackupPath != "" {
 		t.Fatalf("expected dry-run route not to apply or create a backup, got applied=%t backup=%q", result.Applied, result.BackupPath)
 	}
-	if result.ScannedFiles != 3 || result.MatchedFiles != 2 || len(result.OrphanFiles) != 1 {
-		t.Fatalf("unexpected recovery scan counts: scanned=%d matched=%d orphan=%d", result.ScannedFiles, result.MatchedFiles, len(result.OrphanFiles))
+	if !result.DryRun || !result.PreviewOnly {
+		t.Fatalf("expected dry-run preview flags, got dry_run=%t preview_only=%t", result.DryRun, result.PreviewOnly)
 	}
-	if len(result.Subscriptions) != 1 {
-		t.Fatalf("expected one subscription result, got %#v", result.Subscriptions)
+	if result.ScannedFiles != 3 || result.MatchedFiles != 2 || result.OrphanFileCount != 1 || len(result.OrphanFileSamples) != 1 {
+		t.Fatalf("unexpected recovery scan counts: scanned=%d matched=%d orphan_count=%d orphan_samples=%d", result.ScannedFiles, result.MatchedFiles, result.OrphanFileCount, len(result.OrphanFileSamples))
+	}
+	if result.SubscriptionCount != 1 || len(result.Subscriptions) != 1 {
+		t.Fatalf("expected one subscription result, got count=%d subscriptions=%#v", result.SubscriptionCount, result.Subscriptions)
 	}
 	report := result.Subscriptions[0]
 	if report.SubscriptionID != sub.ID || report.Name != "Router Recovery Show" {
@@ -588,17 +591,20 @@ func TestSetup_RoutesRecoveryScanDryRunWithIsolatedFixtures(t *testing.T) {
 	if report.CurrentEpisodeOld != 1 || report.CurrentEpisodeNew != 3 || report.LatestEpisodeOld != 2 || report.LatestEpisodeNew != 3 {
 		t.Fatalf("expected episode totals to be reported without applying, got %#v", report)
 	}
-	if !equalInts(report.EpisodesOnDisk, []int{2, 3}) {
-		t.Fatalf("expected router request shape to reach scanner and report episodes [2 3], got %#v", report.EpisodesOnDisk)
+	if report.EpisodesOnDiskCount != 2 || !equalInts(report.EpisodeSamples, []int{2, 3}) {
+		t.Fatalf("expected router request shape to reach scanner and report episode samples [2 3], got count=%d samples=%#v", report.EpisodesOnDiskCount, report.EpisodeSamples)
 	}
-	if !equalUints(report.DownloadsToUpdate, []uint{existing.ID}) {
-		t.Fatalf("expected existing download to be proposed for update, got %#v", report.DownloadsToUpdate)
+	if report.DownloadsToUpdateCount != 1 || !equalUints(report.DownloadsToUpdateIDs, []uint{existing.ID}) {
+		t.Fatalf("expected existing download to be proposed for update, got count=%d ids=%#v", report.DownloadsToUpdateCount, report.DownloadsToUpdateIDs)
 	}
-	if !equalInts(report.DownloadsToCreate, []int{3}) {
-		t.Fatalf("expected episode 3 synthetic record proposal, got %#v", report.DownloadsToCreate)
+	if report.DownloadsToCreateCount != 1 || !equalInts(report.DownloadsToCreate, []int{3}) {
+		t.Fatalf("expected episode 3 synthetic record proposal, got count=%d episodes=%#v", report.DownloadsToCreateCount, report.DownloadsToCreate)
 	}
-	if !equalUints(report.DownloadsMissing, []uint{missing.ID}) {
-		t.Fatalf("expected missing completed download to be reported, got %#v", report.DownloadsMissing)
+	if report.DownloadsMissingCount != 1 || !equalUints(report.DownloadsMissingIDs, []uint{missing.ID}) {
+		t.Fatalf("expected missing completed download to be reported, got count=%d ids=%#v", report.DownloadsMissingCount, report.DownloadsMissingIDs)
+	}
+	if report.MatchedEpisodeCount != 2 || len(report.MatchedEpisodeSamples) != 2 {
+		t.Fatalf("expected matched episode samples to be bounded but present, got count=%d samples=%#v", report.MatchedEpisodeCount, report.MatchedEpisodeSamples)
 	}
 
 	var afterSub model.Subscription
@@ -615,6 +621,45 @@ func TestSetup_RoutesRecoveryScanDryRunWithIsolatedFixtures(t *testing.T) {
 	}
 	if afterExisting.Status != model.DownloadStatusDownloading || afterExisting.RenamedPath != "" {
 		t.Fatalf("expected dry-run route not to mutate download, got %#v", afterExisting)
+	}
+
+	rawBody := recorder.Body.String()
+	for _, key := range []string{"orphan_files", "episodes_on_disk", "matched_episodes", "downloads_to_update", "downloads_missing"} {
+		if strings.Contains(rawBody, `"`+key+`"`) {
+			t.Fatalf("dry-run response leaked raw unbounded field %q", key)
+		}
+	}
+}
+
+func TestSetup_RoutesRecoveryScanDryRunBoundsLargePayload(t *testing.T) {
+	r, _, db := setupRouterForTestWithDB(t, false)
+	seedRouterRecoveryFixture(t, db, handler.RecoveryPreviewSampleLimit+4)
+
+	recorder := performRouterJSONRequest(r, http.MethodPost, "/api/v1/recovery/scan", `{"dry_run":true}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected recovery dry-run route to succeed, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Code int                         `json:"code"`
+		Data handler.RecoveryScanPreview `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to parse recovery dry-run response: %v", err)
+	}
+	result := response.Data
+	if result.OrphanFileCount != handler.RecoveryPreviewSampleLimit+4 {
+		t.Fatalf("orphan count = %d, want %d", result.OrphanFileCount, handler.RecoveryPreviewSampleLimit+4)
+	}
+	if len(result.OrphanFileSamples) != handler.RecoveryPreviewSampleLimit || result.OrphanFileOmittedCount != 4 {
+		t.Fatalf("orphan bounds = samples %d omitted %d, want %d and 4", len(result.OrphanFileSamples), result.OrphanFileOmittedCount, handler.RecoveryPreviewSampleLimit)
+	}
+	if len(result.Subscriptions) != 1 {
+		t.Fatalf("expected one subscription result, got %#v", result.Subscriptions)
+	}
+	sub := result.Subscriptions[0]
+	if sub.MatchedEpisodeCount != 2 || len(sub.MatchedEpisodeSamples) != 2 || sub.MatchedEpisodeOmittedCount != 0 {
+		t.Fatalf("matched episode summary = count %d samples %d omitted %d, want 2, 2, 0", sub.MatchedEpisodeCount, len(sub.MatchedEpisodeSamples), sub.MatchedEpisodeOmittedCount)
 	}
 }
 
@@ -1254,13 +1299,19 @@ func seedCompleteOnboardingSetupWithDownloadPath(t *testing.T, db *gorm.DB, down
 	}
 }
 
-func seedRouterRecoveryFixture(t *testing.T, db *gorm.DB) (model.Subscription, model.Download, model.Download) {
+func seedRouterRecoveryFixture(t *testing.T, db *gorm.DB, orphanCounts ...int) (model.Subscription, model.Download, model.Download) {
 	t.Helper()
 
 	root := t.TempDir()
 	requireRouterFixtureFile(t, filepath.Join(root, "Router Recovery Show", "Season 1", "Router Recovery Show S01E02.mkv"))
 	requireRouterFixtureFile(t, filepath.Join(root, "Router Recovery Show", "Season 1", "Router Recovery Show S01E03.mkv"))
-	requireRouterFixtureFile(t, filepath.Join(root, "Unknown Router Show", "Unknown Router Show S01E01.mkv"))
+	orphanCount := 1
+	if len(orphanCounts) > 0 {
+		orphanCount = orphanCounts[0]
+	}
+	for i := 1; i <= orphanCount; i++ {
+		requireRouterFixtureFile(t, filepath.Join(root, "Unknown Router Show", "Season 1", "Unknown Router Show S01E"+strconv.Itoa(i)+".mkv"))
+	}
 
 	if err := db.Create(&model.Config{Key: "download_path", Value: root}).Error; err != nil {
 		t.Fatalf("failed to seed recovery download_path config: %v", err)

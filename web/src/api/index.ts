@@ -503,20 +503,35 @@ export interface RecoverySubscriptionScanResult {
   current_episode_new: number
   latest_episode_old: number
   latest_episode_new: number
-  episodes_on_disk: number[]
-  matched_episodes: RecoveryEpisodeFile[]
-  downloads_to_update: number[]
-  downloads_to_create: number[]
-  downloads_missing: number[]
+  episodes_on_disk_count: number
+  episode_samples?: number[]
+  episode_omitted_count?: number
+  matched_episode_count: number
+  matched_episode_samples?: RecoveryEpisodeFile[]
+  matched_episode_omitted_count?: number
+  downloads_to_update_count: number
+  downloads_to_update_ids?: number[]
+  downloads_to_create_count: number
+  downloads_to_create?: number[]
+  downloads_missing_count: number
+  downloads_missing_ids?: number[]
 }
 
 export interface RecoveryScanResult {
+  dry_run: boolean
+  preview_only: boolean
+  applied: boolean
   scanned_files: number
   matched_files: number
-  orphan_files: string[]
+  orphan_file_count: number
+  orphan_file_samples?: string[]
+  orphan_file_omitted_count?: number
+  subscription_count: number
+  downloads_to_update_count: number
+  downloads_to_create_count: number
+  downloads_missing_count: number
   subscriptions: RecoverySubscriptionScanResult[]
   backup_path?: string
-  applied: boolean
 }
 
 export const subscriptionApi = {

@@ -23,7 +23,8 @@ test('恢复预览统计拟议变更数量', () => {
         current_episode_new: 2,
         latest_episode_old: 3,
         latest_episode_new: 4,
-        downloads_to_update: [11, 12],
+        downloads_to_update_count: 2,
+        downloads_to_create_count: 1,
         downloads_to_create: [5]
       }),
       createSubscription({
@@ -39,12 +40,14 @@ test('恢复预览统计拟议变更数量', () => {
 
 test('恢复预览统计缺失下载记录数量', () => {
   const result = createRecoveryResult({
+    downloads_missing_count: 4,
     subscriptions: [
-      createSubscription({ downloads_missing: [1, 2, 3] }),
+      createSubscription({ downloads_missing_count: 3, downloads_missing_ids: [1, 2, 3] }),
       createSubscription({
         subscription_id: 2,
         name: 'Another',
-        downloads_missing: [7]
+        downloads_missing_count: 1,
+        downloads_missing_ids: [7]
       })
     ]
   })
@@ -70,7 +73,11 @@ test('恢复预览限制未匹配文件展示并返回省略数量', () => {
     (_, index) => `/downloads/orphan-${index + 1}.mkv`
   )
 
-  const preview = getRecoveryOrphanPreview(createRecoveryResult({ orphan_files: orphanFiles }))
+  const preview = getRecoveryOrphanPreview(createRecoveryResult({
+    orphan_file_count: orphanFiles.length,
+    orphan_file_samples: orphanFiles.slice(0, RECOVERY_ORPHAN_DISPLAY_LIMIT),
+    orphan_file_omitted_count: 3
+  }))
 
   assert.equal(preview.files.length, RECOVERY_ORPHAN_DISPLAY_LIMIT)
   assert.equal(preview.files.at(0), '/downloads/orphan-1.mkv')
@@ -89,11 +96,18 @@ test('恢复预览识别 applied=true 的安全警告', () => {
 
 function createRecoveryResult(overrides: Partial<RecoveryScanResult> = {}): RecoveryScanResult {
   return {
+    dry_run: true,
+    preview_only: true,
+    applied: false,
     scanned_files: 0,
     matched_files: 0,
-    orphan_files: [],
+    orphan_file_count: 0,
+    orphan_file_samples: [],
+    subscription_count: 0,
+    downloads_to_update_count: 0,
+    downloads_to_create_count: 0,
+    downloads_missing_count: 0,
     subscriptions: [],
-    applied: false,
     ...overrides
   }
 }
@@ -108,11 +122,16 @@ function createSubscription(
     current_episode_new: 1,
     latest_episode_old: 1,
     latest_episode_new: 1,
-    episodes_on_disk: [],
-    matched_episodes: [],
-    downloads_to_update: [],
+    episodes_on_disk_count: 0,
+    episode_samples: [],
+    matched_episode_count: 0,
+    matched_episode_samples: [],
+    downloads_to_update_count: 0,
+    downloads_to_update_ids: [],
+    downloads_to_create_count: 0,
     downloads_to_create: [],
-    downloads_missing: [],
+    downloads_missing_count: 0,
+    downloads_missing_ids: [],
     ...overrides
   }
 }
