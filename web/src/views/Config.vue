@@ -351,7 +351,7 @@
               </div>
               <div class="recovery-summary-item">
                 <span>订阅命中</span>
-                <strong>{{ recoveryResult.subscriptions.length }}</strong>
+                <strong>{{ recoveryResult.subscription_count }}</strong>
               </div>
               <div class="recovery-summary-item">
                 <span>拟议变更</span>
@@ -363,7 +363,7 @@
               </div>
               <div class="recovery-summary-item">
                 <span>未匹配</span>
-                <strong>{{ recoveryResult.orphan_files.length }}</strong>
+                <strong>{{ recoveryResult.orphan_file_count }}</strong>
               </div>
             </div>
 
@@ -385,7 +385,7 @@
                     <div>
                       <div class="recovery-subscription-name">{{ subscription.name }}</div>
                       <div class="recovery-subscription-meta">
-                        ID {{ subscription.subscription_id }} · 磁盘集数 {{ formatEpisodeList(subscription.episodes_on_disk) }}
+                        ID {{ subscription.subscription_id }} · 磁盘集数 {{ formatBoundedEpisodeList(subscription.episode_samples, subscription.episodes_on_disk_count) }}
                       </div>
                     </div>
                     <n-space size="small" wrap>
@@ -412,44 +412,44 @@
                   <div class="recovery-action-grid">
                     <div class="recovery-action">
                       <span>待更新下载</span>
-                      <strong>{{ subscription.downloads_to_update.length }}</strong>
-                      <small>{{ formatIdList(subscription.downloads_to_update) }}</small>
+                      <strong>{{ subscription.downloads_to_update_count }}</strong>
+                      <small>{{ formatBoundedIdList(subscription.downloads_to_update_ids, subscription.downloads_to_update_count) }}</small>
                     </div>
                     <div class="recovery-action">
                       <span>待创建集数</span>
-                      <strong>{{ subscription.downloads_to_create.length }}</strong>
-                      <small>{{ formatEpisodeList(subscription.downloads_to_create) }}</small>
+                      <strong>{{ subscription.downloads_to_create_count }}</strong>
+                      <small>{{ formatBoundedEpisodeList(subscription.downloads_to_create, subscription.downloads_to_create_count) }}</small>
                     </div>
                     <div class="recovery-action">
                       <span>缺失下载</span>
-                      <strong>{{ subscription.downloads_missing.length }}</strong>
-                      <small>{{ formatIdList(subscription.downloads_missing) }}</small>
+                      <strong>{{ subscription.downloads_missing_count }}</strong>
+                      <small>{{ formatBoundedIdList(subscription.downloads_missing_ids, subscription.downloads_missing_count) }}</small>
                     </div>
                     <div class="recovery-action">
                       <span>匹配文件</span>
-                      <strong>{{ subscription.matched_episodes.length }}</strong>
+                      <strong>{{ subscription.matched_episode_count }}</strong>
                       <small>{{ formatMatchedEpisodePreview(subscription) }}</small>
                     </div>
                   </div>
 
-                  <div v-if="subscription.matched_episodes.length" class="recovery-file-list">
+                  <div v-if="subscription.matched_episode_count" class="recovery-file-list">
                     <div
-                      v-for="file in subscription.matched_episodes.slice(0, 6)"
+                      v-for="file in subscription.matched_episode_samples?.slice(0, 6) ?? []"
                       :key="`${subscription.subscription_id}-${file.path}`"
                       class="recovery-file"
                     >
                       <span>S{{ padNumber(file.season) }}E{{ padNumber(file.episode) }}</span>
                       <code>{{ file.path }}</code>
                     </div>
-                    <div v-if="subscription.matched_episodes.length > 6" class="recovery-more">
-                      另有 {{ subscription.matched_episodes.length - 6 }} 个匹配文件
+                    <div v-if="getMatchedEpisodeOmitted(subscription)" class="recovery-more">
+                      另有 {{ getMatchedEpisodeOmitted(subscription) }} 个匹配文件
                     </div>
                   </div>
                 </div>
               </div>
             </div>
 
-            <div v-if="recoveryResult.orphan_files.length" class="recovery-section">
+            <div v-if="recoveryResult.orphan_file_count" class="recovery-section">
               <div class="recovery-section-title">未匹配文件</div>
               <div class="recovery-orphan-list">
                 <code v-for="file in recoveryOrphanPreview.files" :key="file">
@@ -1056,20 +1056,34 @@ const handleRecoveryScopeChange = () => {
 
 const padNumber = (value: number) => String(value).padStart(2, '0')
 
-const formatEpisodeList = (episodes: number[]) => {
-  if (!episodes.length) return '无'
-  return episodes.slice(0, 12).join(', ') + (episodes.length > 12 ? ` +${episodes.length - 12}` : '')
+const formatBoundedEpisodeList = (episodes: number[] = [], totalCount = episodes.length) => {
+  if (!totalCount) return '无'
+  const preview = episodes.slice(0, 12).join(', ')
+  const omitted = Math.max(0, totalCount - episodes.slice(0, 12).length)
+  return `${preview || '已匹配'}${omitted ? ` +${omitted}` : ''}`
 }
 
-const formatIdList = (ids: number[]) => {
-  if (!ids.length) return '无'
-  return ids.slice(0, 8).map((id) => `#${id}`).join(', ') + (ids.length > 8 ? ` +${ids.length - 8}` : '')
+const formatBoundedIdList = (ids: number[] = [], totalCount = ids.length) => {
+  if (!totalCount) return '无'
+  const previewIds = ids.slice(0, 8)
+  const preview = previewIds.map((id) => `#${id}`).join(', ')
+  const omitted = Math.max(0, totalCount - previewIds.length)
+  return `${preview || '已匹配'}${omitted ? ` +${omitted}` : ''}`
 }
 
 const formatMatchedEpisodePreview = (subscription: RecoverySubscriptionScanResult) => {
-  if (!subscription.matched_episodes.length) return '无'
-  const episodes = subscription.matched_episodes.map((file) => file.episode)
-  return formatEpisodeList(Array.from(new Set(episodes)).sort((a, b) => a - b))
+  if (!subscription.matched_episode_count) return '无'
+  const episodes = (subscription.matched_episode_samples ?? []).map((file) => file.episode)
+  const uniqueEpisodes = Array.from(new Set(episodes)).sort((a, b) => a - b)
+  return formatBoundedEpisodeList(uniqueEpisodes, subscription.matched_episode_count)
+}
+
+const getMatchedEpisodeOmitted = (subscription: RecoverySubscriptionScanResult) => {
+  const rendered = Math.min(subscription.matched_episode_samples?.length ?? 0, 6)
+  return Math.max(
+    0,
+    subscription.matched_episode_count - rendered
+  )
 }
 
 const handleManualRefresh = async () => {
