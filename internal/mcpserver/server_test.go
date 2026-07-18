@@ -73,6 +73,70 @@ func TestMCPWriteCORSHeaders(t *testing.T) {
 	}
 }
 
+func TestMCPToolRegistryAnnotationsMatchSafetyPolicy(t *testing.T) {
+	server := New(Dependencies{})
+	tools := registeredMCPToolsByName(t, server.registeredMCPTools())
+
+	readOnlyTools := []string{
+		"get_system_overview",
+		"list_subscriptions",
+		"get_subscription",
+		"list_downloads",
+		"get_download",
+		"preview_recovery_scan",
+		"search_mikan",
+		"get_mikan_season",
+		"get_mikan_fansubs",
+		"search_bangumi",
+		"get_bangumi_subject",
+		"get_calendar",
+		"get_disk_status",
+		"list_logs",
+	}
+	writeTools := []string{
+		"create_subscription",
+		"toggle_subscription",
+		"retry_download",
+		"refresh_rss",
+	}
+
+	if got, want := len(tools), len(readOnlyTools)+len(writeTools); got != want {
+		t.Fatalf("registered MCP tool count = %d, want %d; update the annotation policy test when adding tools", got, want)
+	}
+	for _, name := range readOnlyTools {
+		assertMCPToolAnnotations(t, tools[name], true)
+	}
+	for _, name := range writeTools {
+		assertMCPToolAnnotations(t, tools[name], false)
+	}
+}
+
+func TestMCPPreviewRecoveryToolRegistryIsPreviewOnly(t *testing.T) {
+	server := New(Dependencies{})
+	tools := registeredMCPToolsByName(t, server.registeredMCPTools())
+	preview := tools["preview_recovery_scan"]
+
+	description := strings.ToLower(preview.Tool.Description)
+	for _, phrase := range []string{"preview", "dry-run", "read-only", "never applies"} {
+		if !strings.Contains(description, phrase) {
+			t.Fatalf("preview_recovery_scan description = %q, want phrase %q", preview.Tool.Description, phrase)
+		}
+	}
+
+	assertFieldSet(t, preview.InputFields, []string{"subscription_id"})
+	for _, field := range preview.InputFields {
+		normalized := strings.ToLower(field)
+		if strings.Contains(normalized, "dry") || strings.Contains(normalized, "apply") {
+			t.Fatalf("preview_recovery_scan input exposes dry-run/apply control: %q", field)
+		}
+	}
+	for _, field := range []string{"dry_run", "preview_only", "applied"} {
+		if !hasField(preview.OutputFields, field) {
+			t.Fatalf("preview_recovery_scan output fields = %v, want %q", preview.OutputFields, field)
+		}
+	}
+}
+
 func TestMCPRetryDownloadRejectsNonFailedOrStalledWithoutMutation(t *testing.T) {
 	for _, status := range []string{
 		model.DownloadStatusCompleted,
@@ -459,6 +523,69 @@ func TestMCPRecoveryPreviewInputDoesNotExposeApplyMode(t *testing.T) {
 	if input.SubscriptionID != 7 {
 		t.Fatalf("SubscriptionID = %d, want 7", input.SubscriptionID)
 	}
+}
+
+func registeredMCPToolsByName(t *testing.T, definitions []registeredMCPTool) map[string]registeredMCPTool {
+	t.Helper()
+	tools := make(map[string]registeredMCPTool, len(definitions))
+	for _, definition := range definitions {
+		name := definition.Tool.Name
+		if name == "" {
+			t.Fatal("registered MCP tool had empty name")
+		}
+		if _, exists := tools[name]; exists {
+			t.Fatalf("registered MCP tool %q was duplicated", name)
+		}
+		tools[name] = definition
+	}
+	return tools
+}
+
+func assertMCPToolAnnotations(t *testing.T, definition registeredMCPTool, wantReadOnly bool) {
+	t.Helper()
+	tool := definition.Tool
+	if tool.Name == "" {
+		t.Fatal("missing registered MCP tool")
+	}
+	if tool.Description == "" {
+		t.Fatalf("%s description was empty", tool.Name)
+	}
+	if tool.Annotations == nil {
+		t.Fatalf("%s annotations were nil", tool.Name)
+	}
+	if tool.Annotations.ReadOnlyHint != wantReadOnly {
+		t.Fatalf("%s ReadOnlyHint = %v, want %v", tool.Name, tool.Annotations.ReadOnlyHint, wantReadOnly)
+	}
+	if tool.Annotations.DestructiveHint == nil {
+		t.Fatalf("%s DestructiveHint was nil", tool.Name)
+	}
+	if *tool.Annotations.DestructiveHint != !wantReadOnly {
+		t.Fatalf("%s DestructiveHint = %v, want %v", tool.Name, *tool.Annotations.DestructiveHint, !wantReadOnly)
+	}
+	if tool.Annotations.OpenWorldHint == nil || !*tool.Annotations.OpenWorldHint {
+		t.Fatalf("%s OpenWorldHint = %v, want true", tool.Name, tool.Annotations.OpenWorldHint)
+	}
+}
+
+func assertFieldSet(t *testing.T, got []string, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("fields = %v, want %v", got, want)
+	}
+	for _, field := range want {
+		if !hasField(got, field) {
+			t.Fatalf("fields = %v, want %q", got, field)
+		}
+	}
+}
+
+func hasField(fields []string, want string) bool {
+	for _, field := range fields {
+		if field == want {
+			return true
+		}
+	}
+	return false
 }
 
 type fakeMCPDownloadRepo struct {
