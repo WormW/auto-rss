@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 
@@ -55,6 +56,7 @@ type Server struct {
 	calendarService  *calendar.Calendar
 	diskMonitor      *disk.Monitor
 	mcpServer        *mcp.Server
+	registeredTools  []registeredMCPTool
 }
 
 func New(deps Dependencies) *Server {
@@ -131,19 +133,69 @@ func (s *Server) registerTools() {
 	addTool(s, "list_logs", "List recent Auto-RSS logs with cursor pagination and optional level/module filters. Use this to explain failures after refresh_rss, retry_download, or qBittorrent connectivity issues. This is read-only.", true, s.listLogs)
 }
 
+type registeredMCPTool struct {
+	Tool         mcp.Tool
+	InputFields  []string
+	OutputFields []string
+}
+
+func (s *Server) registeredMCPTools() []registeredMCPTool {
+	tools := make([]registeredMCPTool, len(s.registeredTools))
+	copy(tools, s.registeredTools)
+	return tools
+}
+
 func addTool[In, Out any](s *Server, name, description string, readOnly bool, handler mcp.ToolHandlerFor[In, Out]) {
+	definition := registeredToolDefinition[In, Out](name, description, readOnly)
+	tool := definition.Tool
+	mcp.AddTool(s.mcpServer, &tool, handler)
+	s.registeredTools = append(s.registeredTools, definition)
+}
+
+func registeredToolDefinition[In, Out any](name, description string, readOnly bool) registeredMCPTool {
 	openWorld := true
 	destructive := !readOnly
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name:        name,
-		Title:       strings.ReplaceAll(name, "_", " "),
-		Description: description,
-		Annotations: &mcp.ToolAnnotations{
-			ReadOnlyHint:    readOnly,
-			DestructiveHint: &destructive,
-			OpenWorldHint:   &openWorld,
+	return registeredMCPTool{
+		Tool: mcp.Tool{
+			Name:        name,
+			Title:       strings.ReplaceAll(name, "_", " "),
+			Description: description,
+			Annotations: &mcp.ToolAnnotations{
+				ReadOnlyHint:    readOnly,
+				DestructiveHint: &destructive,
+				OpenWorldHint:   &openWorld,
+			},
 		},
-	}, handler)
+		InputFields:  jsonFieldNames[In](),
+		OutputFields: jsonFieldNames[Out](),
+	}
+}
+
+func jsonFieldNames[T any]() []string {
+	typ := reflect.TypeFor[T]()
+	for typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	if typ.Kind() != reflect.Struct {
+		return nil
+	}
+
+	fields := make([]string, 0, typ.NumField())
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		if field.PkgPath != "" {
+			continue
+		}
+		name := strings.Split(field.Tag.Get("json"), ",")[0]
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = field.Name
+		}
+		fields = append(fields, name)
+	}
+	return fields
 }
 
 func (s *Server) authorized(r *http.Request) bool {
