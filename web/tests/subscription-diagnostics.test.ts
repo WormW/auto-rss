@@ -1,13 +1,21 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import type { SubscriptionDiagnostics } from '../src/api/index.ts'
 import {
-	getDiagnosticActionFollowUp,
-	isCurrentDiagnosticRequest,
+  getDiagnosticActionFollowUp,
+  isCurrentDiagnosticRequest,
   mergeDiagnosticCheck,
   summarizeDiagnosticChecks
 } from '../src/utils/subscription-diagnostics.ts'
+
+const subscriptionsViewSource = readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), '../src/views/Subscriptions.vue'),
+  'utf8'
+)
 
 test('单项结果只替换对应检查并计算部分汇总', () => {
   const initial = createInitialDiagnostics()
@@ -119,6 +127,93 @@ test('修复动作提示重新检查受影响项目', () => {
   assert.match(getDiagnosticActionFollowUp('rename_files'), /整理\/重命名/)
   assert.match(getDiagnosticActionFollowUp('toggle_subscription'), /订阅状态/)
 })
+
+test('打开订阅诊断面板只初始化会话并加载初始状态，不自动执行单项检查', () => {
+  const handleDiagnostics = extractFunctionBody(subscriptionsViewSource, 'handleDiagnostics')
+  const loadInitialDiagnostics = extractFunctionBody(subscriptionsViewSource, 'loadInitialDiagnostics')
+
+  assert.match(handleDiagnostics, /diagnosticsSession\.value\+\+/)
+  assert.match(handleDiagnostics, /diagnosticsData\.value = null/)
+  assert.match(handleDiagnostics, /diagnosticsCheckLoading\.value = \{\}/)
+  assert.match(handleDiagnostics, /diagnosticsActionLoading\.value = ''/)
+  assert.match(handleDiagnostics, /diagnosticsActionResult\.value = ''/)
+  assert.match(handleDiagnostics, /showDiagnosticsModal\.value = true/)
+  assert.match(handleDiagnostics, /await loadInitialDiagnostics\(\)/)
+
+  assert.match(loadInitialDiagnostics, /subscriptionApi\.diagnostics\(request\.subscriptionId\)/)
+  assert.doesNotMatch(handleDiagnostics, /checkDiagnostic|diagnosticCheck|runDiagnosticCheck|forEach|for\s*\(|for\s+await/)
+  assert.doesNotMatch(loadInitialDiagnostics, /checkDiagnostic|diagnosticCheck|runDiagnosticCheck|forEach|for\s*\(|for\s+await/)
+})
+
+test('诊断面板没有检查全部入口，单项检查按钮使用 keyed loading 状态', () => {
+  const diagnosticsTemplate = extractBetween(
+    subscriptionsViewSource,
+    '<!-- 健康诊断面板 -->',
+    '<!-- 添加/编辑订阅对话框 -->'
+  )
+  const runDiagnosticCheck = extractFunctionBody(subscriptionsViewSource, 'runDiagnosticCheck')
+
+  assert.doesNotMatch(diagnosticsTemplate, /检查全部|重新检查全部/)
+  assert.match(diagnosticsTemplate, /v-for="check in diagnosticsData\.checks"/)
+  assert.match(diagnosticsTemplate, /:loading="diagnosticsCheckLoading\[check\.key\]"/)
+  assert.match(diagnosticsTemplate, /:disabled="diagnosticsCheckLoading\[check\.key\]"/)
+  assert.match(diagnosticsTemplate, /@click="runDiagnosticCheck\(check\.key\)"/)
+  assert.match(runDiagnosticCheck, /\.\.\.diagnosticsCheckLoading\.value/)
+  assert.match(runDiagnosticCheck, /\[key\]: true/)
+  assert.match(runDiagnosticCheck, /\[key\]: false/)
+  assert.doesNotMatch(runDiagnosticCheck, /diagnosticsCheckLoading\.value = true|diagnosticsCheckLoading\.value = false/)
+})
+
+test('未执行对应检查前诊断指标保持占位，动作按钮仍受 enabled 状态约束', () => {
+  const diagnosticsTemplate = extractBetween(
+    subscriptionsViewSource,
+    '<!-- 健康诊断面板 -->',
+    '<!-- 添加/编辑订阅对话框 -->'
+  )
+
+  assert.match(diagnosticsTemplate, /hasDiagnosticCheck\('downloads'\) \? diagnosticsData\.downloads\.total : '--'/)
+  assert.match(diagnosticsTemplate, /v-if="hasDiagnosticCheck\('downloads'\)">失败/)
+  assert.match(diagnosticsTemplate, /hasDiagnosticCheck\('files'\) \? diagnosticsData\.files\.completed_with_file : '--'/)
+  assert.match(diagnosticsTemplate, /v-if="hasDiagnosticCheck\('files'\)">未记录路径/)
+  assert.match(diagnosticsTemplate, /hasDiagnosticCheck\('disk'\) \? formatBytes\(diagnosticsData\.disk\.free_bytes\) : '--'/)
+  assert.match(diagnosticsTemplate, /v-if="hasDiagnosticCheck\('disk'\)">/)
+  assert.match(diagnosticsTemplate, /hasDiagnosticCheck\('episode_progress'\) \? \(diagnosticsData\.files\.missing_episodes\?\.length \|\| 0\) : '--'/)
+  assert.match(diagnosticsTemplate, /v-if="hasDiagnosticCheck\('episode_progress'\)"/)
+  assert.match(diagnosticsTemplate, /v-else>未检查<\/small>/)
+  assert.match(diagnosticsTemplate, /v-if="hasDiagnosticCheck\('downloads'\) && diagnosticsData\.downloads\.failed_items\?\.length"/)
+  assert.match(diagnosticsTemplate, /:disabled="!action\.enabled \|\| diagnosticsActionLoading === action\.key"/)
+  assert.match(diagnosticsTemplate, /diagnosticsData\.actions\.some\(action => !action\.enabled && action\.reason\)/)
+})
+
+function extractBetween(source: string, startMarker: string, endMarker: string): string {
+  const start = source.indexOf(startMarker)
+  const end = source.indexOf(endMarker, start)
+  assert.notEqual(start, -1, `missing start marker: ${startMarker}`)
+  assert.notEqual(end, -1, `missing end marker: ${endMarker}`)
+  return source.slice(start, end)
+}
+
+function extractFunctionBody(source: string, name: string): string {
+  const declaration = new RegExp(`const ${name} = (?:async )?\\([^)]*\\) => \\{`, 'm')
+  const match = declaration.exec(source)
+  assert.ok(match, `missing function: ${name}`)
+
+  const bodyStart = match.index + match[0].length
+  let depth = 1
+  for (let index = bodyStart; index < source.length; index++) {
+    const char = source[index]
+    if (char === '{') {
+      depth++
+    } else if (char === '}') {
+      depth--
+      if (depth === 0) {
+        return source.slice(bodyStart, index)
+      }
+    }
+  }
+
+  assert.fail(`unterminated function: ${name}`)
+}
 
 function createInitialDiagnostics(): SubscriptionDiagnostics {
   const definitions = [
