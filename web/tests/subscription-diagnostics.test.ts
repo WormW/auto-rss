@@ -223,7 +223,7 @@ function createInitialDiagnostics(): SubscriptionDiagnostics {
     ['episode_progress', '待收集集数'],
     ['downloads', '下载任务'],
     ['qbittorrent', 'qBittorrent'],
-    ['files', '本地文件'],
+    ['files', '已记录路径'],
     ['organizer', '整理/重命名'],
     ['disk', '磁盘空间']
   ] as const

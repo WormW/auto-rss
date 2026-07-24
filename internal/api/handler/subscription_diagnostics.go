@@ -793,12 +793,12 @@ func (h *SubscriptionDiagnosticsHandler) buildFileDiagnostics(subscription *mode
 
 	fileCheck := SubscriptionDiagnosticCheck{
 		Key:   "files",
-		Label: "本地文件",
+		Label: "已记录路径",
 	}
 	switch {
 	case files.CompletedMissingFile > 0:
 		fileCheck.Status = SubscriptionDiagnosticWarning
-		fileCheck.Summary = fmt.Sprintf("%d 个已完成任务未记录文件路径", files.CompletedMissingFile)
+		fileCheck.Summary = fmt.Sprintf("%d 个已完成任务未记录路径", files.CompletedMissingFile)
 		fileCheck.Detail = "数据库记录显示已完成，但没有 file_path 或 renamed_path；如需核验磁盘文件，请使用扫描本地文件。"
 	case !files.FolderExists && len(downloads) > 0:
 		fileCheck.Status = SubscriptionDiagnosticWarning
@@ -806,11 +806,11 @@ func (h *SubscriptionDiagnosticsHandler) buildFileDiagnostics(subscription *mode
 		fileCheck.Detail = fmt.Sprintf("预期目录：%s", expectedPath)
 	case files.CompletedWithFile > 0:
 		fileCheck.Status = SubscriptionDiagnosticHealthy
-		fileCheck.Summary = fmt.Sprintf("%d 个已完成任务已记录文件路径", files.CompletedWithFile)
+		fileCheck.Summary = fmt.Sprintf("%d 个已完成任务已记录路径", files.CompletedWithFile)
 		fileCheck.Detail = fmt.Sprintf("预期目录：%s；如需核验磁盘文件，请使用扫描本地文件。", expectedPath)
 	default:
 		fileCheck.Status = SubscriptionDiagnosticUnknown
-		fileCheck.Summary = "暂无可核对文件"
+		fileCheck.Summary = "暂无可核对路径记录"
 		fileCheck.Detail = fmt.Sprintf("预期目录：%s", expectedPath)
 	}
 	return files, fileCheck
@@ -1095,7 +1095,7 @@ func initialSubscriptionDiagnosticChecks() []SubscriptionDiagnosticCheck {
 		{key: "episode_progress", label: "待收集集数"},
 		{key: "downloads", label: "下载任务"},
 		{key: "qbittorrent", label: "qBittorrent"},
-		{key: "files", label: "本地文件"},
+		{key: "files", label: "已记录路径"},
 		{key: "organizer", label: "整理/重命名"},
 		{key: "disk", label: "磁盘空间"},
 	}
