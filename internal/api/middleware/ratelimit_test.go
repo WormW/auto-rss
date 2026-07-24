@@ -22,6 +22,15 @@ func setupTestRouter(store *ratelimit.Store) *gin.Engine {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "healthy"})
 	})
+	r.GET("/api/v1/health", func(c *gin.Context) {
+		c.JSON(200, gin.H{"status": "healthy"})
+	})
+	r.GET("/ready", func(c *gin.Context) {
+		c.JSON(200, gin.H{"status": "ready"})
+	})
+	r.GET("/live", func(c *gin.Context) {
+		c.JSON(200, gin.H{"status": "alive"})
+	})
 	r.POST("/api/v1/auth/login", func(c *gin.Context) {
 		c.JSON(200, gin.H{"token": "test"})
 	})
@@ -48,14 +57,19 @@ func TestRateLimitExcludedPath(t *testing.T) {
 	store := ratelimit.NewStore(100, time.Hour, 100.0, 200)
 	r := setupTestRouter(store)
 
-	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("GET", "/health", nil)
-	r.ServeHTTP(w, req)
+	for _, path := range DefaultRateLimitExcludedPaths() {
+		t.Run(path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			req, _ := http.NewRequest("GET", path, nil)
+			r.ServeHTTP(w, req)
 
-	assert.Equal(t, 200, w.Code)
-	// 排除路径不应该有限流头
-	assert.Empty(t, w.Header().Get("X-RateLimit-Limit"))
-	assert.Empty(t, w.Header().Get("X-RateLimit-Remaining"))
+			assert.Equal(t, 200, w.Code)
+			// 排除路径不应该有限流头
+			assert.Empty(t, w.Header().Get("X-RateLimit-Limit"))
+			assert.Empty(t, w.Header().Get("X-RateLimit-Remaining"))
+			assert.Empty(t, w.Header().Get("X-RateLimit-Reset"))
+		})
+	}
 }
 
 // TestRateLimitExceeded 测试限流触发

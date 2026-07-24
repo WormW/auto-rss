@@ -94,7 +94,7 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		AuthRPM:       cfg.RateLimit.AuthRPM,
 		AuthBurst:     5, // 固定突发值
 		AuthPaths:     []string{"/api/v1/auth/login", "/api/v1/auth/refresh"},
-		ExcludedPaths: []string{"/health", "/api/v1/health"},
+		ExcludedPaths: middleware.DefaultRateLimitExcludedPaths(),
 	}))
 
 	// 静态文件服务 - 封面图片（带 fallback）
