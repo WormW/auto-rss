@@ -21,6 +21,15 @@ type RateLimitConfig struct {
 	ExcludedPaths []string // 排除限流的路径
 }
 
+var defaultRateLimitExcludedPaths = []string{"/health", "/api/v1/health", "/ready", "/live"}
+
+// DefaultRateLimitExcludedPaths returns operational probe paths excluded from rate limiting.
+func DefaultRateLimitExcludedPaths() []string {
+	paths := make([]string, len(defaultRateLimitExcludedPaths))
+	copy(paths, defaultRateLimitExcludedPaths)
+	return paths
+}
+
 // RateLimit 使用默认配置创建限流中间件
 func RateLimit(store *ratelimit.Store) gin.HandlerFunc {
 	return RateLimitWithConfig(RateLimitConfig{
@@ -30,7 +39,7 @@ func RateLimit(store *ratelimit.Store) gin.HandlerFunc {
 		AuthRPM:       5,
 		AuthBurst:     5,
 		AuthPaths:     []string{"/api/v1/auth/login", "/api/v1/auth/refresh"},
-		ExcludedPaths: []string{"/health", "/api/v1/health"},
+		ExcludedPaths: DefaultRateLimitExcludedPaths(),
 	})
 }
 

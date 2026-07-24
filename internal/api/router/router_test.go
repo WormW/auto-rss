@@ -283,6 +283,29 @@ func setupRouterForTestWithConfig(t *testing.T, authEnabled bool, configure func
 	return r, appCtx, db
 }
 
+func TestSetup_OperationalProbeRoutesSkipRateLimitHeaders(t *testing.T) {
+	r, _, _ := setupRouterForTestWithConfig(t, false, nil)
+
+	for _, path := range []string{"/health", "/api/v1/health", "/ready", "/live"} {
+		t.Run(path, func(t *testing.T) {
+			recorder := performRouterRequest(r, http.MethodGet, path, nil)
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("expected %s to return 200, got %d: %s", path, recorder.Code, recorder.Body.String())
+			}
+			if got := recorder.Header().Get("X-RateLimit-Limit"); got != "" {
+				t.Fatalf("X-RateLimit-Limit = %q, want empty", got)
+			}
+			if got := recorder.Header().Get("X-RateLimit-Remaining"); got != "" {
+				t.Fatalf("X-RateLimit-Remaining = %q, want empty", got)
+			}
+			if got := recorder.Header().Get("X-RateLimit-Reset"); got != "" {
+				t.Fatalf("X-RateLimit-Reset = %q, want empty", got)
+			}
+		})
+	}
+}
+
 func TestSetup_ReturnsErrorWhenSchedulerStartFailsAndBlockingEnabled(t *testing.T) {
 	db := newTestDB(t)
 	cfg := newRouterTestConfig(false)
