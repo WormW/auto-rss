@@ -76,8 +76,8 @@ export function getDiagnosticActionFollowUp(actionKey: string): string {
   const followUps: Record<string, string> = {
     refresh_rss: '可重新检查 RSS 可达性、最近检查和待收集集数',
     retry_failed: '可重新检查下载任务和 qBittorrent',
-    reorganize_files: '可重新检查本地文件和整理/重命名',
-    rename_files: '可重新检查本地文件和整理/重命名',
+    reorganize_files: '可重新检查已记录路径和整理/重命名',
+    rename_files: '可重新检查已记录路径和整理/重命名',
     toggle_subscription: '可重新检查订阅状态'
   }
   return followUps[actionKey] || ''
