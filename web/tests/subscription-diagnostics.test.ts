@@ -123,8 +123,8 @@ test('仅接受当前诊断会话的异步响应', () => {
 test('修复动作提示重新检查受影响项目', () => {
   assert.match(getDiagnosticActionFollowUp('refresh_rss'), /RSS 可达性/)
   assert.match(getDiagnosticActionFollowUp('retry_failed'), /下载任务/)
-  assert.match(getDiagnosticActionFollowUp('reorganize_files'), /整理\/重命名/)
-  assert.match(getDiagnosticActionFollowUp('rename_files'), /整理\/重命名/)
+  assert.equal(getDiagnosticActionFollowUp('reorganize_files'), '可重新检查已记录路径和整理/重命名')
+  assert.equal(getDiagnosticActionFollowUp('rename_files'), '可重新检查已记录路径和整理/重命名')
   assert.match(getDiagnosticActionFollowUp('toggle_subscription'), /订阅状态/)
 })
 
@@ -223,7 +223,7 @@ function createInitialDiagnostics(): SubscriptionDiagnostics {
     ['episode_progress', '待收集集数'],
     ['downloads', '下载任务'],
     ['qbittorrent', 'qBittorrent'],
-    ['files', '本地文件'],
+    ['files', '已记录路径'],
     ['organizer', '整理/重命名'],
     ['disk', '磁盘空间']
   ] as const
