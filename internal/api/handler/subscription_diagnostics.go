@@ -4,18 +4,13 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
-	"github.com/WormW/auto-rss/internal/pkg/constants"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
-	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
-	"github.com/WormW/auto-rss/internal/service/disk"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/gin-gonic/gin"
@@ -36,7 +31,6 @@ type SubscriptionDiagnosticsHandler struct {
 	downloadRepo     repository.DownloadRepository
 	configRepo       repository.ConfigRepository
 	qbClient         downloader.QBittorrentClient
-	downloadPath     string
 	rssHealthChecker *rss.RSSHealthChecker
 	requeueSvc       DownloadRequeueService
 }
@@ -99,36 +93,19 @@ type SubscriptionDownloadDiagnosticItem struct {
 }
 
 type SubscriptionFileDiagnostics struct {
-	ExpectedPath         string `json:"expected_path"`
-	FolderExists         bool   `json:"folder_exists"`
-	RenameEnabled        bool   `json:"rename_enabled"`
-	CompletedWithFile    int    `json:"completed_with_file"`
-	CompletedMissingFile int    `json:"completed_missing_file"`
-	MissingRenamed       int    `json:"missing_renamed"`
-	MissingEpisodes      []int  `json:"missing_episodes"`
+	RenameEnabled        bool  `json:"rename_enabled"`
+	CompletedWithFile    int   `json:"completed_with_file"`
+	CompletedMissingFile int   `json:"completed_missing_file"`
+	MissingRenamed       int   `json:"missing_renamed"`
+	MissingEpisodes      []int `json:"missing_episodes"`
 }
 
 type SubscriptionFileDiagnosticsPatch struct {
-	ExpectedPath         *string `json:"expected_path,omitempty"`
-	FolderExists         *bool   `json:"folder_exists,omitempty"`
-	RenameEnabled        *bool   `json:"rename_enabled,omitempty"`
-	CompletedWithFile    *int    `json:"completed_with_file,omitempty"`
-	CompletedMissingFile *int    `json:"completed_missing_file,omitempty"`
-	MissingRenamed       *int    `json:"missing_renamed,omitempty"`
-	MissingEpisodes      *[]int  `json:"missing_episodes,omitempty"`
-}
-
-type SubscriptionDiskDiagnostics struct {
-	Path                string  `json:"path"`
-	Exists              bool    `json:"exists"`
-	Status              string  `json:"status"`
-	TotalBytes          int64   `json:"total_bytes"`
-	FreeBytes           int64   `json:"free_bytes"`
-	UsedBytes           int64   `json:"used_bytes"`
-	UsagePercent        float64 `json:"usage_percent"`
-	WarningThresholdGB  int64   `json:"warning_threshold_gb"`
-	CriticalThresholdGB int64   `json:"critical_threshold_gb"`
-	Error               string  `json:"error,omitempty"`
+	RenameEnabled        *bool  `json:"rename_enabled,omitempty"`
+	CompletedWithFile    *int   `json:"completed_with_file,omitempty"`
+	CompletedMissingFile *int   `json:"completed_missing_file,omitempty"`
+	MissingRenamed       *int   `json:"missing_renamed,omitempty"`
+	MissingEpisodes      *[]int `json:"missing_episodes,omitempty"`
 }
 
 type SubscriptionDiagnosticAction struct {
@@ -150,7 +127,6 @@ type SubscriptionDiagnosticsResponse struct {
 	Checks         []SubscriptionDiagnosticCheck   `json:"checks"`
 	Downloads      SubscriptionDownloadDiagnostics `json:"downloads"`
 	Files          SubscriptionFileDiagnostics     `json:"files"`
-	Disk           SubscriptionDiskDiagnostics     `json:"disk"`
 	Actions        []SubscriptionDiagnosticAction  `json:"actions"`
 }
 
@@ -159,7 +135,6 @@ type SubscriptionDiagnosticCheckResponse struct {
 	Feeds     []rss.FeedHealthCheckResult           `json:"feeds,omitempty"`
 	Downloads *SubscriptionDownloadDiagnosticsPatch `json:"downloads,omitempty"`
 	Files     *SubscriptionFileDiagnosticsPatch     `json:"files,omitempty"`
-	Disk      *SubscriptionDiskDiagnostics          `json:"disk,omitempty"`
 	Actions   []SubscriptionDiagnosticAction        `json:"actions,omitempty"`
 }
 
@@ -185,7 +160,7 @@ func NewSubscriptionDiagnosticsHandler(
 	downloadRepo repository.DownloadRepository,
 	configRepo repository.ConfigRepository,
 	qbClient downloader.QBittorrentClient,
-	downloadPath string,
+	_ string,
 	requeueSvc ...DownloadRequeueService,
 ) *SubscriptionDiagnosticsHandler {
 	var requeue DownloadRequeueService
@@ -198,7 +173,6 @@ func NewSubscriptionDiagnosticsHandler(
 		downloadRepo:     downloadRepo,
 		configRepo:       configRepo,
 		qbClient:         qbClient,
-		downloadPath:     downloadPath,
 		rssHealthChecker: rss.NewHealthChecker(subscriptionRepo, feedRepo),
 		requeueSvc:       requeue,
 	}
@@ -305,8 +279,7 @@ func (h *SubscriptionDiagnosticsHandler) Check(c *gin.Context) {
 		if !ok {
 			return
 		}
-		expectedPath := utils.GenerateDownloadPath(h.resolveBaseDownloadPath(), subscription.Name)
-		files, check := h.buildFileDiagnostics(subscription, downloads, expectedPath)
+		files, check := h.buildFileDiagnostics(subscription, downloads)
 		result.Check = check
 		result.Files = fileDiagnosticsPatch(files)
 		result.Actions = h.buildActions(subscription, downloadSummaryForActions(downloads), true, len(enabledFeeds) > 0)
@@ -319,10 +292,6 @@ func (h *SubscriptionDiagnosticsHandler) Check(c *gin.Context) {
 		result.Check = check
 		result.Files = organizerDiagnosticsPatch(files)
 		result.Actions = h.buildActions(subscription, downloadSummaryForActions(downloads), true, len(enabledFeeds) > 0)
-	case "disk":
-		diskInfo, check := h.buildDiskDiagnostics(h.resolveBaseDownloadPath())
-		result.Check = check
-		result.Disk = &diskInfo
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    400,
@@ -783,10 +752,8 @@ func (h *SubscriptionDiagnosticsHandler) buildQBittorrentCheck(downloads []model
 	return check
 }
 
-func (h *SubscriptionDiagnosticsHandler) buildFileDiagnostics(subscription *model.Subscription, downloads []model.Download, expectedPath string) (SubscriptionFileDiagnostics, SubscriptionDiagnosticCheck) {
+func (h *SubscriptionDiagnosticsHandler) buildFileDiagnostics(subscription *model.Subscription, downloads []model.Download) (SubscriptionFileDiagnostics, SubscriptionDiagnosticCheck) {
 	files := SubscriptionFileDiagnostics{
-		ExpectedPath:  expectedPath,
-		FolderExists:  pathIsDir(expectedPath),
 		RenameEnabled: subscription.RenameEnabled,
 	}
 	accumulateCompletedFileDiagnostics(&files, subscription, downloads)
@@ -799,19 +766,15 @@ func (h *SubscriptionDiagnosticsHandler) buildFileDiagnostics(subscription *mode
 	case files.CompletedMissingFile > 0:
 		fileCheck.Status = SubscriptionDiagnosticWarning
 		fileCheck.Summary = fmt.Sprintf("%d 个已完成任务未记录路径", files.CompletedMissingFile)
-		fileCheck.Detail = "数据库记录显示已完成，但没有 file_path 或 renamed_path；如需核验磁盘文件，请使用扫描本地文件。"
-	case !files.FolderExists && len(downloads) > 0:
-		fileCheck.Status = SubscriptionDiagnosticWarning
-		fileCheck.Summary = "订阅目录不存在"
-		fileCheck.Detail = fmt.Sprintf("预期目录：%s", expectedPath)
+		fileCheck.Detail = "数据库记录显示已完成，但没有 file_path 或 renamed_path。"
 	case files.CompletedWithFile > 0:
 		fileCheck.Status = SubscriptionDiagnosticHealthy
 		fileCheck.Summary = fmt.Sprintf("%d 个已完成任务已记录路径", files.CompletedWithFile)
-		fileCheck.Detail = fmt.Sprintf("预期目录：%s；如需核验磁盘文件，请使用扫描本地文件。", expectedPath)
+		fileCheck.Detail = "这里只核对数据库记录，不访问本地文件系统。"
 	default:
 		fileCheck.Status = SubscriptionDiagnosticUnknown
 		fileCheck.Summary = "暂无可核对路径记录"
-		fileCheck.Detail = fmt.Sprintf("预期目录：%s", expectedPath)
+		fileCheck.Detail = "还没有已完成下载可用于核对路径记录。"
 	}
 	return files, fileCheck
 }
@@ -835,7 +798,7 @@ func (h *SubscriptionDiagnosticsHandler) buildOrganizerDiagnostics(subscription 
 	case files.CompletedWithFile > 0:
 		organizerCheck.Status = SubscriptionDiagnosticHealthy
 		organizerCheck.Summary = "整理路径已记录"
-		organizerCheck.Detail = "已完成任务具有数据库路径记录；磁盘存在性由扫描本地文件核验。"
+		organizerCheck.Detail = "已完成任务具有数据库路径记录。"
 	default:
 		organizerCheck.Status = SubscriptionDiagnosticUnknown
 		organizerCheck.Summary = "暂无整理记录"
@@ -866,8 +829,6 @@ func episodeProgressFilePatch(pending []int) *SubscriptionFileDiagnosticsPatch {
 
 func fileDiagnosticsPatch(files SubscriptionFileDiagnostics) *SubscriptionFileDiagnosticsPatch {
 	return &SubscriptionFileDiagnosticsPatch{
-		ExpectedPath:         &files.ExpectedPath,
-		FolderExists:         &files.FolderExists,
 		RenameEnabled:        &files.RenameEnabled,
 		CompletedWithFile:    &files.CompletedWithFile,
 		CompletedMissingFile: &files.CompletedMissingFile,
@@ -899,74 +860,6 @@ func downloadDiagnosticsPatch(summary SubscriptionDownloadDiagnostics) *Subscrip
 
 func qbittorrentDiagnosticsPatch(missingTorrentTasks int) *SubscriptionDownloadDiagnosticsPatch {
 	return &SubscriptionDownloadDiagnosticsPatch{MissingTorrentTasks: &missingTorrentTasks}
-}
-
-func (h *SubscriptionDiagnosticsHandler) buildDiskDiagnostics(path string) (SubscriptionDiskDiagnostics, SubscriptionDiagnosticCheck) {
-	warningGB := h.getConfigInt64("disk.warning_threshold_gb", disk.DefaultWarningThresholdGB)
-	criticalGB := h.getConfigInt64("disk.critical_threshold_gb", disk.DefaultCriticalThresholdGB)
-	info := SubscriptionDiskDiagnostics{
-		Path:                path,
-		WarningThresholdGB:  warningGB,
-		CriticalThresholdGB: criticalGB,
-		Status:              disk.StatusHealthy,
-	}
-	check := SubscriptionDiagnosticCheck{
-		Key:   "disk",
-		Label: "磁盘空间",
-	}
-
-	if _, err := os.Stat(path); err != nil {
-		info.Status = "missing"
-		info.Error = err.Error()
-		check.Status = SubscriptionDiagnosticWarning
-		check.Summary = "下载根目录不存在"
-		check.Detail = fmt.Sprintf("%s：%s", path, err.Error())
-		return info, check
-	}
-	info.Exists = true
-
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(path, &stat); err != nil {
-		info.Status = "error"
-		info.Error = err.Error()
-		check.Status = SubscriptionDiagnosticError
-		check.Summary = "无法读取磁盘空间"
-		check.Detail = err.Error()
-		return info, check
-	}
-
-	blockSize := uint64(stat.Bsize)
-	totalBytes := int64(blockSize * stat.Blocks)
-	freeBytes := int64(blockSize * stat.Bavail)
-	usedBytes := totalBytes - freeBytes
-	freeGB := float64(freeBytes) / (1024 * 1024 * 1024)
-
-	info.TotalBytes = totalBytes
-	info.FreeBytes = freeBytes
-	info.UsedBytes = usedBytes
-	if totalBytes > 0 {
-		info.UsagePercent = float64(usedBytes) / float64(totalBytes) * 100
-	}
-
-	switch {
-	case freeGB < float64(criticalGB):
-		info.Status = disk.StatusCritical
-		check.Status = SubscriptionDiagnosticError
-		check.Summary = fmt.Sprintf("剩余 %.1f GB，低于危险阈值", freeGB)
-		check.Detail = fmt.Sprintf("危险阈值：%d GB，下载路径：%s", criticalGB, path)
-	case freeGB < float64(warningGB):
-		info.Status = disk.StatusWarning
-		check.Status = SubscriptionDiagnosticWarning
-		check.Summary = fmt.Sprintf("剩余 %.1f GB，低于警告阈值", freeGB)
-		check.Detail = fmt.Sprintf("警告阈值：%d GB，下载路径：%s", warningGB, path)
-	default:
-		info.Status = disk.StatusHealthy
-		check.Status = SubscriptionDiagnosticHealthy
-		check.Summary = fmt.Sprintf("剩余 %.1f GB", freeGB)
-		check.Detail = fmt.Sprintf("使用率 %.1f%%，下载路径：%s", info.UsagePercent, path)
-	}
-
-	return info, check
 }
 
 func (h *SubscriptionDiagnosticsHandler) buildActions(
@@ -1007,13 +900,6 @@ func (h *SubscriptionDiagnosticsHandler) buildActions(
 			Endpoint: base + "/diagnostics/retry-failed",
 			Enabled:  retryEnabled,
 			Reason:   retryReason,
-		},
-		{
-			Key:      "scan_files",
-			Label:    "扫描本地文件",
-			Method:   http.MethodPost,
-			Endpoint: base + "/scan-folder",
-			Enabled:  true,
 		},
 		{
 			Key:      "reorganize_files",
@@ -1057,33 +943,6 @@ func (h *SubscriptionDiagnosticsHandler) retryDownload(subscription *model.Subsc
 	return nil
 }
 
-func (h *SubscriptionDiagnosticsHandler) resolveBaseDownloadPath() string {
-	if h.configRepo != nil {
-		if config, err := h.configRepo.Get("download_path"); err == nil && config != nil && strings.TrimSpace(config.Value) != "" {
-			return config.Value
-		}
-	}
-	if strings.TrimSpace(h.downloadPath) != "" {
-		return h.downloadPath
-	}
-	return constants.DefaultDownloadPath
-}
-
-func (h *SubscriptionDiagnosticsHandler) getConfigInt64(key string, defaultValue int64) int64 {
-	if h.configRepo == nil {
-		return defaultValue
-	}
-	config, err := h.configRepo.Get(key)
-	if err != nil || config == nil {
-		return defaultValue
-	}
-	value, err := strconv.ParseInt(config.Value, 10, 64)
-	if err != nil {
-		return defaultValue
-	}
-	return value
-}
-
 func initialSubscriptionDiagnosticChecks() []SubscriptionDiagnosticCheck {
 	definitions := []struct {
 		key   string
@@ -1097,7 +956,6 @@ func initialSubscriptionDiagnosticChecks() []SubscriptionDiagnosticCheck {
 		{key: "qbittorrent", label: "qBittorrent"},
 		{key: "files", label: "已记录路径"},
 		{key: "organizer", label: "整理/重命名"},
-		{key: "disk", label: "磁盘空间"},
 	}
 
 	checks := make([]SubscriptionDiagnosticCheck, 0, len(definitions))
@@ -1176,11 +1034,6 @@ func downloadSummaryForActions(downloads []model.Download) SubscriptionDownloadD
 
 func downloadHasRecordedFilePath(download model.Download) bool {
 	return strings.TrimSpace(download.RenamedPath) != "" || strings.TrimSpace(download.FilePath) != ""
-}
-
-func pathIsDir(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
 }
 
 func isActiveDownloadStatus(status string) bool {

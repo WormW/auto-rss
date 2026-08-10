@@ -5,10 +5,10 @@ import "time"
 // Notification 通知记录模型
 type Notification struct {
 	ID        uint      `json:"id" gorm:"primaryKey"`
-	Type      string    `json:"type" gorm:"index"`    // telegram, email, webhook, websocket
+	Type      string    `json:"type" gorm:"index"` // telegram, email, webhook, websocket
 	Title     string    `json:"title"`
 	Message   string    `json:"message" gorm:"type:text"`
-	Status    string    `json:"status" gorm:"index"`  // pending, sent, failed
+	Status    string    `json:"status" gorm:"index"` // pending, sent, failed
 	Error     string    `json:"error" gorm:"type:text"`
 	EventID   string    `json:"event_id" gorm:"index"` // 用于去重
 	CreatedAt time.Time `json:"created_at" gorm:"index"`
@@ -43,10 +43,6 @@ const (
 	EventDownloadFailed   NotificationEvent = "download.failed"
 	EventRSSUpdate        NotificationEvent = "rss.update"
 	EventSystemError      NotificationEvent = "system.error"
-	EventDiskWarning      NotificationEvent = "disk.warning"
-	EventDiskCritical     NotificationEvent = "disk.critical"
-	EventDiskRecovered    NotificationEvent = "disk.recovered"
-	EventAutoCleanup      NotificationEvent = "disk.cleanup"
 	EventAiringSoon       NotificationEvent = "calendar.airing_soon"
 	EventNewEpisode       NotificationEvent = "calendar.new_episode"
 )

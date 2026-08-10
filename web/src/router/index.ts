@@ -47,11 +47,6 @@ const router = createRouter({
       component: () => import('@/views/Notifications.vue')
     },
     {
-      path: '/disk-monitor',
-      name: 'disk-monitor',
-      component: () => import('@/views/DiskMonitor.vue')
-    },
-    {
       path: '/config',
       name: 'config',
       component: () => import('@/views/Config.vue')

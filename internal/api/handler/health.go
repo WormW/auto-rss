@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 	"runtime"
 	"time"
 
@@ -16,7 +15,6 @@ import (
 type HealthChecker struct {
 	db        *gorm.DB
 	qbChecker QBittorrentChecker
-	config    *HealthConfig
 }
 
 // QBittorrentChecker qBittorrent 连接检查接口
@@ -24,23 +22,11 @@ type QBittorrentChecker interface {
 	GetVersion() (string, error)
 }
 
-// HealthConfig 健康检查配置
-type HealthConfig struct {
-	DiskCheckEnabled    bool
-	DiskWarningPercent  float64
-	DiskCriticalPercent float64
-}
-
 // NewHealthChecker 创建健康检查器
 func NewHealthChecker(db *gorm.DB, qbChecker QBittorrentChecker) *HealthChecker {
 	return &HealthChecker{
 		db:        db,
 		qbChecker: qbChecker,
-		config: &HealthConfig{
-			DiskCheckEnabled:    true,
-			DiskWarningPercent:  90,
-			DiskCriticalPercent: 95,
-		},
 	}
 }
 
@@ -87,10 +73,10 @@ type MemoryStatus struct {
 
 // DatabaseStatus 数据库状态
 type DatabaseStatus struct {
-	Connected       bool   `json:"connected"`
-	OpenConnections int    `json:"open_connections"`
-	InUse           int    `json:"in_use"`
-	Idle            int    `json:"idle"`
+	Connected       bool `json:"connected"`
+	OpenConnections int  `json:"open_connections"`
+	InUse           int  `json:"in_use"`
+	Idle            int  `json:"idle"`
 }
 
 // DownloadStatus 下载状态统计
@@ -127,15 +113,6 @@ func (h *HealthChecker) HealthHandler(c *gin.Context) {
 		if qbCheck.Status != "healthy" && qbCheck.Status != "unknown" {
 			overallStatus = "degraded"
 		}
-	}
-
-	// 检查磁盘空间
-	diskCheck := h.checkDiskSpace()
-	checks["disk"] = diskCheck
-	if diskCheck.Status == "critical" {
-		overallStatus = "unhealthy"
-	} else if diskCheck.Status == "warning" && overallStatus == "healthy" {
-		overallStatus = "degraded"
 	}
 
 	response := HealthResponse{
@@ -318,66 +295,6 @@ func (h *HealthChecker) checkQBittorrent() HealthCheck {
 			"version": version,
 		},
 	}
-}
-
-// checkDiskSpace 检查磁盘空间
-func (h *HealthChecker) checkDiskSpace() HealthCheck {
-	if !h.config.DiskCheckEnabled {
-		return HealthCheck{
-			Status:  "unknown",
-			Message: "disk check disabled",
-		}
-	}
-
-	// 获取下载路径的磁盘使用情况
-	diskStatus, err := getDiskUsage(getDownloadPath())
-	if err != nil {
-		return HealthCheck{
-			Status:  "unknown",
-			Message: fmt.Sprintf("failed to get disk usage: %v", err),
-		}
-	}
-
-	// 计算使用百分比
-	usedPercent := (float64(diskStatus.Used) / float64(diskStatus.Total)) * 100
-
-	// 确定状态
-	status := "healthy"
-	if usedPercent >= h.config.DiskCriticalPercent {
-		status = "critical"
-	} else if usedPercent >= h.config.DiskWarningPercent {
-		status = "warning"
-	}
-
-	return HealthCheck{
-		Status:  status,
-		Message: fmt.Sprintf("disk usage: %.1f%%", usedPercent),
-		Details: map[string]interface{}{
-			"total_gb":      formatBytes(diskStatus.Total),
-			"used_gb":       formatBytes(diskStatus.Used),
-			"free_gb":       formatBytes(diskStatus.Free),
-			"usage_percent": fmt.Sprintf("%.1f%%", usedPercent),
-			"path":          diskStatus.Path,
-		},
-	}
-}
-
-// getDownloadPath 获取下载路径
-func getDownloadPath() string {
-	// 优先使用环境变量
-	if path := os.Getenv("DOWNLOAD_PATH"); path != "" {
-		return path
-	}
-	// 默认路径
-	return "/downloads"
-}
-
-// DiskUsage 磁盘使用情况
-type DiskUsage struct {
-	Path  string
-	Total uint64
-	Used  uint64
-	Free  uint64
 }
 
 // formatBytes 格式化字节大小

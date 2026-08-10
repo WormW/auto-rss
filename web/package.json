@@ -10,7 +10,6 @@
     "test:episodes": "node --experimental-strip-types --test tests/episodes.test.ts tests/episode-ledger.test.ts",
     "test:subscription-feeds": "node --experimental-strip-types --test tests/subscription-feeds.test.ts",
     "test:diagnostics": "node --experimental-strip-types --test tests/subscription-diagnostics.test.ts",
-    "test:recovery": "node --experimental-strip-types --test tests/recovery-preview.test.ts",
     "test:tasks": "node --experimental-strip-types --test tests/task-result.test.ts",
     "test:bangumi": "node --experimental-strip-types --test tests/bangumi.test.ts"
   },

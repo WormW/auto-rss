@@ -40,9 +40,6 @@ type FileOrganizer struct {
 	stabilizeTime    time.Duration
 	processing       map[string]bool
 	procMux          sync.RWMutex
-	scanMux          sync.Mutex
-	scanRunning      bool
-	scanOnStart      bool
 	recoveryMux      sync.Mutex
 	recoveryInterval time.Duration
 	stat             func(string) (os.FileInfo, error)
@@ -95,7 +92,6 @@ func NewFileOrganizer(
 		cancel:           cancel,
 		stabilizeTime:    5 * time.Second,
 		processing:       make(map[string]bool),
-		scanOnStart:      false,
 		recoveryInterval: time.Minute,
 		stat:             os.Stat,
 		parser:           parser,
@@ -116,20 +112,10 @@ func (f *FileOrganizer) Start() error {
 	logger.Info("File organizer started",
 		"watch_dir", f.watchDir,
 		"dest_dir", f.destDir,
-		"stabilize_time", f.stabilizeTime,
-		"scan_on_start", f.scanOnStart)
+		"stabilize_time", f.stabilizeTime)
 
 	f.startTask(f.watchLoop)
 	f.startTask(f.recoveryLoop)
-	if f.scanOnStart {
-		f.startTask(func() {
-			select {
-			case <-time.After(2 * time.Second):
-				f.scanExistingFiles()
-			case <-f.ctx.Done():
-			}
-		})
-	}
 
 	return nil
 }
@@ -149,10 +135,6 @@ func (f *FileOrganizer) recoveryLoop() {
 			return
 		}
 	}
-}
-
-func (f *FileOrganizer) SetScanOnStart(enabled bool) {
-	f.scanOnStart = enabled
 }
 
 // addWatchRecursively 递归添加监控目录
@@ -206,12 +188,6 @@ func (f *FileOrganizer) startTask(fn func()) bool {
 	return true
 }
 
-// TriggerScan 手动触发文件扫描
-func (f *FileOrganizer) TriggerScan() {
-	logger.Info("Manual file scan triggered")
-	f.startTask(f.scanExistingFiles)
-}
-
 // watchLoop 监控循环
 func (f *FileOrganizer) watchLoop() {
 	for {
@@ -248,58 +224,6 @@ func (f *FileOrganizer) watchLoop() {
 			return
 		}
 	}
-}
-
-// scanExistingFiles 扫描现有文件
-func (f *FileOrganizer) scanExistingFiles() {
-	if f.ctx.Err() != nil {
-		return
-	}
-	if !f.beginScan() {
-		logger.Warn("File scan already running, skipping duplicate trigger", "watch_dir", f.watchDir)
-		return
-	}
-	defer f.endScan()
-
-	logger.Info("Scanning existing files in watch directory")
-
-	err := filepath.Walk(f.watchDir, func(path string, info os.FileInfo, err error) error {
-		if f.ctx.Err() != nil {
-			return f.ctx.Err()
-		}
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
-		if f.mover.IsVideoFile(path) {
-			f.handleNewFile(path)
-		}
-		return nil
-	})
-
-	if err != nil {
-		logger.Error("Failed to scan existing files", "error", err)
-	} else {
-		logger.Info("Existing files scan completed")
-	}
-}
-
-func (f *FileOrganizer) beginScan() bool {
-	f.scanMux.Lock()
-	defer f.scanMux.Unlock()
-	if f.scanRunning {
-		return false
-	}
-	f.scanRunning = true
-	return true
-}
-
-func (f *FileOrganizer) endScan() {
-	f.scanMux.Lock()
-	f.scanRunning = false
-	f.scanMux.Unlock()
 }
 
 // handleNewFile 处理新文件

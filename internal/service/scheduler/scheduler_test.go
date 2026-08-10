@@ -708,61 +708,6 @@ func TestProcessDownloadItemCreatesPendingIntentWithoutQBAdd(t *testing.T) {
 	assert.Equal(t, item.TorrentHash, ledger.ActiveTorrentHash)
 }
 
-func TestRSSCheckSecondPauseCheckReleasesClaimAndKeepsWatermark(t *testing.T) {
-	pubTime := time.Now().UTC().Add(-time.Hour)
-	item := schedulerRSSItem(9, "pause-race-hash", pubTime)
-	fx := newSchedulerLedgerFixture(t, []rss.RSSItem{item})
-	sub := fx.createSubscription(t)
-	originalWatermark := *sub.LastRSSPubTime
-	pauseChecks := 0
-	fx.scheduler.downloadsPaused = func() bool {
-		pauseChecks++
-		return pauseChecks >= 2
-	}
-
-	fx.scheduler.checkRSSFeeds()
-
-	assert.Equal(t, 2, pauseChecks)
-	assert.Zero(t, fx.qb.addCalls)
-	var downloadCount int64
-	require.NoError(t, fx.db.Model(&model.Download{}).Count(&downloadCount).Error)
-	assert.Zero(t, downloadCount)
-	ledger, err := fx.episodeRepo.GetBySubscriptionAndEpisode(sub.ID, item.Episode)
-	require.NoError(t, err)
-	assert.Equal(t, model.EpisodeStatusMissing, ledger.Status)
-	assert.Nil(t, ledger.ActiveDownloadID)
-	assert.Empty(t, ledger.ActiveTorrentHash)
-	after, err := repository.NewSubscriptionRepository(fx.db).GetByID(sub.ID)
-	require.NoError(t, err)
-	require.NotNil(t, after.LastRSSPubTime)
-	assert.Equal(t, originalWatermark, *after.LastRSSPubTime)
-}
-
-func TestProcessDownloadItemPauseReturnsRetryableErrorAndReleasesClaim(t *testing.T) {
-	fx := newSchedulerLedgerFixture(t, nil)
-	sub := fx.createSubscription(t)
-	item := schedulerRSSItem(10, "paused-process-hash", time.Now().UTC())
-	resource := model.EpisodeResource{Hash: item.TorrentHash, URL: item.TorrentURL, Title: item.Title}
-	decision, err := fx.episodeService.EvaluateRSSItem(t.Context(), &sub, episode.RSSResource{
-		OriginalEpisode: item.Episode,
-		RelativeEpisode: item.Episode,
-		Resource:        resource,
-	}, false)
-	require.NoError(t, err)
-	require.Equal(t, episode.DecisionDownload, decision.Action)
-	fx.scheduler.downloadsPaused = func() bool { return true }
-
-	created, err := fx.scheduler.processDownloadItem(&sub, &item, decision.EpisodeID, nil)
-
-	assert.False(t, created)
-	require.ErrorIs(t, err, errDownloadsPaused)
-	ledger, err := fx.episodeRepo.GetBySubscriptionAndEpisode(sub.ID, item.Episode)
-	require.NoError(t, err)
-	assert.Equal(t, model.EpisodeStatusMissing, ledger.Status)
-	assert.Nil(t, ledger.ActiveDownloadID)
-	assert.Empty(t, ledger.ActiveTorrentHash)
-}
-
 func TestProcessDownloadItemCreateFailureReleasesOnlyMatchingClaim(t *testing.T) {
 	fx := newSchedulerLedgerFixture(t, nil)
 	sub := fx.createSubscription(t)

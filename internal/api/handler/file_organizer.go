@@ -20,28 +20,6 @@ func NewFileOrganizerHandler(appCtx *app.Context) *FileOrganizerHandler {
 	}
 }
 
-// TriggerScan 手动触发文件扫描
-func (h *FileOrganizerHandler) TriggerScan(c *gin.Context) {
-	organizer := h.appCtx.GetFileOrganizer()
-	if organizer == nil {
-		logger.Warn("File organizer not initialized")
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "文件整理服务未启用",
-		})
-		return
-	}
-
-	organizer.TriggerScan()
-
-	logger.Info("Manual file scan triggered via API")
-
-	c.JSON(http.StatusOK, gin.H{
-		"code":    0,
-		"message": "文件整理任务已触发",
-	})
-}
-
 // ReloadConfig 重新加载文件整理配置
 func (h *FileOrganizerHandler) ReloadConfig(c *gin.Context) {
 	logger.Info("Reloading file organizer configuration")

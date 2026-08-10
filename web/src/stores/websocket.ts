@@ -126,20 +126,6 @@ export const useWebSocketStore = defineStore('websocket', {
           })
           break
 
-        case 'disk_warning':
-          message.warning(`${payload.title}: ${payload.message}`, {
-            duration: 10000,
-            closable: true
-          })
-          break
-
-        case 'disk_critical':
-          message.error(`${payload.title}: ${payload.message}`, {
-            duration: 0, // Persistent until closed
-            closable: true
-          })
-          break
-
         default:
           // Generic notification
           message.info(`${payload.title}: ${payload.message}`, {

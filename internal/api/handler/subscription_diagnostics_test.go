@@ -123,9 +123,9 @@ func TestSubscriptionDiagnosticsHandler_GetInitialState(t *testing.T) {
 	require.Equal(t, 0, resp.Code)
 	require.Equal(t, string(SubscriptionDiagnosticUnknown), resp.Data.Summary.Overall)
 	require.Equal(t, 0, resp.Data.Summary.Checked)
-	require.Equal(t, 9, resp.Data.Summary.Total)
-	require.Equal(t, 9, resp.Data.Summary.Unknown)
-	require.Len(t, resp.Data.Checks, 9)
+	require.Equal(t, 8, resp.Data.Summary.Total)
+	require.Equal(t, 8, resp.Data.Summary.Unknown)
+	require.Len(t, resp.Data.Checks, 8)
 	require.NotNil(t, resp.Data.Downloads.FailedItems)
 	require.NotNil(t, resp.Data.Files.MissingEpisodes)
 	for _, check := range resp.Data.Checks {
@@ -141,7 +141,8 @@ func TestSubscriptionDiagnosticsHandler_GetInitialState(t *testing.T) {
 	require.True(t, actionByKey["refresh_rss"].Enabled)
 	require.False(t, actionByKey["retry_failed"].Enabled)
 	require.Equal(t, "请先检查下载任务", actionByKey["retry_failed"].Reason)
-	require.True(t, actionByKey["scan_files"].Enabled)
+	_, exposesScan := actionByKey["scan_files"]
+	require.False(t, exposesScan)
 	require.NotNil(t, db)
 }
 

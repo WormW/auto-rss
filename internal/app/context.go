@@ -61,13 +61,6 @@ func (ctx *Context) GetMediaLibraryService() *medialibrary.Service {
 	return ctx.mediaLibrarySvc
 }
 
-// GetFileOrganizer 获取文件整理服务
-func (ctx *Context) GetFileOrganizer() *organizer.FileOrganizer {
-	ctx.mu.RLock()
-	defer ctx.mu.RUnlock()
-	return ctx.fileOrganizer
-}
-
 // RegisterShutdownHook registers a service cleanup callback for graceful shutdown.
 func (ctx *Context) RegisterShutdownHook(hook func()) {
 	if hook == nil {
@@ -124,8 +117,6 @@ func (ctx *Context) ReloadFileOrganizer() error {
 		logger.Error("Failed to create file organizer", "error", err)
 		return err
 	}
-	fileOrg.SetScanOnStart(ctx.cfg.FileOrganizerScanOnStart)
-
 	// 启动服务
 	if err := fileOrg.Start(); err != nil {
 		logger.Error("Failed to start file organizer", "error", err)

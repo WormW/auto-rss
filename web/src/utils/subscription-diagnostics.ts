@@ -25,9 +25,6 @@ export function mergeDiagnosticCheck(
     files: result.files
       ? { ...current.files, ...result.files }
       : current.files,
-    disk: result.disk
-      ? { ...current.disk, ...result.disk }
-      : current.disk,
     actions: result.actions ?? current.actions
   }
 }

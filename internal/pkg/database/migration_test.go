@@ -104,27 +104,6 @@ func TestMigrateRSSTimeout_Idempotent(t *testing.T) {
 	}
 }
 
-func TestRunMigrationsAddsDiskCleanupFailureColumns(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("Failed to connect to test database: %v", err)
-	}
-
-	if err := RunMigrations(db); err != nil {
-		t.Fatalf("RunMigrations failed: %v", err)
-	}
-	if err := RunMigrations(db); err != nil {
-		t.Fatalf("RunMigrations should be repeatable: %v", err)
-	}
-
-	if !db.Migrator().HasColumn(&model.DiskCleanupRecord{}, "failed_count") {
-		t.Fatalf("expected disk cleanup failed_count column")
-	}
-	if !db.Migrator().HasColumn(&model.DiskCleanupRecord{}, "failed_paths") {
-		t.Fatalf("expected disk cleanup failed_paths column")
-	}
-}
-
 func TestRunMigrationsAddsReplacementRecoverySnapshotColumnsToExistingLedger(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

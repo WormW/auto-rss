@@ -54,9 +54,8 @@ type Config struct {
 	DownloadPath string
 
 	// 文件整理配置
-	FileOrganizerEnabled     bool   // 是否启用文件自动整理
-	FileOrganizerDir         string // 整理目录（监控和目标是同一目录）
-	FileOrganizerScanOnStart bool   // 启动时是否扫描历史文件
+	FileOrganizerEnabled bool   // 是否启用文件自动整理
+	FileOrganizerDir     string // 整理目录（监控和目标是同一目录）
 
 	// JWT配置
 	AuthEnabled           bool
@@ -99,9 +98,8 @@ func Load() (*Config, error) {
 		DownloadPath:                   getEnv("DOWNLOAD_PATH", "/downloads"),
 
 		// 文件整理配置
-		FileOrganizerEnabled:     getEnv("FILE_ORGANIZER_ENABLED", "false") == "true",
-		FileOrganizerDir:         getEnv("FILE_ORGANIZER_DIR", ""),
-		FileOrganizerScanOnStart: getEnv("FILE_ORGANIZER_SCAN_ON_START", "false") == "true",
+		FileOrganizerEnabled: getEnv("FILE_ORGANIZER_ENABLED", "false") == "true",
+		FileOrganizerDir:     getEnv("FILE_ORGANIZER_DIR", ""),
 
 		// JWT配置
 		AuthEnabled:           getEnv("AUTH_ENABLED", "false") == "true",
@@ -265,10 +263,6 @@ func (c *Config) LoadFromDB(db *gorm.DB) error {
 		case "file_organizer_dir":
 			if cfg.Value != "" {
 				c.FileOrganizerDir = cfg.Value
-			}
-		case "file_organizer_scan_on_start":
-			if cfg.Value != "" {
-				c.FileOrganizerScanOnStart = (cfg.Value == "true" || cfg.Value == "1")
 			}
 		}
 	}

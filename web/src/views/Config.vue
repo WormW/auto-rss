@@ -136,14 +136,6 @@
             </n-text>
           </template>
         </n-form-item>
-        <n-form-item label="启动时扫描现有文件">
-          <n-switch v-model:value="fileOrganizerConfig.scanOnStart" :disabled="!fileOrganizerConfig.enabled" />
-          <template #feedback>
-            <n-text depth="3" style="font-size: 12px">
-              外置硬盘或大型媒体库建议关闭，仅在需要补整理历史文件时手动触发
-            </n-text>
-          </template>
-        </n-form-item>
         <n-form-item>
           <n-button type="primary" @click="saveFileOrganizerConfig">保存配置</n-button>
         </n-form-item>
@@ -306,176 +298,16 @@
       </n-form>
     </n-card>
 
-    <n-card title="恢复扫描预览" class="config-card">
-      <div class="recovery-preview">
-        <div class="recovery-toolbar">
-          <div class="recovery-controls">
-            <n-select
-              v-model:value="selectedRecoverySubscriptionId"
-              :options="recoverySubscriptionOptions"
-              :loading="recoverySubscriptionsLoading"
-              filterable
-              placeholder="选择扫描范围"
-              class="recovery-scope-select"
-              @update:value="handleRecoveryScopeChange"
-            />
-            <n-button type="primary" :loading="recoveryLoading" @click="runRecoveryPreview">
-              生成预览
-            </n-button>
-          </div>
-          <n-space align="center" wrap>
-            <n-tag type="info">dry-run</n-tag>
-            <n-tag type="default">{{ recoveryScopeLabel }}</n-tag>
-            <n-tag v-if="recoveryResult" type="success">
-              {{ recoveryResult.applied ? '已应用' : '未应用' }}
-            </n-tag>
-          </n-space>
-        </div>
-
-        <n-alert type="info" class="recovery-safety-note" :show-icon="false">
-          预览只调用 recovery dry-run，报告匹配、拟议变更、缺失记录和未匹配文件。
-        </n-alert>
-
-        <n-spin :show="recoveryLoading">
-          <n-empty v-if="!recoveryResult" description="暂无恢复扫描预览" />
-
-          <div v-else class="recovery-report">
-            <div class="recovery-summary-grid">
-              <div class="recovery-summary-item">
-                <span>扫描文件</span>
-                <strong>{{ recoveryResult.scanned_files }}</strong>
-              </div>
-              <div class="recovery-summary-item">
-                <span>匹配文件</span>
-                <strong>{{ recoveryResult.matched_files }}</strong>
-              </div>
-              <div class="recovery-summary-item">
-                <span>订阅命中</span>
-                <strong>{{ recoveryResult.subscription_count }}</strong>
-              </div>
-              <div class="recovery-summary-item">
-                <span>拟议变更</span>
-                <strong>{{ recoveryChangeCount }}</strong>
-              </div>
-              <div class="recovery-summary-item">
-                <span>缺失记录</span>
-                <strong>{{ recoveryMissingCount }}</strong>
-              </div>
-              <div class="recovery-summary-item">
-                <span>未匹配</span>
-                <strong>{{ recoveryResult.orphan_file_count }}</strong>
-              </div>
-            </div>
-
-            <n-empty
-              v-if="recoveryResultHasNoSubscriptionMatches"
-              class="recovery-empty-result"
-              :description="recoveryEmptyDescription"
-            />
-
-            <div v-if="recoveryResult.subscriptions.length" class="recovery-section">
-              <div class="recovery-section-title">订阅对账</div>
-              <div class="recovery-subscription-list">
-                <div
-                  v-for="subscription in recoveryResult.subscriptions"
-                  :key="subscription.subscription_id"
-                  class="recovery-subscription"
-                >
-                  <div class="recovery-subscription-head">
-                    <div>
-                      <div class="recovery-subscription-name">{{ subscription.name }}</div>
-                      <div class="recovery-subscription-meta">
-                        ID {{ subscription.subscription_id }} · 磁盘集数 {{ formatBoundedEpisodeList(subscription.episode_samples, subscription.episodes_on_disk_count) }}
-                      </div>
-                    </div>
-                    <n-space size="small" wrap>
-                      <n-tag
-                        v-if="episodeChanged(subscription)"
-                        type="warning"
-                        size="small"
-                      >
-                        集数 {{ subscription.current_episode_old }} → {{ subscription.current_episode_new }}
-                      </n-tag>
-                      <n-tag
-                        v-if="latestChanged(subscription)"
-                        type="warning"
-                        size="small"
-                      >
-                        最新 {{ subscription.latest_episode_old }} → {{ subscription.latest_episode_new }}
-                      </n-tag>
-                      <n-tag v-if="!hasRecoveryChanges(subscription)" size="small">
-                        无拟议变更
-                      </n-tag>
-                    </n-space>
-                  </div>
-
-                  <div class="recovery-action-grid">
-                    <div class="recovery-action">
-                      <span>待更新下载</span>
-                      <strong>{{ subscription.downloads_to_update_count }}</strong>
-                      <small>{{ formatBoundedIdList(subscription.downloads_to_update_ids, subscription.downloads_to_update_count) }}</small>
-                    </div>
-                    <div class="recovery-action">
-                      <span>待创建集数</span>
-                      <strong>{{ subscription.downloads_to_create_count }}</strong>
-                      <small>{{ formatBoundedEpisodeList(subscription.downloads_to_create, subscription.downloads_to_create_count) }}</small>
-                    </div>
-                    <div class="recovery-action">
-                      <span>缺失下载</span>
-                      <strong>{{ subscription.downloads_missing_count }}</strong>
-                      <small>{{ formatBoundedIdList(subscription.downloads_missing_ids, subscription.downloads_missing_count) }}</small>
-                    </div>
-                    <div class="recovery-action">
-                      <span>匹配文件</span>
-                      <strong>{{ subscription.matched_episode_count }}</strong>
-                      <small>{{ formatMatchedEpisodePreview(subscription) }}</small>
-                    </div>
-                  </div>
-
-                  <div v-if="subscription.matched_episode_count" class="recovery-file-list">
-                    <div
-                      v-for="file in subscription.matched_episode_samples?.slice(0, 6) ?? []"
-                      :key="`${subscription.subscription_id}-${file.path}`"
-                      class="recovery-file"
-                    >
-                      <span>S{{ padNumber(file.season) }}E{{ padNumber(file.episode) }}</span>
-                      <code>{{ file.path }}</code>
-                    </div>
-                    <div v-if="getMatchedEpisodeOmitted(subscription)" class="recovery-more">
-                      另有 {{ getMatchedEpisodeOmitted(subscription) }} 个匹配文件
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div v-if="recoveryResult.orphan_file_count" class="recovery-section">
-              <div class="recovery-section-title">未匹配文件</div>
-              <div class="recovery-orphan-list">
-                <code v-for="file in recoveryOrphanPreview.files" :key="file">
-                  {{ file }}
-                </code>
-              </div>
-              <div v-if="recoveryOrphanPreview.omitted" class="recovery-more">
-                另有 {{ recoveryOrphanPreview.omitted }} 个未匹配文件
-              </div>
-            </div>
-          </div>
-        </n-spin>
-      </div>
-    </n-card>
-
     <n-card title="操作" class="config-card">
       <n-space wrap>
         <n-button type="info" @click="handleManualRefresh">手动刷新 RSS</n-button>
-        <n-button type="success" @click="handleTriggerFileOrganizer">手动整理文件</n-button>
       </n-space>
     </n-card>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted } from 'vue'
+import { ref, onMounted } from 'vue'
 import {
   NCard,
   NForm,
@@ -488,8 +320,6 @@ import {
   NSelect,
   NTag,
   NAlert,
-  NEmpty,
-  NSpin,
   NText,
   NIcon,
   useMessage
@@ -500,25 +330,9 @@ import {
   rssApi,
   fileOrganizerApi,
   mediaLibraryApi,
-  recoveryApi,
-  subscriptionApi,
   type MediaLibraryConfig,
-  type RecoveryScanResult,
-  type RecoverySubscriptionScanResult,
-  type Subscription,
   type SmartFetchConfig
 } from '@/api'
-import {
-  countRecoveryChanges,
-  countRecoveryMissing,
-  episodeChanged,
-  getRecoveryAppliedWarning,
-  getRecoveryEmptyDescription,
-  getRecoveryOrphanPreview,
-  hasNoRecoverySubscriptionMatches,
-  hasRecoveryChanges,
-  latestChanged
-} from '@/utils/recovery-preview'
 
 const message = useMessage()
 
@@ -551,8 +365,7 @@ const systemConfig = ref({
 
 const fileOrganizerConfig = ref({
   enabled: false,
-  dir: '',
-  scanOnStart: false
+  dir: ''
 })
 
 const mediaLibraryConfig = ref<MediaLibraryConfig & { tokenConfigured?: boolean }>({
@@ -587,46 +400,6 @@ const presetOptions = ref<Array<{ label: string; value: string }>>([])
 const templateVariables = ref<Record<string, string>>({})
 const previewPath = ref('')
 const previewSample = ref('葬送的芙莉莲 S01E03')
-
-const recoveryLoading = ref(false)
-const recoverySubscriptionsLoading = ref(false)
-const selectedRecoverySubscriptionId = ref(0)
-const recoverySubscriptions = ref<Subscription[]>([])
-const recoveryResult = ref<RecoveryScanResult | null>(null)
-
-const recoverySubscriptionOptions = computed(() => [
-  { label: '全部订阅', value: 0 },
-  ...recoverySubscriptions.value.map((subscription) => ({
-    label: `${subscription.name} · ID ${subscription.id}`,
-    value: subscription.id
-  }))
-])
-
-const recoveryScopeLabel = computed(() => {
-  if (!selectedRecoverySubscriptionId.value) return '全部订阅'
-  const subscription = recoverySubscriptions.value.find((item) => item.id === selectedRecoverySubscriptionId.value)
-  return subscription ? `订阅：${subscription.name}` : `订阅 ID ${selectedRecoverySubscriptionId.value}`
-})
-
-const recoveryChangeCount = computed(() => {
-  return countRecoveryChanges(recoveryResult.value)
-})
-
-const recoveryMissingCount = computed(() => {
-  return countRecoveryMissing(recoveryResult.value)
-})
-
-const recoveryResultHasNoSubscriptionMatches = computed(() => {
-  return hasNoRecoverySubscriptionMatches(recoveryResult.value)
-})
-
-const recoveryEmptyDescription = computed(() => {
-  return getRecoveryEmptyDescription(selectedRecoverySubscriptionId.value, recoveryScopeLabel.value)
-})
-
-const recoveryOrphanPreview = computed(() => {
-  return getRecoveryOrphanPreview(recoveryResult.value)
-})
 
 // 加载重命名模板预设
 const loadRenamePresets = async () => {
@@ -805,9 +578,6 @@ const loadConfig = async () => {
         case 'file_organizer_dir':
           fileOrganizerConfig.value.dir = config.value
           break
-        case 'file_organizer_scan_on_start':
-          fileOrganizerConfig.value.scanOnStart = config.value === 'true'
-          break
       }
     })
   } catch (error) {
@@ -849,24 +619,6 @@ const loadMediaLibraryConfig = async () => {
     }
   } catch (error) {
     message.error('加载媒体库配置失败')
-  }
-}
-
-const loadRecoverySubscriptions = async () => {
-  recoverySubscriptionsLoading.value = true
-  try {
-    const res: any = await subscriptionApi.list()
-    recoverySubscriptions.value = Array.isArray(res.data?.list) ? res.data.list : []
-    if (
-      selectedRecoverySubscriptionId.value &&
-      !recoverySubscriptions.value.some((subscription) => subscription.id === selectedRecoverySubscriptionId.value)
-    ) {
-      selectedRecoverySubscriptionId.value = 0
-    }
-  } catch (error) {
-    message.error('加载订阅范围失败')
-  } finally {
-    recoverySubscriptionsLoading.value = false
   }
 }
 
@@ -993,7 +745,6 @@ const saveFileOrganizerConfig = async () => {
   try {
     await configApi.update('file_organizer_enabled', fileOrganizerConfig.value.enabled.toString())
     await configApi.update('file_organizer_dir', fileOrganizerConfig.value.dir)
-    await configApi.update('file_organizer_scan_on_start', fileOrganizerConfig.value.scanOnStart.toString())
 
     // 重新加载文件整理配置
     try {
@@ -1030,62 +781,6 @@ const testConnection = async () => {
   }
 }
 
-const runRecoveryPreview = async () => {
-  recoveryLoading.value = true
-  try {
-    const subscriptionId = selectedRecoverySubscriptionId.value || undefined
-    const response: any = await recoveryApi.scanDryRun(subscriptionId)
-    recoveryResult.value = response.data as RecoveryScanResult
-    const appliedWarning = getRecoveryAppliedWarning(recoveryResult.value)
-    if (appliedWarning) {
-      message.warning(appliedWarning)
-      return
-    }
-    message.success('恢复扫描预览已生成')
-  } catch (error: any) {
-    const errorMsg = error?.response?.data?.message || '恢复扫描预览失败'
-    message.error(errorMsg)
-  } finally {
-    recoveryLoading.value = false
-  }
-}
-
-const handleRecoveryScopeChange = () => {
-  recoveryResult.value = null
-}
-
-const padNumber = (value: number) => String(value).padStart(2, '0')
-
-const formatBoundedEpisodeList = (episodes: number[] = [], totalCount = episodes.length) => {
-  if (!totalCount) return '无'
-  const preview = episodes.slice(0, 12).join(', ')
-  const omitted = Math.max(0, totalCount - episodes.slice(0, 12).length)
-  return `${preview || '已匹配'}${omitted ? ` +${omitted}` : ''}`
-}
-
-const formatBoundedIdList = (ids: number[] = [], totalCount = ids.length) => {
-  if (!totalCount) return '无'
-  const previewIds = ids.slice(0, 8)
-  const preview = previewIds.map((id) => `#${id}`).join(', ')
-  const omitted = Math.max(0, totalCount - previewIds.length)
-  return `${preview || '已匹配'}${omitted ? ` +${omitted}` : ''}`
-}
-
-const formatMatchedEpisodePreview = (subscription: RecoverySubscriptionScanResult) => {
-  if (!subscription.matched_episode_count) return '无'
-  const episodes = (subscription.matched_episode_samples ?? []).map((file) => file.episode)
-  const uniqueEpisodes = Array.from(new Set(episodes)).sort((a, b) => a - b)
-  return formatBoundedEpisodeList(uniqueEpisodes, subscription.matched_episode_count)
-}
-
-const getMatchedEpisodeOmitted = (subscription: RecoverySubscriptionScanResult) => {
-  const rendered = Math.min(subscription.matched_episode_samples?.length ?? 0, 6)
-  return Math.max(
-    0,
-    subscription.matched_episode_count - rendered
-  )
-}
-
 const handleManualRefresh = async () => {
   try {
     await rssApi.refresh()
@@ -1095,23 +790,12 @@ const handleManualRefresh = async () => {
   }
 }
 
-const handleTriggerFileOrganizer = async () => {
-  try {
-    await fileOrganizerApi.triggerScan()
-    message.success('文件整理任务已触发')
-  } catch (error: any) {
-    const errorMsg = error?.response?.data?.message || '触发文件整理失败'
-    message.error(errorMsg)
-  }
-}
-
 onMounted(() => {
   loadConfig()
   loadSmartFetchConfig()
   loadMediaLibraryConfig()
   loadRenamePresets()
   loadRenameTemplate()
-  loadRecoverySubscriptions()
 })
 </script>
 
@@ -1150,165 +834,6 @@ onMounted(() => {
 .mapping-arrow {
   color: #8a8f98;
   font-size: 14px;
-}
-
-.recovery-preview {
-  width: 100%;
-}
-
-.recovery-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-bottom: 12px;
-}
-
-.recovery-controls {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.recovery-scope-select {
-  width: min(360px, 62vw);
-}
-
-.recovery-safety-note {
-  margin-bottom: 14px;
-}
-
-.recovery-report {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-}
-
-.recovery-summary-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-  gap: 10px;
-}
-
-.recovery-empty-result {
-  padding: 14px 0 4px;
-}
-
-.recovery-summary-item,
-.recovery-action {
-  min-width: 0;
-  border: 1px solid var(--n-border-color);
-  border-radius: 8px;
-  padding: 12px;
-  background: var(--n-color);
-}
-
-.recovery-summary-item span,
-.recovery-action span {
-  display: block;
-  color: #7a808a;
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.recovery-summary-item strong,
-.recovery-action strong {
-  display: block;
-  margin-top: 4px;
-  font-size: 22px;
-  line-height: 1.2;
-}
-
-.recovery-action small {
-  display: block;
-  min-height: 18px;
-  margin-top: 4px;
-  color: #7a808a;
-  overflow-wrap: anywhere;
-}
-
-.recovery-section {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.recovery-section-title {
-  font-weight: 600;
-}
-
-.recovery-subscription-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.recovery-subscription {
-  border: 1px solid var(--n-border-color);
-  border-radius: 8px;
-  padding: 14px;
-}
-
-.recovery-subscription-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-.recovery-subscription-name {
-  font-weight: 600;
-  line-height: 1.4;
-  overflow-wrap: anywhere;
-}
-
-.recovery-subscription-meta {
-  margin-top: 2px;
-  color: #7a808a;
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-
-.recovery-action-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
-  gap: 8px;
-}
-
-.recovery-file-list,
-.recovery-orphan-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 12px;
-}
-
-.recovery-file {
-  display: grid;
-  grid-template-columns: 68px minmax(0, 1fr);
-  gap: 8px;
-  align-items: start;
-  color: #7a808a;
-  font-size: 12px;
-}
-
-.recovery-file span {
-  font-variant-numeric: tabular-nums;
-}
-
-.recovery-file code,
-.recovery-orphan-list code {
-  white-space: normal;
-  overflow-wrap: anywhere;
-  color: inherit;
-}
-
-.recovery-more {
-  color: #7a808a;
-  font-size: 12px;
 }
 
 /* 移动端响应式 */
@@ -1356,23 +881,5 @@ onMounted(() => {
     min-width: 0;
   }
 
-  .recovery-toolbar,
-  .recovery-controls {
-    align-items: stretch;
-    flex-direction: column;
-    width: 100%;
-  }
-
-  .recovery-scope-select {
-    width: 100%;
-  }
-
-  .recovery-subscription-head {
-    flex-direction: column;
-  }
-
-  .recovery-file {
-    grid-template-columns: 1fr;
-  }
 }
 </style>

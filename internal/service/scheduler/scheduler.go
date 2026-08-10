@@ -13,7 +13,6 @@ import (
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
 	"github.com/WormW/auto-rss/internal/repository"
-	"github.com/WormW/auto-rss/internal/service/disk"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/episode"
 	"github.com/WormW/auto-rss/internal/service/rss"
@@ -71,7 +70,6 @@ type scheduler struct {
 	rssCheckInterval string
 	rssParser        rss.Parser
 	episodeService   *episode.Service
-	downloadsPaused  func() bool
 	rssCheckRunning  atomic.Bool
 	smartFetchFilter *SmartFetchFilter // 智能拉取过滤器
 }
@@ -98,7 +96,6 @@ func NewScheduler(
 		rssCheckInterval: rssCheckInterval,
 		rssParser:        rssParser,
 		episodeService:   episodeService,
-		downloadsPaused:  disk.IsDownloadsPaused,
 		smartFetchFilter: NewSmartFetchFilter(downloadRepo, repository.NewEpisodeRepository(db)),
 	}
 }
@@ -625,14 +622,6 @@ func (s *scheduler) processDownloadItemWithResult(sub *model.Subscription, item 
 		return cause
 	}
 
-	// 检查是否因磁盘空间危险而暂停下载
-	if s.areDownloadsPaused() {
-		logger.Info("Skipping download creation because downloads are paused",
-			"subscription", sub.Name,
-			"title", item.Title)
-		return downloadProcessResult{}, releaseClaim(errDownloadsPaused)
-	}
-
 	minSizeBytes := minTorrentSizeBytes(s.configRepo)
 	if shouldSkipSmallTorrent(item, minSizeBytes) {
 		s.logSmallTorrentSkip(sub, item, minSizeBytes)
@@ -748,15 +737,6 @@ func feedErrorDetail(feed model.SubscriptionFeed, err error) string {
 	return fmt.Sprintf("%s: %v", name, err)
 }
 
-var errDownloadsPaused = errors.New("downloads are paused")
-
-func (s *scheduler) areDownloadsPaused() bool {
-	if s.downloadsPaused == nil {
-		return disk.IsDownloadsPaused()
-	}
-	return s.downloadsPaused()
-}
-
 type downloadPreflightResult struct {
 	skip      bool
 	retryable bool
@@ -764,12 +744,6 @@ type downloadPreflightResult struct {
 }
 
 func (s *scheduler) downloadPreflight(sub *model.Subscription, item *rss.RSSItem) downloadPreflightResult {
-	if s.areDownloadsPaused() {
-		logger.Info("Skipping download creation because downloads are paused",
-			"subscription", sub.Name,
-			"title", item.Title)
-		return downloadPreflightResult{skip: true, retryable: true, reason: "downloads_paused"}
-	}
 	minSizeBytes := minTorrentSizeBytes(s.configRepo)
 	if shouldSkipSmallTorrent(item, minSizeBytes) {
 		s.logSmallTorrentSkip(sub, item, minSizeBytes)

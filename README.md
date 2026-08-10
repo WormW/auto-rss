@@ -16,7 +16,7 @@
 
 ## 简介
 
-Auto-RSS 面向 NAS、家庭服务器和个人媒体库场景，通过 RSS 订阅番剧更新，自动解析条目、推送到 qBittorrent、同步下载状态，并按媒体库友好的目录和文件名整理成片。项目当前使用 SQLite 持久化数据，后端提供 REST API，前端使用 Vue 3 管理订阅、下载、配置、通知、日历、磁盘和备份迁移。
+Auto-RSS 面向 NAS、家庭服务器和个人媒体库场景，通过 RSS 订阅番剧更新，自动解析条目、推送到 qBittorrent、同步下载状态，并按媒体库友好的目录和文件名整理成片。项目当前使用 SQLite 持久化数据，后端提供 REST API，前端使用 Vue 3 管理订阅、下载、配置、通知、日历和备份迁移。
 
 ---
 
@@ -39,10 +39,10 @@ Auto-RSS 面向 NAS、家庭服务器和个人媒体库场景，通过 RSS 订�
   - Bangumi 搜索、按名称匹配、条目详情、订阅元数据补全和后台更新。
   - Bangumi 封面下载、本地封面访问和缺失封面 fallback。
 
-- **文件整理与恢复**
+- **文件整理**
   - 自定义重命名模板、模板预设、重命名预览。
   - 下载完成后的目录整理和命名。
-  - 手动重新整理、批量重命名、文件夹扫描、恢复扫描。
+  - 手动重新整理和批量重命名。
   - 订阅名称或季度变化后可触发相关文件重命名任务。
 
 - **组织与筛选**
@@ -51,12 +51,10 @@ Auto-RSS 面向 NAS、家庭服务器和个人媒体库场景，通过 RSS 订�
   - 标签创建、更新、删除和订阅标签关联。
   - 下载历史查询、下载统计和 RSS 健康检查 API 已发布，可用于 Web UI、脚本和后续集成验证。
 
-- **通知、日历与磁盘**
+- **通知与日历**
   - 通知历史、Telegram、Email、Webhook、WebSocket 通知。
   - Webhook 预设模板，支持默认、Nanobot、OpenClaw、Discord、Slack 等格式。
   - 追番日历、本周/下周/今日排期。
-  - 磁盘状态、阈值配置、低空间通知、危险状态暂停新下载。
-  - 后台自动清理服务已实现。
 
 - **认证、运维与迁移**
   - `AUTH_ENABLED=false` 默认兼容本地/NAS 部署。
@@ -69,13 +67,11 @@ Auto-RSS 面向 NAS、家庭服务器和个人媒体库场景，通过 RSS 订�
 
 ### 实验性或受限
 
-- **磁盘手动清理**：`POST /api/v1/disk/cleanup` 已复用后台清理逻辑，按年龄或空间删除已完成下载记录和文件，并返回真实删除数量、释放字节数、清理前后可用空间和逐项失败原因；清理历史接口会返回持久化的清理摘要。
 - **RSS 源适配**：多 RSS 源管理已支持，但具体条目解析能力仍主要围绕 Mikan 风格标题和种子链接。
 - **备份导入**：支持 Auto-RSS 和 Auto-Bangumi 数据格式迁移；导入前建议先使用预览接口确认策略和差异。
 
 ### 计划中
 
-- 多磁盘/分区监控和更多存储后端空间监控。
 - 更多 RSS 站点适配和源级解析规则。
 - PostgreSQL 或其他外部数据库支持。
 - 更细粒度的多用户权限和审计能力。
@@ -150,7 +146,7 @@ cp .env.example .env
 | `RATE_LIMIT_MAX_ENTRIES` | `10000` | 限流客户端缓存上限 |
 | `RATE_LIMIT_TTL` | `1h` | 限流客户端不活跃清理时间 |
 
-运行时配置也可通过 Web UI 或 `/api/v1/config` 写入数据库，例如 qBittorrent 连接、下载路径、代理、重命名模板、磁盘阈值和通知渠道。自动 RSS 下载会跳过 RSS enclosure 明确标注小于 `min_torrent_size_bytes` 的条目，默认值为 `52428800`（50 MiB），设置为 `0` 可关闭该保护；RSS 未提供大小时会继续按原流程处理。
+运行时配置也可通过 Web UI 或 `/api/v1/config` 写入数据库，例如 qBittorrent 连接、下载路径、代理、重命名模板和通知渠道。自动 RSS 下载会跳过 RSS enclosure 明确标注小于 `min_torrent_size_bytes` 的条目，默认值为 `52428800`（50 MiB），设置为 `0` 可关闭该保护；RSS 未提供大小时会继续按原流程处理。
 
 详细配置说明请参考 [部署文档](docs/DEPLOY.md#配置说明)。MCP 使用说明请参考 [MCP 服务文档](docs/MCP.md)。
 
@@ -175,7 +171,6 @@ cp .env.example .env
 - [API 文档](docs/API.md)
 - [部署文档](docs/DEPLOY.md)
 - [Webhook 通知](docs/WEBHOOK_NOTIFICATION.md)
-- [磁盘监控说明](docs/DISK_MONITOR_FEATURE.md)
 - [追番日历说明](docs/CALENDAR_FEATURE.md)
 - [字幕组功能设计](docs/FANSUB_DESIGN.md)
 - [多 feed 订阅设计](docs/superpowers/specs/2026-07-11-multi-feed-subscription-design.md)
