@@ -18,16 +18,12 @@ import (
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/calendar"
-	"github.com/WormW/auto-rss/internal/service/disk"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/mikan"
-	"github.com/WormW/auto-rss/internal/service/recovery"
 	"github.com/WormW/auto-rss/internal/service/scheduler"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"gorm.io/gorm"
 )
-
-const recoveryPreviewSampleLimit = 10
 
 type Dependencies struct {
 	DB               *gorm.DB
@@ -54,7 +50,6 @@ type Server struct {
 	mikanService     *mikan.MikanService
 	bangumiService   *bangumi.BangumiService
 	calendarService  *calendar.Calendar
-	diskMonitor      *disk.Monitor
 	mcpServer        *mcp.Server
 	registeredTools  []registeredMCPTool
 }
@@ -73,7 +68,6 @@ func New(deps Dependencies) *Server {
 		mikanService:     mikan.NewMikanService(""),
 		bangumiService:   bangumi.NewBangumiService(),
 		calendarService:  calendar.NewCalendar(deps.SubscriptionRepo, deps.DownloadRepo),
-		diskMonitor:      disk.NewMonitor(deps.DB, deps.DownloadRepo, deps.SubscriptionRepo, deps.ConfigRepo),
 	}
 
 	s.mcpServer = mcp.NewServer(&mcp.Implementation{
@@ -113,7 +107,7 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) registerTools() {
-	addTool(s, "get_system_overview", "Get a compact operational overview of Auto-RSS: subscription counts, download status counts, RSS source counts, and disk state. Use this first when the user asks what needs attention or whether the system is healthy. This is read-only and avoids exposing secret configuration values.", true, s.getSystemOverview)
+	addTool(s, "get_system_overview", "Get a compact operational overview of Auto-RSS: subscription counts, download status counts, and RSS source counts. Use this first when the user asks what needs attention or whether the system is healthy. This is read-only and avoids exposing secret configuration values.", true, s.getSystemOverview)
 	addTool(s, "list_subscriptions", "List Auto-RSS subscriptions with cursor pagination and optional filters. Use this to find subscription IDs before toggling or inspecting a subscription. Do not use it for raw download history; call list_downloads for that.", true, s.listSubscriptions)
 	addTool(s, "get_subscription", "Get one subscription plus its recent downloads. Use this when you need detailed status, episode progress, calendar fields, Bangumi metadata, or recent failures for a known subscription ID. This is read-only.", true, s.getSubscription)
 	addTool(s, "create_subscription", "Create a new anime RSS subscription. Use this after you have a concrete RSS feed URL, usually from get_mikan_fansubs or a user-provided feed. Use search_bangumi first when you need a Bangumi subject ID or episode metadata; do not call this just to preview search results.", false, s.createSubscription)
@@ -122,14 +116,12 @@ func (s *Server) registerTools() {
 	addTool(s, "get_download", "Get one download record by ID. Use this before retrying a download or when a user asks about one specific failed or stalled item. This is read-only.", true, s.getDownload)
 	addTool(s, "retry_download", "Reset a failed or stalled download and ask qBittorrent to add the torrent again when configured. Use only when the user explicitly asks to retry or repair a download. The tool returns an actionable error if qBittorrent cannot accept the torrent.", false, s.retryDownload)
 	addTool(s, "refresh_rss", "Trigger an asynchronous RSS check now. Use this when the user asks Auto-RSS to scan feeds immediately. It returns once the check has been queued; inspect logs or downloads afterwards for results.", false, s.refreshRSS)
-	addTool(s, "preview_recovery_scan", "Preview recovery candidates by running the recovery scanner in dry-run mode. This is read-only, accepts an optional subscription_id, never applies fixes, and returns bounded counts plus concise samples instead of full file dumps.", true, s.previewRecoveryScan)
 	addTool(s, "search_mikan", "Search Mikan for anime by title. Use this to discover candidate anime pages before fetching fansub RSS feeds. Do not create subscriptions from search results until you have selected a fansub RSS URL.", true, s.searchMikan)
 	addTool(s, "get_mikan_season", "List Mikan anime for a specific year and season. Use this for seasonal discovery, then call get_mikan_fansubs on an anime URL to get concrete RSS feeds.", true, s.getMikanSeason)
 	addTool(s, "get_mikan_fansubs", "Get fansub groups and RSS feed URLs for one Mikan anime page. Use this after search_mikan or get_mikan_season when choosing which RSS feed to subscribe to.", true, s.getMikanFansubs)
 	addTool(s, "search_bangumi", "Search Bangumi anime metadata by title, or return the best match only. Use this to identify subject IDs, total episodes, air dates, scores, and names before creating or enriching subscriptions. This calls an external API.", true, s.searchBangumi)
 	addTool(s, "get_bangumi_subject", "Get detailed Bangumi metadata for a known subject ID. Use this when you need a subject's canonical names, summary, score, rank, air date, or episode count.", true, s.getBangumiSubject)
 	addTool(s, "get_calendar", "Get Auto-RSS airing calendar data. Use today_only for today's expected next episodes, or week_offset for a week view. This is read-only and based on subscription calendar fields.", true, s.getCalendar)
-	addTool(s, "get_disk_status", "Get disk usage for the configured download path and threshold status. Use this before advising cleanup or diagnosing paused downloads due to low space. This is read-only.", true, s.getDiskStatus)
 	addTool(s, "list_logs", "List recent Auto-RSS logs with cursor pagination and optional level/module filters. Use this to explain failures after refresh_rss, retry_download, or qBittorrent connectivity issues. This is read-only.", true, s.listLogs)
 }
 
@@ -295,13 +287,6 @@ func (s *Server) getSystemOverview(ctx context.Context, req *mcp.CallToolRequest
 		if source.Enabled {
 			overview.RSSSources.Enabled++
 		}
-	}
-
-	diskStatus, err := s.currentDiskStatus()
-	if err == nil {
-		overview.Disk = diskStatus
-	} else {
-		logger.Warn("MCP overview could not read disk status", "error", err.Error())
 	}
 
 	return resultWithText(overview)
@@ -587,109 +572,4 @@ func (s *Server) refreshRSS(ctx context.Context, req *mcp.CallToolRequest, input
 		return nil, RefreshRSSOutput{}, fmt.Errorf("failed to trigger RSS refresh: %w", err)
 	}
 	return resultWithText(RefreshRSSOutput{Message: "RSS refresh queued"})
-}
-
-func (s *Server) previewRecoveryScan(ctx context.Context, req *mcp.CallToolRequest, input PreviewRecoveryInput) (*mcp.CallToolResult, RecoveryPreviewOutput, error) {
-	var subscriptionID *uint
-	if input.SubscriptionID != 0 {
-		subscriptionID = &input.SubscriptionID
-	}
-
-	scanner := recovery.NewScanner(s.db, s.subscriptionRepo, s.downloadRepo, s.configRepo, s.bangumiService, configuredDownloadPath(s.cfg))
-	result, err := scanner.Scan(&recovery.ScanRequest{
-		DryRun:         true,
-		SubscriptionID: subscriptionID,
-	})
-	if err != nil {
-		return nil, RecoveryPreviewOutput{}, fmt.Errorf("failed to preview recovery scan: %w", err)
-	}
-
-	return resultWithText(summarizeRecoveryPreview(result))
-}
-
-func configuredDownloadPath(cfg *config.Config) string {
-	if cfg != nil && strings.TrimSpace(cfg.DownloadPath) != "" {
-		return cfg.DownloadPath
-	}
-	return constants.DefaultDownloadPath
-}
-
-func summarizeRecoveryPreview(result *recovery.ScanResult) RecoveryPreviewOutput {
-	out := RecoveryPreviewOutput{
-		DryRun:                 true,
-		PreviewOnly:            true,
-		Applied:                result.Applied,
-		ScannedFiles:           result.ScannedFiles,
-		MatchedFiles:           result.MatchedFiles,
-		OrphanFileCount:        len(result.OrphanFiles),
-		OrphanFileSamples:      limitStrings(result.OrphanFiles, recoveryPreviewSampleLimit),
-		OrphanFileOmittedCount: omittedCount(len(result.OrphanFiles), recoveryPreviewSampleLimit),
-		SubscriptionCount:      len(result.Subscriptions),
-		Subscriptions:          make([]RecoverySubscriptionPreview, 0, len(result.Subscriptions)),
-	}
-
-	for _, sub := range result.Subscriptions {
-		preview := RecoverySubscriptionPreview{
-			SubscriptionID:         sub.SubscriptionID,
-			Name:                   sub.Name,
-			CurrentEpisodeOld:      sub.CurrentEpisodeOld,
-			CurrentEpisodeNew:      sub.CurrentEpisodeNew,
-			LatestEpisodeOld:       sub.LatestEpisodeOld,
-			LatestEpisodeNew:       sub.LatestEpisodeNew,
-			EpisodesOnDiskCount:    len(sub.EpisodesOnDisk),
-			EpisodeSamples:         limitInts(sub.EpisodesOnDisk, recoveryPreviewSampleLimit),
-			EpisodeOmittedCount:    omittedCount(len(sub.EpisodesOnDisk), recoveryPreviewSampleLimit),
-			MatchedFileCount:       len(sub.MatchedEpisodes),
-			DownloadsToUpdateCount: len(sub.DownloadsToUpdate),
-			DownloadsToUpdateIDs:   limitUints(sub.DownloadsToUpdate, recoveryPreviewSampleLimit),
-			DownloadsToCreateCount: len(sub.DownloadsToCreate),
-			DownloadsToCreate:      limitInts(sub.DownloadsToCreate, recoveryPreviewSampleLimit),
-			DownloadsMissingCount:  len(sub.DownloadsMissing),
-			DownloadsMissingIDs:    limitUints(sub.DownloadsMissing, recoveryPreviewSampleLimit),
-		}
-
-		out.DownloadsToUpdateCount += preview.DownloadsToUpdateCount
-		out.DownloadsToCreateCount += preview.DownloadsToCreateCount
-		out.DownloadsMissingCount += preview.DownloadsMissingCount
-		out.Subscriptions = append(out.Subscriptions, preview)
-	}
-
-	return out
-}
-
-func limitStrings(items []string, limit int) []string {
-	if len(items) == 0 {
-		return nil
-	}
-	if len(items) > limit {
-		return append([]string(nil), items[:limit]...)
-	}
-	return append([]string(nil), items...)
-}
-
-func limitInts(items []int, limit int) []int {
-	if len(items) == 0 {
-		return nil
-	}
-	if len(items) > limit {
-		return append([]int(nil), items[:limit]...)
-	}
-	return append([]int(nil), items...)
-}
-
-func limitUints(items []uint, limit int) []uint {
-	if len(items) == 0 {
-		return nil
-	}
-	if len(items) > limit {
-		return append([]uint(nil), items[:limit]...)
-	}
-	return append([]uint(nil), items...)
-}
-
-func omittedCount(length, limit int) int {
-	if length <= limit {
-		return 0
-	}
-	return length - limit
 }

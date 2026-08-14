@@ -348,25 +348,11 @@ export interface SubscriptionDiagnostics {
     failed_items: SubscriptionDownloadDiagnosticItem[]
   }
   files: {
-    expected_path: string
-    folder_exists: boolean
     rename_enabled: boolean
     completed_with_file: number
     completed_missing_file: number
     missing_renamed: number
     missing_episodes: number[]
-  }
-  disk: {
-    path: string
-    exists: boolean
-    status: string
-    total_bytes: number
-    free_bytes: number
-    used_bytes: number
-    usage_percent: number
-    warning_threshold_gb: number
-    critical_threshold_gb: number
-    error?: string
   }
   actions: SubscriptionDiagnosticAction[]
 }
@@ -376,7 +362,6 @@ export interface SubscriptionDiagnosticCheckResponse {
   feeds?: SubscriptionDiagnostics['feeds']
   downloads?: Partial<SubscriptionDiagnostics['downloads']>
   files?: Partial<SubscriptionDiagnostics['files']>
-  disk?: Partial<SubscriptionDiagnostics['disk']>
   actions?: SubscriptionDiagnosticAction[]
 }
 
@@ -490,50 +475,6 @@ export interface MediaLibraryRefreshResult {
   refreshed_at?: string
 }
 
-export interface RecoveryEpisodeFile {
-  path: string
-  episode: number
-  season: number
-}
-
-export interface RecoverySubscriptionScanResult {
-  subscription_id: number
-  name: string
-  current_episode_old: number
-  current_episode_new: number
-  latest_episode_old: number
-  latest_episode_new: number
-  episodes_on_disk_count: number
-  episode_samples?: number[]
-  episode_omitted_count?: number
-  matched_episode_count: number
-  matched_episode_samples?: RecoveryEpisodeFile[]
-  matched_episode_omitted_count?: number
-  downloads_to_update_count: number
-  downloads_to_update_ids?: number[]
-  downloads_to_create_count: number
-  downloads_to_create?: number[]
-  downloads_missing_count: number
-  downloads_missing_ids?: number[]
-}
-
-export interface RecoveryScanResult {
-  dry_run: boolean
-  preview_only: boolean
-  applied: boolean
-  scanned_files: number
-  matched_files: number
-  orphan_file_count: number
-  orphan_file_samples?: string[]
-  orphan_file_omitted_count?: number
-  subscription_count: number
-  downloads_to_update_count: number
-  downloads_to_create_count: number
-  downloads_missing_count: number
-  subscriptions: RecoverySubscriptionScanResult[]
-  backup_path?: string
-}
-
 export const subscriptionApi = {
   list: (page = 1, pageSize = 20) =>
     api.get('/subscriptions', { params: { page, page_size: pageSize } }),
@@ -557,8 +498,6 @@ export const subscriptionApi = {
     api.delete(`/subscriptions/${id}`),
   renameFiles: (id: number) =>
     api.post(`/subscriptions/${id}/rename-files`),
-  scanFolder: (id: number, data: { folder_path: string; dry_run: boolean; rename_files: boolean }) =>
-    api.post(`/subscriptions/${id}/scan-folder`, data),
   enrichBangumi: (id: number) =>
     api.post(`/subscriptions/${id}/enrich-bangumi`),
   batchImportFromRSS: (items: Array<{title: string, fansub?: string, rss_url?: string, season?: number, source_id?: number, source_name?: string}>) =>
@@ -598,14 +537,6 @@ export const mediaLibraryApi = {
     api.post(`/media-library/downloads/${id}/refresh`),
   getSubscriptionStatus: (id: number) =>
     api.get(`/media-library/subscriptions/${id}/status`)
-}
-
-export const recoveryApi = {
-  scanDryRun: (subscriptionId?: number | null) =>
-    api.post('/recovery/scan', {
-      dry_run: true,
-      ...(subscriptionId ? { subscription_id: subscriptionId } : {})
-    })
 }
 
 export const rssApi = {
@@ -649,8 +580,6 @@ export const configApi = {
 }
 
 export const fileOrganizerApi = {
-  triggerScan: () =>
-    api.post('/file-organizer/trigger'),
   reloadConfig: () =>
     api.post('/file-organizer/reload')
 }
@@ -815,69 +744,6 @@ export const calendarApi = {
     api.get('/calendar', { params: { week: weekOffset } }),
   getTodaySchedule: () =>
     api.get('/calendar/today')
-}
-
-// 磁盘相关接口
-export interface DiskStatus {
-  path: string
-  download_path: string
-  total: number
-  free: number
-  used: number
-  usage_percent: number
-  status: 'healthy' | 'warning' | 'critical'
-}
-
-export interface DiskSample extends DiskStatus {
-  created_at: string
-}
-
-export interface DiskCleanupRecord {
-  id: number
-  trigger: 'manual' | 'auto' | string
-  strategy: string
-  download_path: string
-  deleted_count: number
-  skipped_count: number
-  freed_bytes: number
-  before_free_bytes: number
-  after_free_bytes: number
-  media_library_status: 'unconfigured' | 'connected' | 'failed' | string
-  message: string
-  created_at: string
-}
-
-export interface DiskHistory {
-  samples: DiskSample[]
-  cleanup: DiskCleanupRecord[]
-  list: DiskCleanupRecord[]
-  total: number
-  page: number
-}
-
-export interface DiskSettings {
-  enabled: boolean
-  strategy: string
-  retention_days: number
-  min_free_gb: number
-  warning_threshold_gb: number
-  critical_threshold_gb: number
-  protect_watching: boolean
-  media_library_status: 'unconfigured' | 'connected' | 'failed' | string
-  media_library_message: string
-}
-
-export const diskApi = {
-  getStatus: () =>
-    api.get('/disk/status'),
-  getInfo: () =>
-    api.get('/disk/info'),
-  getSettings: () =>
-    api.get('/disk/settings'),
-  getHistory: (page = 1, pageSize = 20) =>
-    api.get('/disk/history', { params: { page, page_size: pageSize } }),
-  cleanup: (payload: { strategy?: string; keep_days?: number; keep_gb?: number }) =>
-    api.post('/disk/cleanup', payload)
 }
 
 export * from './rss-source'

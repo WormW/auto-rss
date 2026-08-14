@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -23,7 +22,6 @@ import (
 	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/episode"
-	"github.com/WormW/auto-rss/internal/service/recovery"
 	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/WormW/auto-rss/internal/service/scheduler"
 	"github.com/WormW/auto-rss/internal/service/task"
@@ -61,8 +59,6 @@ func newTestDB(t *testing.T) *gorm.DB {
 		&model.SubscriptionTagRelation{},
 		&model.Download{},
 		&model.Config{},
-		&model.DiskSample{},
-		&model.DiskCleanupRecord{},
 		&model.RSSSource{},
 		&model.Log{},
 		&model.RefreshToken{},
@@ -118,6 +114,27 @@ func TestSetupRegistersEpisodeLedgerManagementRoutes(t *testing.T) {
 	for route, registered := range want {
 		if !registered {
 			t.Errorf("episode management route not registered: %s", route)
+		}
+	}
+}
+
+func TestSetupDoesNotRegisterRemovedLocalDiskRoutes(t *testing.T) {
+	router, _, _ := setupRouterForTestWithConfig(t, false, nil)
+	removed := map[string]struct{}{
+		http.MethodPost + " /api/v1/subscriptions/:id/scan-folder": {},
+		http.MethodPost + " /api/v1/recovery/scan":                 {},
+		http.MethodGet + " /api/v1/disk/status":                    {},
+		http.MethodGet + " /api/v1/disk/info":                      {},
+		http.MethodGet + " /api/v1/disk/settings":                  {},
+		http.MethodPut + " /api/v1/disk/settings":                  {},
+		http.MethodPost + " /api/v1/disk/cleanup":                  {},
+		http.MethodGet + " /api/v1/disk/history":                   {},
+		http.MethodPost + " /api/v1/file-organizer/trigger":        {},
+	}
+	for _, route := range router.Routes() {
+		key := route.Method + " " + route.Path
+		if _, ok := removed[key]; ok {
+			t.Errorf("removed local disk route is still registered: %s", key)
 		}
 	}
 }
@@ -537,7 +554,6 @@ func TestSetup_AuthEnabledProtectsPhase7Routes(t *testing.T) {
 		{name: "rss health single", method: http.MethodGet, path: "/api/v1/rss/health/1"},
 		{name: "rss dead", method: http.MethodGet, path: "/api/v1/rss/dead"},
 		{name: "rss health trigger", method: http.MethodPost, path: "/api/v1/rss/health-check"},
-		{name: "recovery scan", method: http.MethodPost, path: "/api/v1/recovery/scan"},
 	}
 
 	for _, route := range routes {
@@ -550,180 +566,6 @@ func TestSetup_AuthEnabledProtectsPhase7Routes(t *testing.T) {
 				t.Fatalf("expected unauthenticated %s %s to return 401, got %d: %s", route.method, route.path, recorder.Code, recorder.Body.String())
 			}
 		})
-	}
-}
-
-func TestSetup_RoutesRecoveryScanValidationThroughAPIGroup(t *testing.T) {
-	r, _, _ := setupRouterForTestWithDB(t, false)
-
-	recorder := performRouterJSONRequest(r, http.MethodPost, "/api/v1/recovery/scan", `{`)
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("expected invalid recovery scan JSON to be rejected through router, got %d: %s", recorder.Code, recorder.Body.String())
-	}
-
-	var response struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatalf("failed to parse recovery validation response: %v", err)
-	}
-	if response.Code != 400 || response.Message == "" {
-		t.Fatalf("unexpected recovery validation response: %#v", response)
-	}
-}
-
-func TestSetup_RoutesRecoveryScanDryRunWithIsolatedFixtures(t *testing.T) {
-	r, _, db := setupRouterForTestWithDB(t, false)
-	sub, existing, missing := seedRouterRecoveryFixture(t, db)
-
-	recorder := performRouterJSONRequest(r, http.MethodPost, "/api/v1/recovery/scan", `{"dry_run":true}`)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("expected recovery dry-run route to succeed, got %d: %s", recorder.Code, recorder.Body.String())
-	}
-
-	var response struct {
-		Code    int                         `json:"code"`
-		Message string                      `json:"message"`
-		Data    handler.RecoveryScanPreview `json:"data"`
-	}
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatalf("failed to parse recovery dry-run response: %v", err)
-	}
-	if response.Code != 0 || response.Message != "扫描完成" {
-		t.Fatalf("unexpected recovery dry-run envelope: %#v", response)
-	}
-
-	result := response.Data
-	if result.Applied || result.BackupPath != "" {
-		t.Fatalf("expected dry-run route not to apply or create a backup, got applied=%t backup=%q", result.Applied, result.BackupPath)
-	}
-	if !result.DryRun || !result.PreviewOnly {
-		t.Fatalf("expected dry-run preview flags, got dry_run=%t preview_only=%t", result.DryRun, result.PreviewOnly)
-	}
-	if result.ScannedFiles != 3 || result.MatchedFiles != 2 || result.OrphanFileCount != 1 || len(result.OrphanFileSamples) != 1 {
-		t.Fatalf("unexpected recovery scan counts: scanned=%d matched=%d orphan_count=%d orphan_samples=%d", result.ScannedFiles, result.MatchedFiles, result.OrphanFileCount, len(result.OrphanFileSamples))
-	}
-	if result.SubscriptionCount != 1 || len(result.Subscriptions) != 1 {
-		t.Fatalf("expected one subscription result, got count=%d subscriptions=%#v", result.SubscriptionCount, result.Subscriptions)
-	}
-	report := result.Subscriptions[0]
-	if report.SubscriptionID != sub.ID || report.Name != "Router Recovery Show" {
-		t.Fatalf("unexpected recovery subscription report: %#v", report)
-	}
-	if report.CurrentEpisodeOld != 1 || report.CurrentEpisodeNew != 3 || report.LatestEpisodeOld != 2 || report.LatestEpisodeNew != 3 {
-		t.Fatalf("expected episode totals to be reported without applying, got %#v", report)
-	}
-	if report.EpisodesOnDiskCount != 2 || !equalInts(report.EpisodeSamples, []int{2, 3}) {
-		t.Fatalf("expected router request shape to reach scanner and report episode samples [2 3], got count=%d samples=%#v", report.EpisodesOnDiskCount, report.EpisodeSamples)
-	}
-	if report.DownloadsToUpdateCount != 1 || !equalUints(report.DownloadsToUpdateIDs, []uint{existing.ID}) {
-		t.Fatalf("expected existing download to be proposed for update, got count=%d ids=%#v", report.DownloadsToUpdateCount, report.DownloadsToUpdateIDs)
-	}
-	if report.DownloadsToCreateCount != 1 || !equalInts(report.DownloadsToCreate, []int{3}) {
-		t.Fatalf("expected episode 3 synthetic record proposal, got count=%d episodes=%#v", report.DownloadsToCreateCount, report.DownloadsToCreate)
-	}
-	if report.DownloadsMissingCount != 1 || !equalUints(report.DownloadsMissingIDs, []uint{missing.ID}) {
-		t.Fatalf("expected missing completed download to be reported, got count=%d ids=%#v", report.DownloadsMissingCount, report.DownloadsMissingIDs)
-	}
-	if report.MatchedEpisodeCount != 2 || len(report.MatchedEpisodeSamples) != 2 {
-		t.Fatalf("expected matched episode samples to be bounded but present, got count=%d samples=%#v", report.MatchedEpisodeCount, report.MatchedEpisodeSamples)
-	}
-
-	var afterSub model.Subscription
-	if err := db.First(&afterSub, sub.ID).Error; err != nil {
-		t.Fatalf("expected seeded subscription after dry-run: %v", err)
-	}
-	if afterSub.CurrentEpisode != 1 || afterSub.LatestEpisode != 2 {
-		t.Fatalf("expected dry-run route not to mutate subscription, got current=%d latest=%d", afterSub.CurrentEpisode, afterSub.LatestEpisode)
-	}
-
-	var afterExisting model.Download
-	if err := db.First(&afterExisting, existing.ID).Error; err != nil {
-		t.Fatalf("expected seeded download after dry-run: %v", err)
-	}
-	if afterExisting.Status != model.DownloadStatusDownloading || afterExisting.RenamedPath != "" {
-		t.Fatalf("expected dry-run route not to mutate download, got %#v", afterExisting)
-	}
-
-	rawBody := recorder.Body.String()
-	for _, key := range []string{"orphan_files", "episodes_on_disk", "matched_episodes", "downloads_to_update", "downloads_missing"} {
-		if strings.Contains(rawBody, `"`+key+`"`) {
-			t.Fatalf("dry-run response leaked raw unbounded field %q", key)
-		}
-	}
-}
-
-func TestSetup_RoutesRecoveryScanDryRunBoundsLargePayload(t *testing.T) {
-	r, _, db := setupRouterForTestWithDB(t, false)
-	seedRouterRecoveryFixture(t, db, handler.RecoveryPreviewSampleLimit+4)
-
-	recorder := performRouterJSONRequest(r, http.MethodPost, "/api/v1/recovery/scan", `{"dry_run":true}`)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("expected recovery dry-run route to succeed, got %d: %s", recorder.Code, recorder.Body.String())
-	}
-
-	var response struct {
-		Code int                         `json:"code"`
-		Data handler.RecoveryScanPreview `json:"data"`
-	}
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatalf("failed to parse recovery dry-run response: %v", err)
-	}
-	result := response.Data
-	if result.OrphanFileCount != handler.RecoveryPreviewSampleLimit+4 {
-		t.Fatalf("orphan count = %d, want %d", result.OrphanFileCount, handler.RecoveryPreviewSampleLimit+4)
-	}
-	if len(result.OrphanFileSamples) != handler.RecoveryPreviewSampleLimit || result.OrphanFileOmittedCount != 4 {
-		t.Fatalf("orphan bounds = samples %d omitted %d, want %d and 4", len(result.OrphanFileSamples), result.OrphanFileOmittedCount, handler.RecoveryPreviewSampleLimit)
-	}
-	if len(result.Subscriptions) != 1 {
-		t.Fatalf("expected one subscription result, got %#v", result.Subscriptions)
-	}
-	sub := result.Subscriptions[0]
-	if sub.MatchedEpisodeCount != 2 || len(sub.MatchedEpisodeSamples) != 2 || sub.MatchedEpisodeOmittedCount != 0 {
-		t.Fatalf("matched episode summary = count %d samples %d omitted %d, want 2, 2, 0", sub.MatchedEpisodeCount, len(sub.MatchedEpisodeSamples), sub.MatchedEpisodeOmittedCount)
-	}
-}
-
-func TestSetup_RoutesRecoveryScanRejectsApplyModeByDefault(t *testing.T) {
-	r, _, db := setupRouterForTestWithDB(t, false)
-	t.Setenv("AUTO_RSS_ENABLE_RECOVERY_APPLY", "")
-	sub, existing, _ := seedRouterRecoveryFixture(t, db)
-
-	recorder := performRouterJSONRequest(r, http.MethodPost, "/api/v1/recovery/scan", `{"dry_run":false}`)
-	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("expected recovery apply route to be rejected by default, got %d: %s", recorder.Code, recorder.Body.String())
-	}
-
-	var response struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatalf("failed to parse recovery apply rejection response: %v", err)
-	}
-	if response.Code != 403 || response.Message == "" {
-		t.Fatalf("unexpected recovery apply rejection envelope: %#v", response)
-	}
-	if !strings.Contains(response.Message, recovery.ErrApplyDisabled.Error()) {
-		t.Fatalf("expected API rejection to preserve apply gate guidance %q, got %q", recovery.ErrApplyDisabled.Error(), response.Message)
-	}
-
-	var afterSub model.Subscription
-	if err := db.First(&afterSub, sub.ID).Error; err != nil {
-		t.Fatalf("expected seeded subscription after rejected apply: %v", err)
-	}
-	if afterSub.CurrentEpisode != 1 || afterSub.LatestEpisode != 2 {
-		t.Fatalf("expected rejected apply not to mutate subscription, got current=%d latest=%d", afterSub.CurrentEpisode, afterSub.LatestEpisode)
-	}
-
-	var afterExisting model.Download
-	if err := db.First(&afterExisting, existing.ID).Error; err != nil {
-		t.Fatalf("expected seeded download after rejected apply: %v", err)
-	}
-	if afterExisting.Status != model.DownloadStatusDownloading || afterExisting.RenamedPath != "" {
-		t.Fatalf("expected rejected apply not to mutate download, got %#v", afterExisting)
 	}
 }
 
@@ -1322,75 +1164,6 @@ func seedCompleteOnboardingSetupWithDownloadPath(t *testing.T, db *gorm.DB, down
 	}
 }
 
-func seedRouterRecoveryFixture(t *testing.T, db *gorm.DB, orphanCounts ...int) (model.Subscription, model.Download, model.Download) {
-	t.Helper()
-
-	root := t.TempDir()
-	requireRouterFixtureFile(t, filepath.Join(root, "Router Recovery Show", "Season 1", "Router Recovery Show S01E02.mkv"))
-	requireRouterFixtureFile(t, filepath.Join(root, "Router Recovery Show", "Season 1", "Router Recovery Show S01E03.mkv"))
-	orphanCount := 1
-	if len(orphanCounts) > 0 {
-		orphanCount = orphanCounts[0]
-	}
-	for i := 1; i <= orphanCount; i++ {
-		requireRouterFixtureFile(t, filepath.Join(root, "Unknown Router Show", "Season 1", "Unknown Router Show S01E"+strconv.Itoa(i)+".mkv"))
-	}
-
-	if err := db.Create(&model.Config{Key: "download_path", Value: root}).Error; err != nil {
-		t.Fatalf("failed to seed recovery download_path config: %v", err)
-	}
-
-	sub := model.Subscription{
-		Name:           "Router Recovery Show",
-		RssURL:         "https://example.com/router-recovery.xml",
-		Season:         1,
-		CurrentEpisode: 1,
-		LatestEpisode:  2,
-		Enabled:        true,
-		Status:         "active",
-	}
-	if err := db.Create(&sub).Error; err != nil {
-		t.Fatalf("failed to seed recovery subscription: %v", err)
-	}
-
-	existing := model.Download{
-		SubscriptionID: sub.ID,
-		Title:          "Router Recovery Show 02",
-		Episode:        2,
-		TorrentURL:     "memory://router-existing",
-		TorrentHash:    "router-existing-02",
-		Status:         model.DownloadStatusDownloading,
-	}
-	if err := db.Create(&existing).Error; err != nil {
-		t.Fatalf("failed to seed existing recovery download: %v", err)
-	}
-
-	missing := model.Download{
-		SubscriptionID: sub.ID,
-		Title:          "Router Recovery Show 04",
-		Episode:        4,
-		TorrentURL:     "memory://router-missing",
-		TorrentHash:    "router-missing-04",
-		RenamedPath:    filepath.Join(root, "Router Recovery Show", "Season 1", "Router Recovery Show S01E04.mkv"),
-		Status:         model.DownloadStatusCompleted,
-	}
-	if err := db.Create(&missing).Error; err != nil {
-		t.Fatalf("failed to seed missing recovery download: %v", err)
-	}
-
-	return sub, existing, missing
-}
-
-func requireRouterFixtureFile(t *testing.T, path string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		t.Fatalf("failed to create fixture directory: %v", err)
-	}
-	if err := os.WriteFile(path, []byte("fixture"), 0644); err != nil {
-		t.Fatalf("failed to create fixture file: %v", err)
-	}
-}
-
 func containsString(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {
@@ -1398,30 +1171,6 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
-}
-
-func equalInts(got, want []int) bool {
-	if len(got) != len(want) {
-		return false
-	}
-	for i := range got {
-		if got[i] != want[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func equalUints(got, want []uint) bool {
-	if len(got) != len(want) {
-		return false
-	}
-	for i := range got {
-		if got[i] != want[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func performRouterRequest(r http.Handler, method, target string, body *bytes.Buffer) *httptest.ResponseRecorder {

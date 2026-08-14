@@ -96,14 +96,6 @@ func (s *Server) getCalendar(ctx context.Context, req *mcp.CallToolRequest, inpu
 	return resultWithText[any](schedule)
 }
 
-func (s *Server) getDiskStatus(ctx context.Context, req *mcp.CallToolRequest, input GetDiskStatusInput) (*mcp.CallToolResult, any, error) {
-	status, err := s.currentDiskStatus()
-	if err != nil {
-		return nil, nil, err
-	}
-	return resultWithText[any](status)
-}
-
 func (s *Server) listLogs(ctx context.Context, req *mcp.CallToolRequest, input ListLogsInput) (*mcp.CallToolResult, ListLogsOutput, error) {
 	offset, err := decodeCursor(input.Cursor)
 	if err != nil {
@@ -129,36 +121,6 @@ func (s *Server) listLogs(ctx context.Context, req *mcp.CallToolRequest, input L
 		out.Items = append(out.Items, summarizeLog(log))
 	}
 	return resultWithText(out)
-}
-
-func (s *Server) currentDiskStatus() (any, error) {
-	downloadPath := "/downloads"
-	if s.configRepo != nil {
-		if cfg, err := s.configRepo.Get("download_path"); err == nil && cfg != nil && cfg.Value != "" {
-			downloadPath = cfg.Value
-		}
-	}
-
-	info, err := s.diskMonitor.GetDiskInfo(downloadPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get disk status for %s: %w", downloadPath, err)
-	}
-	totalBytes := int64(info.TotalGB * 1024 * 1024 * 1024)
-	freeBytes := int64(info.FreeGB * 1024 * 1024 * 1024)
-	usedBytes := int64(info.UsedGB * 1024 * 1024 * 1024)
-
-	return map[string]any{
-		"path":          info.Path,
-		"download_path": downloadPath,
-		"total_bytes":   totalBytes,
-		"free_bytes":    freeBytes,
-		"used_bytes":    usedBytes,
-		"total_gb":      info.TotalGB,
-		"free_gb":       info.FreeGB,
-		"used_gb":       info.UsedGB,
-		"usage_percent": info.UsagePercent,
-		"status":        info.Status,
-	}, nil
 }
 
 func (s *Server) markMikanExisting(result *mikan.SearchResult) {

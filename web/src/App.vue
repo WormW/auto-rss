@@ -229,7 +229,6 @@ import {
   ArchiveOutline,
   CalendarOutline,
   NotificationsOutline,
-  DiscOutline,
   Moon,
   Sunny,
   Leaf,
@@ -375,11 +374,6 @@ const menuOptions: MenuOption[] = [
     label: '通知管理',
     key: 'notifications',
     icon: renderIcon(NotificationsOutline)
-  },
-  {
-    label: '磁盘监控',
-    key: 'disk-monitor',
-    icon: renderIcon(DiscOutline)
   },
   {
     label: '系统配置',

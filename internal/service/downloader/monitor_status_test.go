@@ -63,8 +63,6 @@ func TestDownloadMonitorReconcileIgnoresReplacementDownloads(t *testing.T) {
 		repository.NewSubscriptionRepository(db), repository.NewConfigRepository(db), "", lifecycle,
 	)
 	monitor.SetNotificationService(notifications)
-	monitor.downloadsPaused = func() bool { return false }
-
 	monitor.checkDownloads()
 
 	persisted, err := downloadRepo.GetByID(replacement.ID)

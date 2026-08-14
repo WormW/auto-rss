@@ -390,49 +390,6 @@ func TestFileOrganizer_organizeFile_PathTraversalPrevention(t *testing.T) {
 	assert.Contains(t, err.Error(), "escapes watch directory")
 }
 
-func TestFileOrganizer_TriggerScan(t *testing.T) {
-	watchDir := t.TempDir()
-	destDir := t.TempDir()
-
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	require.NoError(t, err)
-
-	subRepo := repository.NewSubscriptionRepository(db)
-	downloadRepo := repository.NewDownloadRepository(db)
-
-	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "", nil)
-	require.NoError(t, err)
-
-	// Start organizer first
-	err = organizer.Start()
-	require.NoError(t, err)
-	defer organizer.Stop()
-
-	// Trigger scan should not panic
-	organizer.TriggerScan()
-}
-
-func TestFileOrganizer_PreventsDuplicateScans(t *testing.T) {
-	watchDir := t.TempDir()
-	destDir := t.TempDir()
-
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	require.NoError(t, err)
-
-	subRepo := repository.NewSubscriptionRepository(db)
-	downloadRepo := repository.NewDownloadRepository(db)
-
-	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "", nil)
-	require.NoError(t, err)
-
-	require.True(t, organizer.beginScan())
-	require.False(t, organizer.beginScan())
-
-	organizer.endScan()
-	require.True(t, organizer.beginScan())
-	organizer.endScan()
-}
-
 func TestFileOrganizer_StartDoesNotAutoScanExistingFiles(t *testing.T) {
 	watchDir := t.TempDir()
 	destDir := t.TempDir()
@@ -463,39 +420,6 @@ func TestFileOrganizer_StartDoesNotAutoScanExistingFiles(t *testing.T) {
 
 	_, err = os.Stat(existingFile)
 	require.NoError(t, err, "startup should not auto-process existing files")
-}
-
-func TestFileOrganizer_StartAutoScansExistingFilesWhenEnabled(t *testing.T) {
-	watchDir := t.TempDir()
-	destDir := t.TempDir()
-
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.Subscription{}, &model.Download{}))
-
-	subRepo := repository.NewSubscriptionRepository(db)
-	downloadRepo := repository.NewDownloadRepository(db)
-
-	sub := &model.Subscription{
-		Name:   "Auto Scan Show",
-		Season: 1,
-		RssURL: "http://test.com/rss",
-	}
-	require.NoError(t, subRepo.Create(sub))
-
-	existingFile := filepath.Join(watchDir, "[Group] Auto Scan Show - 01 [1080p].mkv")
-	require.NoError(t, os.WriteFile(existingFile, []byte("test"), 0644))
-
-	organizer, err := NewFileOrganizer(watchDir, destDir, subRepo, downloadRepo, db, nil, "", nil)
-	require.NoError(t, err)
-	organizer.SetScanOnStart(true)
-	require.NoError(t, organizer.Start())
-	defer organizer.Stop()
-
-	require.Eventually(t, func() bool {
-		_, err := os.Stat(existingFile)
-		return os.IsNotExist(err)
-	}, 9*time.Second, 200*time.Millisecond)
 }
 
 func TestFileOrganizer_Stop(t *testing.T) {

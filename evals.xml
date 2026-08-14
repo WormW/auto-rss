@@ -32,8 +32,8 @@
     <expected>Call list_downloads with a limit, use next_cursor from the first response to call list_downloads again, and identify failed entries from both pages or explain that a status filter would be more efficient.</expected>
   </eval>
   <eval id="9">
-    <question>今天有哪些番要更新？如果磁盘空间紧张，也一起提醒我。</question>
-    <expected>Call get_calendar with today_only=true, call get_disk_status, and combine airing schedule with disk status warning/critical guidance.</expected>
+    <question>今天有哪些番要更新？把播出时间和当前下载状态一起告诉我。</question>
+    <expected>Call get_calendar with today_only=true, then call list_downloads for relevant pending or downloading entries when needed, and summarize today's schedule with current download status.</expected>
   </eval>
   <eval id="10">
     <question>帮我确认 Bangumi ID 464376 是哪部番，并看看 Auto-RSS 里有没有类似订阅。</question>

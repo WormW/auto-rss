@@ -31,7 +31,7 @@ test('单项结果只替换对应检查并计算部分汇总', () => {
   })
 
   assert.equal(next.summary.checked, 1)
-  assert.equal(next.summary.total, 9)
+  assert.equal(next.summary.total, 8)
   assert.equal(next.summary.overall, 'warning')
   assert.equal(
     next.checks.find(item => item.key === 'rss_reachability')?.status,
@@ -97,11 +97,11 @@ test('汇总忽略未检查项并按已检查项计算最坏状态', () => {
   assert.deepEqual(summarizeDiagnosticChecks(checks), {
     overall: 'error',
     checked: 2,
-    total: 9,
+    total: 8,
     healthy: 1,
     warning: 0,
     error: 1,
-    unknown: 7
+    unknown: 6
   })
 })
 
@@ -175,8 +175,7 @@ test('未执行对应检查前诊断指标保持占位，动作按钮仍受 enab
   assert.match(diagnosticsTemplate, /v-if="hasDiagnosticCheck\('downloads'\)">失败/)
   assert.match(diagnosticsTemplate, /hasDiagnosticCheck\('files'\) \? diagnosticsData\.files\.completed_with_file : '--'/)
   assert.match(diagnosticsTemplate, /v-if="hasDiagnosticCheck\('files'\)">未记录路径/)
-  assert.match(diagnosticsTemplate, /hasDiagnosticCheck\('disk'\) \? formatBytes\(diagnosticsData\.disk\.free_bytes\) : '--'/)
-  assert.match(diagnosticsTemplate, /v-if="hasDiagnosticCheck\('disk'\)">/)
+  assert.doesNotMatch(diagnosticsTemplate, /diagnosticsData\.disk|hasDiagnosticCheck\('disk'\)/)
   assert.match(diagnosticsTemplate, /hasDiagnosticCheck\('episode_progress'\) \? \(diagnosticsData\.files\.missing_episodes\?\.length \|\| 0\) : '--'/)
   assert.match(diagnosticsTemplate, /v-if="hasDiagnosticCheck\('episode_progress'\)"/)
   assert.match(diagnosticsTemplate, /v-else>未检查<\/small>/)
@@ -224,8 +223,7 @@ function createInitialDiagnostics(): SubscriptionDiagnostics {
     ['downloads', '下载任务'],
     ['qbittorrent', 'qBittorrent'],
     ['files', '已记录路径'],
-    ['organizer', '整理/重命名'],
-    ['disk', '磁盘空间']
+    ['organizer', '整理/重命名']
   ] as const
 
   return {
@@ -237,11 +235,11 @@ function createInitialDiagnostics(): SubscriptionDiagnostics {
     summary: {
       overall: 'unknown',
       checked: 0,
-      total: 9,
+      total: 8,
       healthy: 0,
       warning: 0,
       error: 0,
-      unknown: 9
+      unknown: 8
     },
     checks: definitions.map(([key, label]) => ({
       key,
@@ -264,24 +262,11 @@ function createInitialDiagnostics(): SubscriptionDiagnostics {
       failed_items: []
     },
     files: {
-      expected_path: '',
-      folder_exists: false,
       rename_enabled: false,
       completed_with_file: 0,
       completed_missing_file: 0,
       missing_renamed: 0,
       missing_episodes: []
-    },
-    disk: {
-      path: '',
-      exists: false,
-      status: '',
-      total_bytes: 0,
-      free_bytes: 0,
-      used_bytes: 0,
-      usage_percent: 0,
-      warning_threshold_gb: 0,
-      critical_threshold_gb: 0
     },
     actions: []
   }
