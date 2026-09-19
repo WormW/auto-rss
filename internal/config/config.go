@@ -40,7 +40,8 @@ type Config struct {
 	BangumiUpdateInterval int // 小时为单位，0表示禁用自动更新
 
 	// 日志配置
-	LogLevel string
+	LogLevel     string
+	LogDBEnabled bool
 
 	// 服务器配置
 	ServerPort int
@@ -52,10 +53,6 @@ type Config struct {
 
 	// 下载配置
 	DownloadPath string
-
-	// 文件整理配置
-	FileOrganizerEnabled bool   // 是否启用文件自动整理
-	FileOrganizerDir     string // 整理目录（监控和目标是同一目录）
 
 	// JWT配置
 	AuthEnabled           bool
@@ -91,15 +88,12 @@ func Load() (*Config, error) {
 		BlockAPIBootOnSchedulerFailure: getEnv("BLOCK_API_BOOT_ON_SCHEDULER_FAILURE", "true") == "true",
 		BangumiUpdateInterval:          getEnvAsInt("BANGUMI_UPDATE_INTERVAL", 6), // 默认6小时
 		LogLevel:                       getEnv("LOG_LEVEL", "info"),
+		LogDBEnabled:                   getEnv("LOG_DB_ENABLED", "false") == "true",
 		ServerPort:                     getEnvAsInt("SERVER_PORT", 7892),
 		MCPEnabled:                     getEnv("MCP_ENABLED", "false") == "true",
 		MCPToken:                       getEnv("MCP_TOKEN", ""),
 		MCPAllowedOrigins:              getEnvAsStringSlice("MCP_ALLOWED_ORIGINS", ""),
 		DownloadPath:                   getEnv("DOWNLOAD_PATH", "/downloads"),
-
-		// 文件整理配置
-		FileOrganizerEnabled: getEnv("FILE_ORGANIZER_ENABLED", "false") == "true",
-		FileOrganizerDir:     getEnv("FILE_ORGANIZER_DIR", ""),
 
 		// JWT配置
 		AuthEnabled:           getEnv("AUTH_ENABLED", "false") == "true",
@@ -255,14 +249,6 @@ func (c *Config) LoadFromDB(db *gorm.DB) error {
 				if intValue, err := strconv.Atoi(cfg.Value); err == nil {
 					c.BangumiUpdateInterval = intValue
 				}
-			}
-		case "file_organizer_enabled":
-			if cfg.Value != "" {
-				c.FileOrganizerEnabled = (cfg.Value == "true" || cfg.Value == "1")
-			}
-		case "file_organizer_dir":
-			if cfg.Value != "" {
-				c.FileOrganizerDir = cfg.Value
 			}
 		}
 	}

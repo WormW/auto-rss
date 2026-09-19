@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -34,7 +33,6 @@ import (
 	"github.com/WormW/auto-rss/internal/service/scheduler"
 	"github.com/WormW/auto-rss/internal/service/subscription"
 	"github.com/WormW/auto-rss/internal/service/subscriptionfeed"
-	"github.com/WormW/auto-rss/internal/webui"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
@@ -179,7 +177,6 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	mikanHandler := handler.NewMikanHandler(configRepo, subscriptionRepo)
 	bangumiHandler := handler.NewBangumiHandler(configRepo)
 	logHandler := handler.NewLogHandler(logRepo)
-	fileOrganizerHandler := handler.NewFileOrganizerHandler(appCtx)
 	calendarHandler := handler.NewCalendarHandler(subscriptionRepo, downloadRepo)
 	tagHandler := handler.NewTagHandler(subscriptionRepo)
 	mediaLibraryHandler := handler.NewMediaLibraryHandler(mediaLibrarySvc, downloadRepo, subscriptionRepo)
@@ -337,12 +334,6 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			logs.POST("/clear", logHandler.Clear)
 		}
 
-		// 文件整理
-		fileOrganizer := protected.Group("/file-organizer")
-		{
-			fileOrganizer.POST("/reload", fileOrganizerHandler.ReloadConfig)
-		}
-
 		// 任务管理
 		taskHandler := handler.NewTaskHandler()
 		tasks := protected.Group("/tasks")
@@ -410,15 +401,16 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 
 	if cfg.MCPEnabled {
 		mcpSrv := mcpserver.New(mcpserver.Dependencies{
-			DB:               db,
-			Config:           cfg,
-			SubscriptionRepo: subscriptionRepo,
-			DownloadRepo:     downloadRepo,
-			ConfigRepo:       configRepo,
-			RSSSourceRepo:    rssSourceRepo,
-			LogRepo:          logRepo,
-			Scheduler:        rssScheduler,
-			QBClient:         qbClient,
+			DB:                  db,
+			Config:              cfg,
+			SubscriptionRepo:    subscriptionRepo,
+			DownloadRepo:        downloadRepo,
+			ConfigRepo:          configRepo,
+			RSSSourceRepo:       rssSourceRepo,
+			LogRepo:             logRepo,
+			Scheduler:           rssScheduler,
+			QBClient:            qbClient,
+			SubscriptionCreator: subscriptionCreator,
 		})
 		mcpHandler := mcpSrv.Handler()
 		r.Any("/mcp", func(c *gin.Context) {
@@ -452,24 +444,9 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	// Prometheus 指标端点
 	r.GET("/metrics", handler.MetricsHandler())
 
-	// 静态文件服务 (前端)
-	if distFS, err := webui.DistFS(); err == nil {
-		if assetsFS, err := fs.Sub(distFS, "assets"); err == nil {
-			r.StaticFS("/assets", http.FS(assetsFS))
-		}
-
-		serveIndex := func(c *gin.Context) {
-			indexHTML, err := fs.ReadFile(distFS, "index.html")
-			if err != nil {
-				c.Status(http.StatusNotFound)
-				return
-			}
-			c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
-		}
-
-		r.GET("/", serveIndex)
-		r.NoRoute(serveIndex)
-	}
+	r.NoRoute(func(c *gin.Context) {
+		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "API route not found"})
+	})
 
 	return r, nil
 }

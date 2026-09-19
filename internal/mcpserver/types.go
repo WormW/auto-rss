@@ -225,8 +225,9 @@ type ListLogsInput struct {
 }
 
 type ListLogsOutput struct {
-	Items    []LogSummary `json:"items"`
-	PageInfo PageInfo     `json:"page_info"`
+	Items              []LogSummary `json:"items"`
+	PageInfo           PageInfo     `json:"page_info"`
+	PersistenceEnabled bool         `json:"persistence_enabled"`
 }
 
 func summarizeSubscription(sub model.Subscription) SubscriptionSummary {

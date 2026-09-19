@@ -4,14 +4,14 @@
 > 默认地址：`http://localhost:7892`
 > 数据格式：JSON
 
-本文档按当前路由注册整理，面向需要调用 Auto-RSS REST API、调试 Web UI 请求或编写自动化脚本的用户。
+本文档按当前路由注册整理，面向需要调用 Auto-RSS REST API 或编写自动化脚本的用户。
 
 ---
 
 ## 当前状态
 
 - `AUTH_ENABLED=false` 默认兼容本地/NAS 部署，业务 API 不要求登录。
-- `AUTH_ENABLED=true` 时，除健康检查、静态资源、封面和 `/api/v1/auth/*` 外，主要 `/api/v1` 业务接口都需要 `Authorization: Bearer <access_token>`。
+- `AUTH_ENABLED=true` 时，除健康检查、封面和 `/api/v1/auth/*` 外，主要 `/api/v1` 业务接口都需要 `Authorization: Bearer <access_token>`。
 - `/ws/notifications` 跟随认证开关：认证关闭时允许匿名连接；认证开启时必须带 `?token=<access_token>`。
 - `/metrics`、`/health`、`/ready`、`/live` 不走业务认证。
 - 请求限流已启用，登录和刷新接口使用独立的认证端点限流配置。
@@ -512,15 +512,14 @@ RSS 健康 API 已有 handler 级测试和路由级集成验证，覆盖单订�
 
 `provider` 支持 `jellyfin`、`emby`、`plex`。Plex 需要 `section_id`；Jellyfin/Emby 当前触发 `/Library/Refresh`，`library_id` 可留空。路径映射按最长前缀匹配，未命中时手动/自动刷新会返回明确错误并记录到下载的 `media_library_refresh_error`。
 
-### 日志与文件整理
+### 日志
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `GET` | `/logs` | 查询日志 |
 | `POST` | `/logs/clear` | 清空日志 |
-| `POST` | `/file-organizer/reload` | 重新加载文件整理配置 |
 
-日志查询支持 `level`、`start_time`、`end_time`、`keyword`、`page`、`page_size`。
+日志查询支持 `level`、`start_time`、`end_time`、`keyword`、`page`、`page_size`。默认 `LOG_DB_ENABLED=false`，仅查询既有数据库记录；运行日志写到 stderr，按需启用数据库日志。目录监听及 `/file-organizer/reload` 已移除，下载完成后的整理继续由下载器完成处理链路负责。
 
 ### 任务
 

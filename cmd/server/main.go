@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 
 	"github.com/WormW/auto-rss/internal/api/router"
@@ -69,11 +68,13 @@ func run() error {
 			"qb_host", cfg.QBHost)
 	}
 
-	// 重新初始化日志以包含数据库写入
-	if err := logger.InitWithDB(cfg.LogLevel, db); err != nil {
-		return fmt.Errorf("failed to reinit logger with DB: %w", err)
+	// 默认仅输出结构化日志；数据库日志为兼容查询接口按需启用。
+	if cfg.LogDBEnabled {
+		if err := logger.InitWithDB(cfg.LogLevel, db); err != nil {
+			return fmt.Errorf("failed to reinit logger with DB: %w", err)
+		}
+		logger.Info("Logger initialized with database writer")
 	}
-	logger.Info("Logger initialized with database writer")
 
 	// 设置 Gin 模式
 	if cfg.LogLevel == "debug" {
@@ -118,23 +119,8 @@ func run() error {
 	bangumiUpdater.Start()
 
 	// 创建应用上下文
-	appCtx := app.NewContext(db, cfg, subscriptionRepo, downloadRepo, bangumiService)
-	appCtx.SetRenameTemplate(renameTemplate)
+	appCtx := app.NewContext()
 	appCtx.SetMediaLibraryService(medialibrary.NewService(configRepo, downloadRepo))
-
-	// 初始化文件整理服务
-	if err := appCtx.InitializeFileOrganizer(); err != nil {
-		logger.Error("Failed to initialize file organizer", "error", err)
-	}
-
-	// Ensure we serve the correct web/dist when running as a standalone binary.
-	// When started from a different working directory, relative os.DirFS("web/dist") would break.
-	if exePath, err := os.Executable(); err == nil {
-		exeDir := filepath.Dir(exePath)
-		if err := os.Chdir(exeDir); err == nil {
-			logger.Info("Changed working directory to executable dir", "dir", exeDir)
-		}
-	}
 
 	// 初始化路由（传递应用上下文）
 	r, err := router.Setup(db, cfg, qbClient, appCtx, renameTemplate)
@@ -161,7 +147,7 @@ func run() error {
 	<-quit
 	logger.Info("Shutting down server...")
 
-	// 关闭应用上下文（包括文件整理服务）
+	// 关闭后台任务
 	appCtx.Shutdown()
 	logger.Info("App context shutdown complete")
 

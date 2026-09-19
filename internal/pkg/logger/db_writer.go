@@ -126,32 +126,43 @@ func containsImpl(s, substr string) bool {
 
 // cleanupOldLogs 清理旧日志
 // 策略：
-// 1. 当日志总数超过 maxLogCount 时，删除最旧的 cleanupBatch 条
-// 2. 删除超过 retentionDays 天的日志
+// 先清理过期记录，再分批删除超额记录，直到本轮积压回到保留上限。
+// 每条 DELETE 保持有限批量；并发新增记录交由下一轮处理。
 func (w *DBWriter) cleanupOldLogs() {
+	cutoffTime := time.Now().AddDate(0, 0, -retentionDays)
+	for {
+		var ids []uint
+		if err := w.db.Model(&model.Log{}).Where("created_at < ?", cutoffTime).
+			Order("created_at ASC, id ASC").Limit(cleanupBatch).Pluck("id", &ids).Error; err != nil || len(ids) == 0 {
+			break
+		}
+		if err := w.db.Delete(&model.Log{}, ids).Error; err != nil {
+			return
+		}
+	}
+
 	// 检查总条数
 	var count int64
 	if err := w.db.Model(&model.Log{}).Count(&count).Error; err != nil {
 		return
 	}
 
-	// 如果超过最大条数，删除最旧的一批
-	if count > maxLogCount {
-		// 查找最旧的 cleanupBatch 条记录的 ID
+	// 按本轮的超额数量清理，避免每小时只删一批而长期追不上写入。
+	for excess := count - maxLogCount; excess > 0; {
+		batch := min(excess, int64(cleanupBatch))
 		var ids []uint
-		w.db.Model(&model.Log{}).
-			Order("created_at ASC").
-			Limit(cleanupBatch).
-			Pluck("id", &ids)
-
-		if len(ids) > 0 {
-			w.db.Delete(&model.Log{}, ids)
+		if err := w.db.Model(&model.Log{}).
+			Order("created_at ASC, id ASC").
+			Limit(int(batch)).
+			Pluck("id", &ids).Error; err != nil || len(ids) == 0 {
+			return
 		}
+		result := w.db.Delete(&model.Log{}, ids)
+		if result.Error != nil || result.RowsAffected == 0 {
+			return
+		}
+		excess -= result.RowsAffected
 	}
-
-	// 删除超过保留期限的日志
-	cutoffTime := time.Now().AddDate(0, 0, -retentionDays)
-	w.db.Where("created_at < ?", cutoffTime).Delete(&model.Log{})
 }
 
 // Sync 实现 zapcore.WriteSyncer 接口

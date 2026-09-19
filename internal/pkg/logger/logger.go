@@ -45,10 +45,11 @@ func InitWithDB(level string, db *gorm.DB) error {
 
 	if db != nil {
 		dbWriter := NewDBWriter(db)
+		dbLevel := max(zapLevel, zapcore.InfoLevel)
 		dbCore := zapcore.NewCore(
 			encoder,
 			zapcore.AddSync(dbWriter),
-			zapcore.InfoLevel,
+			dbLevel,
 		)
 		cores = append(cores, dbCore)
 	}

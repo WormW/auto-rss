@@ -12,6 +12,7 @@ import (
 
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/pkg/logger"
+	"github.com/WormW/auto-rss/internal/pkg/utils"
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/episode"
@@ -47,8 +48,9 @@ type SubscriptionCollector interface {
 }
 
 var (
-	ErrNoEnabledSubscriptionFeeds = errors.New("no enabled subscription feeds")
-	ErrAllSubscriptionFeedsFailed = errors.New("all subscription feeds failed")
+	ErrNoEnabledSubscriptionFeeds   = errors.New("no enabled subscription feeds")
+	ErrAllSubscriptionFeedsFailed   = errors.New("all subscription feeds failed")
+	ErrMikanMyBangumiCollectionFeed = errors.New("Mikan MyBangumi collection feeds are not scoped to one anime")
 )
 
 const maxConcurrentFeedChecks = 4
@@ -372,8 +374,12 @@ func (s *scheduler) processFetchedFeedItemsWithSummary(
 	items []rss.RSSItem,
 	includeHistorical bool,
 ) (*time.Time, CollectSummary, error) {
-	var maxPubTime *time.Time
 	var summary CollectSummary
+	if utils.IsMikanMyBangumiCollectionURL(feed.RSSURL) {
+		return nil, summary, ErrMikanMyBangumiCollectionFeed
+	}
+
+	var maxPubTime *time.Time
 	for _, item := range items {
 		if err := ctx.Err(); err != nil {
 			return nil, summary, err

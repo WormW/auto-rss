@@ -16,9 +16,10 @@ import (
 const maxPreviewItems = 50
 
 var (
-	ErrInvalidURL         = errors.New("invalid feed URL")
-	ErrNegativeOffset     = errors.New("episode offset must be non-negative")
-	ErrNoMappableEpisodes = errors.New("feed contains items but none map to a positive relative episode")
+	ErrInvalidURL                   = errors.New("invalid feed URL")
+	ErrMikanMyBangumiCollectionFeed = errors.New("Mikan MyBangumi collection feeds are not scoped to one anime")
+	ErrNegativeOffset               = errors.New("episode offset must be non-negative")
+	ErrNoMappableEpisodes           = errors.New("feed contains items but none map to a positive relative episode")
 )
 
 type FetchError struct {
@@ -269,6 +270,9 @@ func validateInput(input Input) error {
 	}
 	if utils.NormalizeFeedURL(input.RSSURL) == "" {
 		return ErrInvalidURL
+	}
+	if utils.IsMikanMyBangumiCollectionURL(input.RSSURL) {
+		return ErrMikanMyBangumiCollectionFeed
 	}
 	return nil
 }

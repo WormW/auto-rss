@@ -1,6 +1,6 @@
 # Auto-RSS MCP 服务
 
-Auto-RSS 可以通过 MCP Streamable HTTP 对外暴露一组给 AI agent 使用的管理工具。默认关闭，开启后端点为：
+Auto-RSS 是独立运行的后台服务，可通过 MCP Streamable HTTP 对外暴露一组给 AI agent 使用的管理工具。默认关闭，开启后端点为：
 
 ```text
 POST /mcp
@@ -61,6 +61,12 @@ Authorization: Bearer replace-with-a-long-random-token
 | `get_bangumi_subject` | 只读 | 获取 Bangumi 条目详情 |
 | `get_calendar` | 只读 | 查看今日或本周追番日历 |
 | `list_logs` | 只读 | 查询近期日志 |
+
+## 新增订阅与管理范围
+
+`create_subscription` 与 REST 共用订阅创建流程：校验 feed 可访问且能够映射集数后，事务性写入订阅、feed 和剧集台账。无效 feed 返回错误，不留下半成品订阅。首次自动同步只建立历史基线；历史补集通过 REST 手动采集。
+
+完整编辑、多 feed 和批量管理接口仍在 REST；当前 MCP 工具尚未覆盖这些操作。`list_logs` 查询数据库记录，返回的 `persistence_enabled` 表示是否正在持久化新日志。默认关闭新的数据库日志写入，运行日志由 stderr 提供；空结果不能证明刚发起的操作成功，按需设置 `LOG_DB_ENABLED=true`。
 
 ## 安全建议
 

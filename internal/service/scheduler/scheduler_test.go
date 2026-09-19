@@ -232,6 +232,25 @@ func TestManualCollectionReportsWhenAllFeedsFail(t *testing.T) {
 	assert.Equal(t, 1, summary.FeedErrors)
 }
 
+func TestRSSCheckRejectsUnscopedMikanMyBangumiFeed(t *testing.T) {
+	now := time.Now().UTC()
+	fx := newSchedulerLedgerFixture(t, []rss.RSSItem{schedulerRSSItem(1, "wrong-show", now)})
+	sub := fx.createSubscription(t)
+	feed := fx.defaultFeed(t, sub.ID)
+	feed.RSSURL = "https://mikanime.tv/RSS/MyBangumi?token=opaque"
+	feed.RSSURLNormalized = feed.RSSURL
+	require.NoError(t, fx.feedRepo.Update(&feed))
+
+	fx.scheduler.checkRSSFeeds()
+
+	var downloads int64
+	require.NoError(t, fx.db.Model(&model.Download{}).Count(&downloads).Error)
+	assert.Zero(t, downloads)
+	stored, err := fx.feedRepo.GetByID(feed.ID)
+	require.NoError(t, err)
+	assert.Contains(t, stored.LastError, "MyBangumi")
+}
+
 func TestOneFeedFailureDoesNotBlockAnotherFeed(t *testing.T) {
 	fx := newSchedulerLedgerFixture(t, nil)
 	sub := fx.createSubscription(t)

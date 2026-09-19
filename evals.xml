@@ -17,7 +17,7 @@
   </eval>
   <eval id="5">
     <question>用这个 Mikan RSS 创建订阅：名称“测试番剧”，rss_url 为 https://example.com/rss.xml，季度 1，简体中文优先。</question>
-    <expected>Call create_subscription with name, rss_url, season=1, language_preference="chs"; return the created or existing subscription ID and status.</expected>
+    <expected>Call create_subscription with name, rss_url, season=1, language_preference="chs". If feed validation succeeds, return the created or existing subscription ID and status; if it fails, report the feed error without claiming that a subscription was created.</expected>
   </eval>
   <eval id="6">
     <question>下载 ID 44 失败了，帮我重试；如果失败，告诉我下一步该检查什么。</question>
@@ -25,7 +25,7 @@
   </eval>
   <eval id="7">
     <question>立即刷新 RSS，然后看一下日志里有没有 RSS 或下载相关错误。</question>
-    <expected>Call refresh_rss, then call list_logs with level ERROR and module rss or download, and summarize recent errors. If no errors appear, say the refresh was queued and no recent matching errors were found.</expected>
+    <expected>Call refresh_rss, then call list_logs with level ERROR and module rss or download. Check persistence_enabled before interpreting results: when false, explain that current runtime logs are only available through stderr and stored logs cannot verify this refresh. When true, summarize matching errors without treating an empty result as proof that the asynchronous refresh succeeded.</expected>
   </eval>
   <eval id="8">
     <question>列出所有下载任务，翻到下一页继续找 failed 的条目。</question>

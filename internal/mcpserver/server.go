@@ -20,54 +20,65 @@ import (
 	"github.com/WormW/auto-rss/internal/service/calendar"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/mikan"
+	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/WormW/auto-rss/internal/service/scheduler"
+	"github.com/WormW/auto-rss/internal/service/subscription"
+	"github.com/WormW/auto-rss/internal/service/subscriptionfeed"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"gorm.io/gorm"
 )
 
 type Dependencies struct {
-	DB               *gorm.DB
-	Config           *config.Config
-	SubscriptionRepo repository.SubscriptionRepository
-	DownloadRepo     repository.DownloadRepository
-	ConfigRepo       repository.ConfigRepository
-	RSSSourceRepo    repository.RSSSourceRepository
-	LogRepo          repository.LogRepository
-	Scheduler        scheduler.Scheduler
-	QBClient         downloader.QBittorrentClient
+	DB                  *gorm.DB
+	Config              *config.Config
+	SubscriptionRepo    repository.SubscriptionRepository
+	DownloadRepo        repository.DownloadRepository
+	ConfigRepo          repository.ConfigRepository
+	RSSSourceRepo       repository.RSSSourceRepository
+	LogRepo             repository.LogRepository
+	Scheduler           scheduler.Scheduler
+	QBClient            downloader.QBittorrentClient
+	SubscriptionCreator subscription.Creator
 }
 
 type Server struct {
-	cfg              *config.Config
-	db               *gorm.DB
-	subscriptionRepo repository.SubscriptionRepository
-	downloadRepo     repository.DownloadRepository
-	configRepo       repository.ConfigRepository
-	rssSourceRepo    repository.RSSSourceRepository
-	logRepo          repository.LogRepository
-	scheduler        scheduler.Scheduler
-	qbClient         downloader.QBittorrentClient
-	mikanService     *mikan.MikanService
-	bangumiService   *bangumi.BangumiService
-	calendarService  *calendar.Calendar
-	mcpServer        *mcp.Server
-	registeredTools  []registeredMCPTool
+	cfg                 *config.Config
+	db                  *gorm.DB
+	subscriptionRepo    repository.SubscriptionRepository
+	downloadRepo        repository.DownloadRepository
+	configRepo          repository.ConfigRepository
+	rssSourceRepo       repository.RSSSourceRepository
+	logRepo             repository.LogRepository
+	scheduler           scheduler.Scheduler
+	qbClient            downloader.QBittorrentClient
+	mikanService        *mikan.MikanService
+	bangumiService      *bangumi.BangumiService
+	calendarService     *calendar.Calendar
+	mcpServer           *mcp.Server
+	subscriptionCreator subscription.Creator
+	registeredTools     []registeredMCPTool
 }
 
 func New(deps Dependencies) *Server {
 	s := &Server{
-		cfg:              deps.Config,
-		db:               deps.DB,
-		subscriptionRepo: deps.SubscriptionRepo,
-		downloadRepo:     deps.DownloadRepo,
-		configRepo:       deps.ConfigRepo,
-		rssSourceRepo:    deps.RSSSourceRepo,
-		logRepo:          deps.LogRepo,
-		scheduler:        deps.Scheduler,
-		qbClient:         deps.QBClient,
-		mikanService:     mikan.NewMikanService(""),
-		bangumiService:   bangumi.NewBangumiService(),
-		calendarService:  calendar.NewCalendar(deps.SubscriptionRepo, deps.DownloadRepo),
+		cfg:                 deps.Config,
+		db:                  deps.DB,
+		subscriptionRepo:    deps.SubscriptionRepo,
+		downloadRepo:        deps.DownloadRepo,
+		configRepo:          deps.ConfigRepo,
+		rssSourceRepo:       deps.RSSSourceRepo,
+		logRepo:             deps.LogRepo,
+		scheduler:           deps.Scheduler,
+		qbClient:            deps.QBClient,
+		mikanService:        mikan.NewMikanService(""),
+		bangumiService:      bangumi.NewBangumiService(),
+		calendarService:     calendar.NewCalendar(deps.SubscriptionRepo, deps.DownloadRepo),
+		subscriptionCreator: deps.SubscriptionCreator,
+	}
+	if s.subscriptionCreator == nil && deps.DB != nil {
+		feedService := subscriptionfeed.NewServiceWithConfig(deps.DB,
+			repository.NewSubscriptionFeedRepository(deps.DB), rss.NewParser(), deps.ConfigRepo)
+		s.subscriptionCreator = subscription.NewCreator(deps.DB, feedService, repository.NewEpisodeRepository(deps.DB))
 	}
 
 	s.mcpServer = mcp.NewServer(&mcp.Implementation{
@@ -122,7 +133,7 @@ func (s *Server) registerTools() {
 	addTool(s, "search_bangumi", "Search Bangumi anime metadata by title, or return the best match only. Use this to identify subject IDs, total episodes, air dates, scores, and names before creating or enriching subscriptions. This calls an external API.", true, s.searchBangumi)
 	addTool(s, "get_bangumi_subject", "Get detailed Bangumi metadata for a known subject ID. Use this when you need a subject's canonical names, summary, score, rank, air date, or episode count.", true, s.getBangumiSubject)
 	addTool(s, "get_calendar", "Get Auto-RSS airing calendar data. Use today_only for today's expected next episodes, or week_offset for a week view. This is read-only and based on subscription calendar fields.", true, s.getCalendar)
-	addTool(s, "list_logs", "List recent Auto-RSS logs with cursor pagination and optional level/module filters. Use this to explain failures after refresh_rss, retry_download, or qBittorrent connectivity issues. This is read-only.", true, s.listLogs)
+	addTool(s, "list_logs", "List stored Auto-RSS database logs with cursor pagination and optional level/module filters. Check persistence_enabled: when false, new runtime logs only go to stderr and these results are historical. Empty results do not prove a recent operation succeeded. This is read-only.", true, s.listLogs)
 }
 
 type registeredMCPTool struct {
@@ -368,6 +379,9 @@ func (s *Server) createSubscription(ctx context.Context, req *mcp.CallToolReques
 	if input.RSSURL == "" {
 		return nil, CreateSubscriptionOutput{}, fmt.Errorf("rss_url is required")
 	}
+	if utils.IsMikanMyBangumiCollectionURL(input.RSSURL) {
+		return nil, CreateSubscriptionOutput{}, fmt.Errorf("rss_url must be a single-anime feed; Mikan MyBangumi is an account-wide collection")
+	}
 
 	if existing, err := s.subscriptionRepo.GetByRSSURL(input.RSSURL); err == nil && existing != nil {
 		out := CreateSubscriptionOutput{Subscription: summarizeSubscription(*existing)}
@@ -401,7 +415,12 @@ func (s *Server) createSubscription(ctx context.Context, req *mcp.CallToolReques
 		BangumiID:          input.BangumiID,
 		RenameEnabled:      renameEnabled,
 	}
-	if err := s.subscriptionRepo.Create(sub); err != nil {
+	if s.subscriptionCreator == nil {
+		return nil, CreateSubscriptionOutput{}, fmt.Errorf("subscription creation service is unavailable")
+	}
+	if err := s.subscriptionCreator.Create(ctx, sub, []subscriptionfeed.Input{{
+		Name: input.Name, RSSURL: input.RSSURL, Fansub: sub.Fansub, Enabled: true,
+	}}); err != nil {
 		return nil, CreateSubscriptionOutput{}, fmt.Errorf("failed to create subscription: %w", err)
 	}
 

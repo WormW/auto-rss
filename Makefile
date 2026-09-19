@@ -1,4 +1,4 @@
-.PHONY: all build build-embed clean run test docker-build docker-run web-install web-build web-dev web-embed install-service uninstall-service
+.PHONY: all build clean run test docker-build docker-run install-service uninstall-service
 
 GOCACHE_DIR ?= $(CURDIR)/.cache/go-build
 GOMODCACHE_DIR ?= $(CURDIR)/.cache/go-mod
@@ -14,11 +14,6 @@ build:
 	@echo "Building backend..."
 	@GOCACHE=$(GOCACHE_DIR) GOMODCACHE=$(GOMODCACHE_DIR) go build -ldflags="-s -w" -o $(BINARY_NAME) ./cmd/server
 
-# 构建后端 (嵌入前端资源)
-build-embed: web-embed
-	@echo "Building backend with embedded frontend..."
-	@GOCACHE=$(GOCACHE_DIR) GOMODCACHE=$(GOMODCACHE_DIR) go build -tags embed -ldflags="-s -w" -o $(BINARY_NAME) ./cmd/server
-
 # 构建用于生产的静态链接二进制
 build-static:
 	@echo "Building static binary..."
@@ -29,16 +24,12 @@ clean:
 	@echo "Cleaning..."
 	@rm -f $(BINARY_NAME)
 	@rm -rf bin/
-	@rm -rf web/dist/
-	@rm -rf internal/webui/dist/
 
 # 清理所有包括数据（危险！）
 clean-all:
 	@echo "Cleaning everything including data..."
 	@rm -f $(BINARY_NAME)
 	@rm -rf bin/
-	@rm -rf web/dist/
-	@rm -rf internal/webui/dist/
 	@rm -rf data/
 	@rm -rf logs/
 
@@ -51,28 +42,6 @@ run: build
 test:
 	@echo "Running tests..."
 	@go test -v ./...
-
-# 安装前端依赖
-web-install:
-	@echo "Installing frontend dependencies..."
-	@cd web && npm install
-
-# 构建前端
-web-build: web-install
-	@echo "Building frontend..."
-	@cd web && npm run build
-
-# 准备嵌入的前端资源
-web-embed: web-build
-	@echo "Preparing embedded frontend..."
-	@rm -rf internal/webui/dist/
-	@mkdir -p internal/webui/dist
-	@cp -R web/dist/* internal/webui/dist/
-
-# 运行前端开发服务器
-web-dev: web-install
-	@echo "Starting frontend dev server..."
-	@cd web && npm run dev
 
 # 构建 Docker 镜像
 docker-build:
@@ -103,7 +72,6 @@ lint:
 deps:
 	@echo "Updating dependencies..."
 	@go mod tidy
-	@cd web && npm update
 
 # 服务管理 (macOS/Linux)
 install-service:
@@ -118,15 +86,10 @@ uninstall-service:
 help:
 	@echo "Available targets:"
 	@echo "  make build             - Build backend (output: ./auto-rss)"
-	@echo "  make build-embed       - Build backend with embedded frontend"
 	@echo "  make build-static      - Build static binary"
 	@echo "  make clean             - Clean build artifacts"
 	@echo "  make run               - Run backend"
 	@echo "  make test              - Run tests"
-	@echo "  make web-install       - Install frontend dependencies"
-	@echo "  make web-build         - Build frontend"
-	@echo "  make web-embed         - Prepare embedded frontend assets"
-	@echo "  make web-dev           - Run frontend dev server"
 	@echo "  make docker-build      - Build Docker image"
 	@echo "  make docker-run        - Run Docker container"
 	@echo "  make docker-stop       - Stop Docker container"

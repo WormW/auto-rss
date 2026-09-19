@@ -110,7 +110,8 @@ func (s *Server) listLogs(ctx context.Context, req *mcp.CallToolRequest, input L
 	}
 
 	out := ListLogsOutput{
-		Items: make([]LogSummary, 0, len(logs)),
+		PersistenceEnabled: s.cfg != nil && s.cfg.LogDBEnabled,
+		Items:              make([]LogSummary, 0, len(logs)),
 		PageInfo: PageInfo{
 			Total:      total,
 			Limit:      limit,

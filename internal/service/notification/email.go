@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/smtp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,14 +18,14 @@ const (
 
 // EmailConfig SMTP 邮件配置
 type EmailConfig struct {
-	SMTPHost     string `json:"smtp_host"`     // SMTP 服务器地址，如 smtp.gmail.com
-	SMTPPort     int    `json:"smtp_port"`     // SMTP 端口，如 587, 465
-	Username     string `json:"username"`      // 邮箱账号
-	Password     string `json:"password"`      // 邮箱密码或授权码
-	From         string `json:"from"`          // 发件人显示名称
-	To           string `json:"to"`            // 收件人邮箱（多个用逗号分隔）
-	UseTLS       bool   `json:"use_tls"`       // 是否使用 TLS（端口 465）
-	UseStartTLS  bool   `json:"use_starttls"`  // 是否使用 STARTTLS（端口 587）
+	SMTPHost    string `json:"smtp_host"`    // SMTP 服务器地址，如 smtp.gmail.com
+	SMTPPort    int    `json:"smtp_port"`    // SMTP 端口，如 587, 465
+	Username    string `json:"username"`     // 邮箱账号
+	Password    string `json:"password"`     // 邮箱密码或授权码
+	From        string `json:"from"`         // 发件人显示名称
+	To          string `json:"to"`           // 收件人邮箱（多个用逗号分隔）
+	UseTLS      bool   `json:"use_tls"`      // 是否使用 TLS（端口 465）
+	UseStartTLS bool   `json:"use_starttls"` // 是否使用 STARTTLS（端口 587）
 }
 
 // EmailChannel 邮件通知渠道
@@ -97,7 +98,7 @@ func (e *EmailChannel) Send(title, message string) error {
 
 // sendViaStartTLS 使用 STARTTLS 发送邮件（端口 587）
 func (e *EmailChannel) sendViaStartTLS(toList []string, msg string) error {
-	addr := fmt.Sprintf("%s:%d", e.config.SMTPHost, e.config.SMTPPort)
+	addr := net.JoinHostPort(e.config.SMTPHost, strconv.Itoa(e.config.SMTPPort))
 
 	// 连接到 SMTP 服务器
 	conn, err := net.DialTimeout("tcp", addr, emailTimeout)
@@ -171,7 +172,7 @@ func (e *EmailChannel) sendViaStartTLS(toList []string, msg string) error {
 
 // sendViaTLS 使用 TLS 发送邮件（端口 465）
 func (e *EmailChannel) sendViaTLS(toList []string, msg string) error {
-	addr := fmt.Sprintf("%s:%d", e.config.SMTPHost, e.config.SMTPPort)
+	addr := net.JoinHostPort(e.config.SMTPHost, strconv.Itoa(e.config.SMTPPort))
 
 	// 创建 TLS 配置
 	tlsConfig := &tls.Config{
@@ -310,9 +311,9 @@ func GetCommonSMTPConfigs() map[string]*EmailConfig {
 			UseStartTLS: true,
 		},
 		"163": {
-			SMTPHost:    "smtp.163.com",
-			SMTPPort:    465,
-			UseTLS:      true,
+			SMTPHost: "smtp.163.com",
+			SMTPPort: 465,
+			UseTLS:   true,
 		},
 		"outlook": {
 			SMTPHost:    "smtp.office365.com",

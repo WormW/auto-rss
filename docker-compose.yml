@@ -17,6 +17,7 @@ services:
       - QB_PASSWORD=adminpass
       - RSS_INTERVAL=30m
       - LOG_LEVEL=info
+      - LOG_DB_ENABLED=false
       - SERVER_PORT=7892
       - DOWNLOAD_PATH=/downloads
     healthcheck:

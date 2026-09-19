@@ -26,3 +26,14 @@ func NormalizeFeedURL(raw string) string {
 	parsed.RawQuery = parsed.Query().Encode()
 	return parsed.String()
 }
+
+// IsMikanMyBangumiCollectionURL reports whether raw is Mikan's account-wide RSS
+// collection feed. It is not scoped to a single anime and must never be used as
+// a subscription source, otherwise every item can be assigned to that subscription.
+func IsMikanMyBangumiCollectionURL(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimRight(parsed.Path, "/"), "/RSS/MyBangumi")
+}

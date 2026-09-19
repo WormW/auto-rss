@@ -120,6 +120,16 @@ func TestCreateRejectsFeedWhoseNonEmptyItemsHaveNoValidMapping(t *testing.T) {
 	assert.ErrorIs(t, err, subscriptionfeed.ErrNoMappableEpisodes)
 }
 
+func TestPreviewRejectsMikanMyBangumiCollectionFeed(t *testing.T) {
+	svc, _, _ := newFeedServiceFixture(t, &fakeParser{})
+
+	_, err := svc.Preview(context.Background(), subscriptionfeed.Input{
+		RSSURL: "https://mikanime.tv/RSS/MyBangumi?token=opaque",
+	})
+
+	assert.ErrorIs(t, err, subscriptionfeed.ErrMikanMyBangumiCollectionFeed)
+}
+
 func TestUpdateURLOrOffsetResetsBaselineButRenameDoesNot(t *testing.T) {
 	parser := &fakeParser{items: []rss.RSSItem{{Title: "Anime 101", Episode: 101}}}
 	svc, repo, db := newFeedServiceFixture(t, parser)

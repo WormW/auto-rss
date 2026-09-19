@@ -1,11 +1,3 @@
-# 构建前端
-FROM node:20-alpine AS web-builder
-WORKDIR /build
-COPY web/package*.json ./
-RUN npm install
-COPY web/ ./
-RUN npx vite build
-
 # 构建后端
 FROM golang:1.25-alpine AS go-builder
 WORKDIR /build
@@ -27,7 +19,6 @@ RUN apk --no-cache add ca-certificates sqlite-libs
 
 # 复制构建产物
 COPY --from=go-builder /build/auto-rss /app/
-COPY --from=web-builder /build/dist /app/web/dist
 
 # 创建数据目录
 RUN mkdir -p /app/data

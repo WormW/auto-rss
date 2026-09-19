@@ -19,7 +19,6 @@ import (
 	"github.com/WormW/auto-rss/internal/config"
 	"github.com/WormW/auto-rss/internal/model"
 	"github.com/WormW/auto-rss/internal/repository"
-	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/episode"
 	"github.com/WormW/auto-rss/internal/service/rss"
@@ -130,6 +129,7 @@ func TestSetupDoesNotRegisterRemovedLocalDiskRoutes(t *testing.T) {
 		http.MethodPost + " /api/v1/disk/cleanup":                  {},
 		http.MethodGet + " /api/v1/disk/history":                   {},
 		http.MethodPost + " /api/v1/file-organizer/trigger":        {},
+		http.MethodPost + " /api/v1/file-organizer/reload":         {},
 	}
 	for _, route := range router.Routes() {
 		key := route.Method + " " + route.Path
@@ -258,10 +258,8 @@ func newRouterTestConfig(authEnabled bool) *config.Config {
 	}
 }
 
-func newTestAppContext(db *gorm.DB, cfg *config.Config) *app.Context {
-	subscriptionRepo := repository.NewSubscriptionRepository(db)
-	downloadRepo := repository.NewDownloadRepository(db)
-	return app.NewContext(db, cfg, subscriptionRepo, downloadRepo, bangumi.NewBangumiService())
+func newTestAppContext(_ *gorm.DB, _ *config.Config) *app.Context {
+	return app.NewContext()
 }
 
 func setupRouterForTest(t *testing.T, authEnabled bool) (http.Handler, *app.Context) {
