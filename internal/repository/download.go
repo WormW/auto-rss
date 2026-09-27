@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"strings"
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
@@ -8,9 +9,10 @@ import (
 )
 
 const (
-	MaxPageSize         = 1000
-	DefaultPageSize     = 20
-	bulkDeleteChunkSize = 500
+	MaxPageSize          = 1000
+	DefaultPageSize      = 20
+	bulkDeleteChunkSize  = 500
+	batchLookupChunkSize = 500
 )
 
 // DownloadRepository 下载仓储接口
@@ -94,6 +96,51 @@ func (r *downloadRepository) GetByHash(hash string) (*model.Download, error) {
 		return nil, err
 	}
 	return &download, nil
+}
+
+// GetByHashes returns downloads indexed by normalized torrent hash.
+//
+// The monitor reconciles a qBittorrent snapshot as a batch. Keeping this
+// method off DownloadRepository preserves the small public repository
+// interface for adapters while allowing the production implementation to
+// avoid one database round trip per torrent.
+func (r *downloadRepository) GetByHashes(hashes []string) (map[string]*model.Download, error) {
+	result := make(map[string]*model.Download, len(hashes))
+	if len(hashes) == 0 {
+		return result, nil
+	}
+
+	normalized := make([]string, 0, len(hashes))
+	seen := make(map[string]struct{}, len(hashes))
+	for _, hash := range hashes {
+		hash = strings.ToLower(strings.TrimSpace(hash))
+		if hash == "" {
+			continue
+		}
+		if _, ok := seen[hash]; ok {
+			continue
+		}
+		seen[hash] = struct{}{}
+		normalized = append(normalized, hash)
+	}
+	if len(normalized) == 0 {
+		return result, nil
+	}
+
+	for start := 0; start < len(normalized); start += batchLookupChunkSize {
+		end := start + batchLookupChunkSize
+		if end > len(normalized) {
+			end = len(normalized)
+		}
+		var downloads []model.Download
+		if err := r.db.Where("torrent_hash IN ?", normalized[start:end]).Find(&downloads).Error; err != nil {
+			return nil, err
+		}
+		for i := range downloads {
+			result[strings.ToLower(strings.TrimSpace(downloads[i].TorrentHash))] = &downloads[i]
+		}
+	}
+	return result, nil
 }
 
 // List 获取下载任务列表

@@ -10,7 +10,7 @@
 - 保留搜索、批量导入、分组、标签、剧集状态、下载历史、通知、日历、备份和迁移 API。
 - 保留下载完成后的重命名、移动、NFO 生成和媒体库刷新；由 `rename_enabled` 等现有配置控制。
 - 移除目录监听及其递归目录遍历；不进行媒体扫描、磁盘容量监控或自动空间清理。
-- qBittorrent 状态同步仍每 30 秒运行，用于识别下载完成和失败。这是下载任务同步，不遍历媒体目录。
+- qBittorrent 状态同步在有下载、待处理或重试任务时按 30 秒运行；空闲或仅保留已完成任务时降为每 5 分钟，用于识别下载完成和失败。这是下载任务同步，不遍历媒体目录。
 - 日志默认仅以 JSON 输出到 stderr。`LOG_DB_ENABLED=true` 可恢复数据库日志查询；每轮维护分批清理过期与超额日志，目标保留最近 10,000 条、最长 30 天，两轮之间可能暂时超额。
 
 下载完成后的整理仍会通过 qBittorrent 操作文件，并访问配置路径写入 NFO。启用这项能力时，服务必须能够访问相应媒体路径。
@@ -91,6 +91,10 @@ MCP_TOKEN=replace-with-a-long-random-token
 | `MCP_ENABLED` | `false` | 是否启用 `/mcp` |
 | `MCP_TOKEN` | 空 | MCP 独立 Bearer token |
 | `AUTH_ENABLED` | `false` | REST 单用户 JWT 认证 |
+| `HOME_NOTIFICATION_ENABLED` | `false` | 是否将通知推送到 home-console |
+| `HOME_NOTIFICATION_URL` | `https://home.ts.acg.cx` | home-console 根地址或完整 ingest 地址 |
+| `HOME_NOTIFICATION_TOKEN` | 空 | home-console 为 `auto-rss` source 分配的 Bearer token |
+| `HOME_NOTIFICATION_PAGE_URL` | `https://home.ts.acg.cx/#notifications` | 通知点击后打开的页面地址 |
 
 认证和限流的完整配置见 [.env.example](.env.example)。启用 REST 认证时必须设置用户名、非默认密码和至少 32 字符的非默认 `JWT_SECRET`；MCP 始终独立校验 `MCP_TOKEN`。无认证模式仅适合可信内网。
 
@@ -108,5 +112,6 @@ go vet ./...
 - [REST API](docs/API.md)
 - [MCP](docs/MCP.md)
 - [Webhook 通知](docs/WEBHOOK_NOTIFICATION.md)
+- [home-console 通知](docs/HOME_NOTIFICATION.md)
 
 `docs/superpowers/` 和原 PRD 保留历史设计记录；当前服务范围以本 README、API 文档和服务化说明为准。

@@ -41,6 +41,26 @@ func TestMapQBStateToStatus(t *testing.T) {
 	}
 }
 
+func TestDownloadMonitorActivityUsesIdleCadenceForCompletedTorrents(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/monitor-activity.db"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Download{}, &model.Subscription{}, &model.Config{}))
+
+	qb := &retryLedgerQBClient{torrents: []*TorrentInfo{{
+		Hash: "completed-hash", State: "uploading", Category: AutoRssCategory,
+	}}}
+	monitor := NewDownloadMonitor(
+		db, qb, repository.NewDownloadRepository(db), repository.NewSubscriptionRepository(db),
+		repository.NewConfigRepository(db), "", nil,
+	)
+	monitor.SetNotificationService(nil)
+
+	assert.False(t, monitor.checkDownloads(), "completed qBittorrent tasks should allow the idle cadence")
+
+	qb.torrents[0].State = StateDownloading
+	assert.True(t, monitor.checkDownloads(), "an active qBittorrent task should keep the active cadence")
+}
+
 func TestDownloadMonitorReconcileIgnoresReplacementDownloads(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/replacement-monitor.db"), &gorm.Config{})
 	require.NoError(t, err)

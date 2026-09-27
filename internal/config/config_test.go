@@ -53,3 +53,25 @@ func TestValidateAuthDisabledAllowsLocalDefaults(t *testing.T) {
 		t.Fatalf("expected local no-auth defaults to validate, got %v", err)
 	}
 }
+
+func TestValidateHomeNotificationRequiresTokenWhenEnabled(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.AuthEnabled = false
+	cfg.HomeNotificationEnabled = true
+	cfg.HomeNotificationURL = "https://home.example"
+
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "HOME_NOTIFICATION_TOKEN") {
+		t.Fatalf("expected home token validation error, got %v", err)
+	}
+}
+
+func TestValidateHomeNotificationRequiresURLWhenEnabled(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.AuthEnabled = false
+	cfg.HomeNotificationEnabled = true
+	cfg.HomeNotificationToken = "test-token"
+
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "HOME_NOTIFICATION_URL") {
+		t.Fatalf("expected home URL validation error, got %v", err)
+	}
+}

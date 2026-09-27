@@ -54,6 +54,12 @@ type Config struct {
 	// 下载配置
 	DownloadPath string
 
+	// home-console 通知配置
+	HomeNotificationEnabled bool
+	HomeNotificationURL     string
+	HomeNotificationToken   string
+	HomeNotificationPageURL string
+
 	// JWT配置
 	AuthEnabled           bool
 	JWTSecret             string
@@ -94,6 +100,10 @@ func Load() (*Config, error) {
 		MCPToken:                       getEnv("MCP_TOKEN", ""),
 		MCPAllowedOrigins:              getEnvAsStringSlice("MCP_ALLOWED_ORIGINS", ""),
 		DownloadPath:                   getEnv("DOWNLOAD_PATH", "/downloads"),
+		HomeNotificationEnabled:        getEnv("HOME_NOTIFICATION_ENABLED", "false") == "true",
+		HomeNotificationURL:            getEnv("HOME_NOTIFICATION_URL", "https://home.ts.acg.cx"),
+		HomeNotificationToken:          getEnv("HOME_NOTIFICATION_TOKEN", ""),
+		HomeNotificationPageURL:        getEnv("HOME_NOTIFICATION_PAGE_URL", "https://home.ts.acg.cx/#notifications"),
 
 		// JWT配置
 		AuthEnabled:           getEnv("AUTH_ENABLED", "false") == "true",
@@ -159,6 +169,14 @@ func (c *Config) Validate() error {
 		c.MCPAllowedOrigins = []string{
 			fmt.Sprintf("http://localhost:%d", c.ServerPort),
 			fmt.Sprintf("http://127.0.0.1:%d", c.ServerPort),
+		}
+	}
+	if c.HomeNotificationEnabled {
+		if strings.TrimSpace(c.HomeNotificationURL) == "" {
+			return fmt.Errorf("HOME_NOTIFICATION_URL is required when HOME_NOTIFICATION_ENABLED=true")
+		}
+		if strings.TrimSpace(c.HomeNotificationToken) == "" {
+			return fmt.Errorf("HOME_NOTIFICATION_TOKEN is required when HOME_NOTIFICATION_ENABLED=true")
 		}
 	}
 	return nil

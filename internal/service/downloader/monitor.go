@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
@@ -26,6 +28,16 @@ const (
 
 	// ReconcileGracePeriod 避免把刚创建/刚入队的任务误判为丢失
 	ReconcileGracePeriod = 10 * time.Minute
+
+	// maxConcurrentCompletionJobs bounds filesystem-heavy completion work.
+	// Completion includes qBittorrent moves, renames, NFO writes, and media
+	// library refreshes, so allowing every completed torrent to run at once can
+	// overload an external disk without improving throughput.
+	maxConcurrentCompletionJobs = 2
+	monitorStopWait             = 5 * time.Second
+	// idleDownloadMonitorInterval avoids polling qBittorrent every few seconds
+	// when there is no active download to reconcile.
+	idleDownloadMonitorInterval = 5 * time.Minute
 )
 
 const pendingDownloadCategoryPrefix = AutoRssCategory + ":pending:"
@@ -73,8 +85,12 @@ type DownloadMonitor struct {
 	notificationSvc  NotificationService
 	mediaLibrarySvc  MediaLibraryRefresher
 	episodeService   EpisodeCompletionService
-	ticker           *time.Ticker
 	stopChan         chan struct{}
+	doneChan         chan struct{}
+	stopOnce         sync.Once
+	started          atomic.Bool
+	checkRunning     atomic.Bool
+	completionSlots  chan struct{}
 	// New service interfaces
 	statusSync        StatusSync
 	completionHandler CompletionHandler
@@ -109,6 +125,8 @@ func NewDownloadMonitor(
 		mediaLibrarySvc:  mediaSvc,
 		episodeService:   episodeService,
 		stopChan:         make(chan struct{}),
+		doneChan:         make(chan struct{}),
+		completionSlots:  make(chan struct{}, maxConcurrentCompletionJobs),
 	}
 }
 
@@ -122,49 +140,82 @@ func (m *DownloadMonitor) SetNotificationService(svc NotificationService) {
 
 // Start 启动监控服务
 func (m *DownloadMonitor) Start(interval time.Duration) {
-	m.ticker = time.NewTicker(interval)
+	if !m.started.CompareAndSwap(false, true) {
+		logger.Warn("Download monitor start ignored because it is already running")
+		return
+	}
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
 
 	logger.Info("Download monitor started",
 		"interval", interval.String(),
+		"idle_interval", idleDownloadMonitorInterval.String(),
 		"category", AutoRssCategory)
 
 	go func() {
-		time.Sleep(2 * time.Second)
-		m.checkDownloads()
+		defer close(m.doneChan)
 
-		for {
-			select {
-			case <-m.ticker.C:
-				m.checkDownloads()
-			case <-m.stopChan:
-				logger.Info("Download monitor stopped")
-				return
+		startupDelay := time.NewTimer(2 * time.Second)
+		defer startupDelay.Stop()
+		select {
+		case <-startupDelay.C:
+			active := m.checkDownloads()
+			nextInterval := interval
+			if !active {
+				nextInterval = idleDownloadMonitorInterval
 			}
+
+			timer := time.NewTimer(nextInterval)
+			defer timer.Stop()
+			for {
+				select {
+				case <-timer.C:
+					active = m.checkDownloads()
+					nextInterval = interval
+					if !active {
+						nextInterval = idleDownloadMonitorInterval
+					}
+					timer.Reset(nextInterval)
+				case <-m.stopChan:
+					logger.Info("Download monitor stopped")
+					return
+				}
+			}
+		case <-m.stopChan:
+			logger.Info("Download monitor stopped before initial check")
+			return
 		}
 	}()
 }
 
 // Stop 停止监控服务
 func (m *DownloadMonitor) Stop() {
-	if m.ticker != nil {
-		m.ticker.Stop()
+	if !m.started.Load() {
+		return
 	}
-	close(m.stopChan)
+	m.stopOnce.Do(func() { close(m.stopChan) })
+	select {
+	case <-m.doneChan:
+	case <-time.After(monitorStopWait):
+		logger.Warn("Download monitor stop timed out while waiting for the active check")
+	}
 }
 
 // processPendingDownloads 处理等待中的下载任务
-func (m *DownloadMonitor) processPendingDownloads() {
-	m.processRetryCleanupDownloads()
+func (m *DownloadMonitor) processPendingDownloads() bool {
+	active := m.processRetryCleanupDownloads()
 
 	pendingDownloads, _, err := m.downloadRepo.List(0, 10, "pending")
 	if err != nil {
 		logger.Error("Failed to get pending downloads", "error", err.Error())
-		return
+		return true
 	}
 
 	if len(pendingDownloads) == 0 {
-		return
+		return active
 	}
+	active = true
 
 	logger.Info("Processing pending downloads", "count", len(pendingDownloads))
 
@@ -172,7 +223,7 @@ func (m *DownloadMonitor) processPendingDownloads() {
 	if err != nil {
 		logger.Error("Failed to get existing torrents from qBittorrent",
 			"error", err.Error())
-		return
+		return active
 	}
 
 	existingHashes := make(map[string]bool)
@@ -298,24 +349,26 @@ func (m *DownloadMonitor) processPendingDownloads() {
 
 		m.checkpointPendingDownload(&download, torrentHash)
 	}
+	return active
 }
 
-func (m *DownloadMonitor) processRetryCleanupDownloads() {
+func (m *DownloadMonitor) processRetryCleanupDownloads() bool {
 	if m.db == nil || m.qbClient == nil {
-		return
+		return false
 	}
 	now := time.Now()
 	if err := m.db.Model(&model.Download{}).
 		Where("status = ? AND updated_at < ?", model.DownloadStatusRetryCleanupProcessing, now.Add(-retryCleanupLeaseTimeout)).
 		Updates(map[string]any{"status": model.DownloadStatusRetryCleanup, "updated_at": now}).Error; err != nil {
 		logger.Error("Failed to recover stale retry cleanup claims", "error", err.Error())
-		return
+		return true
 	}
 	cleanupDownloads, _, err := m.downloadRepo.List(0, 10, model.DownloadStatusRetryCleanup)
 	if err != nil {
 		logger.Error("Failed to get retry cleanup downloads", "error", err.Error())
-		return
+		return true
 	}
+	active := len(cleanupDownloads) > 0
 	for i := range cleanupDownloads {
 		download := &cleanupDownloads[i]
 		oldHash := strings.TrimSpace(download.TorrentHash)
@@ -353,6 +406,7 @@ func (m *DownloadMonitor) processRetryCleanupDownloads() {
 			logger.Debug("Retry cleanup checkpoint changed before finalize", "download_id", download.ID)
 		}
 	}
+	return active
 }
 
 func (m *DownloadMonitor) releaseRetryCleanupClaim(download *model.Download) {
@@ -420,31 +474,58 @@ func isTorrentFileURL(url string) bool {
 }
 
 // checkDownloads 检查下载状态
-func (m *DownloadMonitor) checkDownloads() {
+func (m *DownloadMonitor) checkDownloads() bool {
+	if !m.checkRunning.CompareAndSwap(false, true) {
+		logger.Debug("Download monitor check skipped because another check is still active")
+		// Keep the active cadence when a previous cycle is still running. This
+		// avoids entering the idle cadence while work is in flight.
+		return true
+	}
+	defer m.checkRunning.Store(false)
+
 	logger.Debug("Checking downloads...")
+	cycleActive := false
 
 	// Process retries using retry service
-	m.retryService.ProcessRetries(10)
+	if processed, err := m.retryService.ProcessRetries(10); err != nil || processed > 0 {
+		cycleActive = true
+	}
 
 	// Process pending downloads
-	m.processPendingDownloads()
+	if m.processPendingDownloads() {
+		cycleActive = true
+	}
 
 	// Get torrents from qBittorrent
 	torrents, err := m.qbClient.GetTorrentsByCategory(AutoRssCategory)
 	if err != nil {
 		logger.Error("Failed to get torrents from qBittorrent",
 			"error", err.Error())
-		return
+		// A qBittorrent error should retry at the active cadence so a
+		// transient outage is noticed promptly.
+		return true
 	}
 
 	logger.Debug("Found torrents in qBittorrent",
 		"count", len(torrents),
 		"category", AutoRssCategory)
 
-	// Update status for all torrents using status sync service
+	// Load all download records in one query when the production repository
+	// supports the optional batch lookup. Adapters that do not implement it keep
+	// the previous per-hash fallback.
+	downloadsByHash := m.lookupDownloadsByHash(torrents)
+
+	// Update status for all torrents using status sync service.
 	for _, torrent := range torrents {
-		download, err := m.downloadRepo.GetByHash(torrent.Hash)
-		if err != nil {
+		if torrent == nil {
+			continue
+		}
+		if downloadStatusForTorrent(torrent) != model.DownloadStatusCompleted {
+			cycleActive = true
+		}
+		hash := strings.ToLower(strings.TrimSpace(torrent.Hash))
+		download := downloadsByHash[hash]
+		if download == nil {
 			logger.Debug("Download not found in database",
 				"hash", torrent.Hash,
 				"name", torrent.Name)
@@ -464,10 +545,68 @@ func (m *DownloadMonitor) checkDownloads() {
 
 	// Reconcile missing tasks using status sync service
 	if m.statusSync != nil {
-		downloading, _, _ := m.downloadRepo.List(0, 10000, "downloading")
-		stalled, _, _ := m.downloadRepo.List(0, 10000, "stalled")
-		m.statusSync.Reconcile(torrents, withoutReplacementDownloads(downloading), withoutReplacementDownloads(stalled))
+		reconcileDownloads, err := m.listReconcileDownloads()
+		if err != nil {
+			logger.Error("Failed to list downloads for monitor reconciliation", "error", err.Error())
+			return true
+		}
+		if len(reconcileDownloads) > 0 {
+			cycleActive = true
+		}
+		m.statusSync.Reconcile(torrents, withoutReplacementDownloads(reconcileDownloads), nil)
 	}
+
+	return cycleActive
+}
+
+type batchDownloadLookup interface {
+	GetByHashes(hashes []string) (map[string]*model.Download, error)
+}
+
+func (m *DownloadMonitor) lookupDownloadsByHash(torrents []*TorrentInfo) map[string]*model.Download {
+	hashes := make([]string, 0, len(torrents))
+	for _, torrent := range torrents {
+		if torrent != nil && strings.TrimSpace(torrent.Hash) != "" {
+			hashes = append(hashes, torrent.Hash)
+		}
+	}
+
+	if batchRepo, ok := m.downloadRepo.(batchDownloadLookup); ok {
+		if downloads, err := batchRepo.GetByHashes(hashes); err == nil {
+			return downloads
+		} else {
+			logger.Warn("Batch download lookup failed; falling back to per-hash lookup", "error", err.Error())
+		}
+	}
+
+	result := make(map[string]*model.Download, len(hashes))
+	for _, hash := range hashes {
+		download, err := m.downloadRepo.GetByHash(hash)
+		if err != nil || download == nil {
+			continue
+		}
+		result[strings.ToLower(strings.TrimSpace(hash))] = download
+	}
+	return result
+}
+
+func (m *DownloadMonitor) listReconcileDownloads() ([]model.Download, error) {
+	if m.db != nil {
+		var downloads []model.Download
+		err := m.db.Where("status IN ?", []string{model.DownloadStatusDownloading, model.DownloadStatusStalled}).
+			Order("id ASC").Find(&downloads).Error
+		return downloads, err
+	}
+
+	downloading, _, err := m.downloadRepo.List(0, repository.MaxPageSize, model.DownloadStatusDownloading)
+	if err != nil {
+		return nil, err
+	}
+	stalled, _, err := m.downloadRepo.List(0, repository.MaxPageSize, model.DownloadStatusStalled)
+	if err != nil {
+		return nil, err
+	}
+	return append(downloading, stalled...), nil
 }
 
 func withoutReplacementDownloads(downloads []model.Download) []model.Download {
@@ -494,6 +633,10 @@ func (m *DownloadMonitor) handleCompletionAsync(download *model.Download, torren
 	}
 
 	go func() {
+		if m.completionSlots != nil {
+			m.completionSlots <- struct{}{}
+			defer func() { <-m.completionSlots }()
+		}
 		if err := handler.HandleComplete(download, torrent, subscription); err != nil {
 			logger.Error("Failed to handle completed download asynchronously",
 				"download_id", download.ID,

@@ -2,7 +2,9 @@ package downloader
 
 import (
 	"fmt"
+	"net/url"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/WormW/auto-rss/internal/model"
@@ -181,19 +183,38 @@ func (h *completionHandler) sendCompletionNotification(download *model.Download,
 		episodeInfo = "合集"
 	}
 
+	data := map[string]any{
+		"download_id":     download.ID,
+		"subscription_id": download.SubscriptionID,
+		"subscription":    subscription.Name,
+		"episode":         download.Episode,
+		"title":           download.Title,
+	}
+	if imageURL := notificationImageURL(subscription.BangumiCover); imageURL != "" {
+		data["image_url"] = imageURL
+	}
+
 	h.notificationSvc.Send(model.NotificationPayload{
-		Event:   model.EventDownloadComplete,
-		Title:   fmt.Sprintf("✅ 下载完成: %s", subscription.Name),
-		Message: fmt.Sprintf("%s %s\n文件名: %s", subscription.Name, episodeInfo, download.Title),
-		Data: map[string]any{
-			"download_id":     download.ID,
-			"subscription_id": download.SubscriptionID,
-			"subscription":    subscription.Name,
-			"episode":         download.Episode,
-			"title":           download.Title,
-		},
+		Event:     model.EventDownloadComplete,
+		Title:     fmt.Sprintf("✅ 下载完成: %s", subscription.Name),
+		Message:   fmt.Sprintf("%s %s\n文件名: %s", subscription.Name, episodeInfo, download.Title),
+		Data:      data,
 		Timestamp: time.Now(),
 	})
+}
+
+// notificationImageURL returns only a public HTTP(S) URL that can be loaded by
+// the notification consumer. Local cover paths must never be sent to Home.
+func notificationImageURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil {
+		return ""
+	}
+	return raw
 }
 
 // renameFile 重命名单个下载的文件

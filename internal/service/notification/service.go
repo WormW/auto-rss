@@ -30,6 +30,13 @@ type Channel interface {
 	IsEnabled() bool
 }
 
+// EventChannel 可接收完整事件载荷的通知渠道。
+// 普通渠道继续使用 Channel.Send，避免破坏既有 Telegram、Email 和 Webhook 行为。
+type EventChannel interface {
+	Channel
+	SendWithEvent(payload model.NotificationPayload) error
+}
+
 type service struct {
 	db          *gorm.DB
 	channels    map[string]Channel
@@ -208,7 +215,7 @@ func (s *service) sendInternal(payload model.NotificationPayload) {
 			continue
 		}
 		go func(channelName string, ch Channel) {
-			if err := ch.Send(payload.Title, payload.Message); err != nil {
+			if err := sendChannel(ch, payload); err != nil {
 				logger.Error("Failed to send notification", "channel", channelName, "error", err)
 				s.saveNotification(channelName, payload, "failed", err.Error())
 			} else {
@@ -233,7 +240,7 @@ func (s *service) sendSyncInternal(payload model.NotificationPayload) error {
 		if !channel.IsEnabled() {
 			continue
 		}
-		if err := channel.Send(payload.Title, payload.Message); err != nil {
+		if err := sendChannel(channel, payload); err != nil {
 			logger.Error("Failed to send notification", "channel", name, "error", err)
 			s.saveNotification(name, payload, "failed", err.Error())
 			lastErr = err
@@ -242,6 +249,13 @@ func (s *service) sendSyncInternal(payload model.NotificationPayload) error {
 		}
 	}
 	return lastErr
+}
+
+func sendChannel(channel Channel, payload model.NotificationPayload) error {
+	if eventChannel, ok := channel.(EventChannel); ok {
+		return eventChannel.SendWithEvent(payload)
+	}
+	return channel.Send(payload.Title, payload.Message)
 }
 
 func (s *service) saveNotification(channel string, payload model.NotificationPayload, status, errMsg string) {

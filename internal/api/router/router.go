@@ -141,6 +141,19 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 
 	// 初始化通知服务
 	notificationSvc := notification.NewService(db)
+	if cfg.HomeNotificationEnabled {
+		homeChannel := notification.NewHomeNotificationChannel(&notification.HomeNotificationConfig{
+			URL:     cfg.HomeNotificationURL,
+			Token:   cfg.HomeNotificationToken,
+			PageURL: cfg.HomeNotificationPageURL,
+		})
+		if homeChannel.IsEnabled() {
+			notificationSvc.RegisterChannel(homeChannel)
+			logger.Info("Home notification channel registered")
+		} else {
+			logger.Warn("Home notification channel is enabled but invalid", "url", cfg.HomeNotificationURL)
+		}
+	}
 	wsHub := notificationSvc.GetWebSocketHub()
 	mediaLibrarySvc := appCtx.GetMediaLibraryService()
 	if mediaLibrarySvc == nil {

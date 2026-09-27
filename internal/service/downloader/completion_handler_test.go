@@ -676,8 +676,9 @@ func TestCompletionHandler_sendCompletionNotification(t *testing.T) {
 		Episode:        5,
 	}
 	subscription := &model.Subscription{
-		ID:   1,
-		Name: "Test Anime",
+		ID:           1,
+		Name:         "Test Anime",
+		BangumiCover: "https://img.example.test/test-anime.jpg",
 	}
 
 	handler.(*completionHandler).sendCompletionNotification(download, subscription)
@@ -690,6 +691,9 @@ func TestCompletionHandler_sendCompletionNotification(t *testing.T) {
 	if payload.Event != model.EventDownloadComplete {
 		t.Errorf("Expected event %s, got %s", model.EventDownloadComplete, payload.Event)
 	}
+	if got := payload.Data["image_url"]; got != "https://img.example.test/test-anime.jpg" {
+		t.Errorf("image_url = %#v", got)
+	}
 
 	// Test collection notification
 	mockNotify.sentPayloads = nil
@@ -698,6 +702,17 @@ func TestCompletionHandler_sendCompletionNotification(t *testing.T) {
 
 	if len(mockNotify.sentPayloads) != 1 {
 		t.Fatalf("Expected 1 notification, got %d", len(mockNotify.sentPayloads))
+	}
+}
+
+func TestNotificationImageURLRejectsLocalAndCredentialedURLs(t *testing.T) {
+	for _, raw := range []string{"/data/covers/show.jpg", "file:///data/covers/show.jpg", "https://user:pass@example.test/show.jpg", "javascript:alert(1)", ""} {
+		if got := notificationImageURL(raw); got != "" {
+			t.Errorf("notificationImageURL(%q) = %q, want empty", raw, got)
+		}
+	}
+	if got := notificationImageURL("  https://img.example.test/show.jpg  "); got != "https://img.example.test/show.jpg" {
+		t.Errorf("notificationImageURL(valid) = %q", got)
 	}
 }
 
