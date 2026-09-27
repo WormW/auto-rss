@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Synthetic releases preserving DMHY's observed enclosure and page-link formats. -->
+<rss version="2.0"><channel>
+  <title>動漫花園資源網</title><link>http://share.dmhy.org</link>
+  <item>
+    <title><![CDATA[[Group] 落第贤者的学院无双 / Rakudai Kenja no Gakuin Musou - 01 [1080p][简繁内封]]]></title>
+    <link>http://share.dmhy.org/topics/view/1_example.html</link>
+    <pubDate>Sun, 27 Sep 2026 16:30:40 +0800</pubDate>
+    <enclosure url="magnet:?xt=urn:btih:HSQOM4GH4CCWDHGZDJWQPRMTQSIMOZ5W&amp;dn=&amp;tr=https%3A%2F%2Ftracker.example.test%2Fannounce" length="1" type="application/x-bittorrent" />
+    <guid isPermaLink="true">http://share.dmhy.org/topics/view/1_example.html</guid>
+    <category domain="http://share.dmhy.org/topics/list/sort_id/2">動畫</category>
+  </item>
+  <item>
+    <title><![CDATA[[Group] 落第贤者的学院无双 - 02 [720p][简体]]]></title>
+    <link>http://share.dmhy.org/topics/view/2_example.html</link>
+    <pubDate>Sun, 27 Sep 2026 16:31:40 +0800</pubDate>
+    <enclosure url="magnet:?xt=urn:btih:DX3C62CV2WXWIEXRSSZV4JWPIC7XTRLH" length="1" type="application/x-bittorrent" />
+  </item>
+</channel></rss>

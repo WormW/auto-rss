@@ -23,6 +23,7 @@ import (
 	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/WormW/auto-rss/internal/service/scheduler"
 	"github.com/WormW/auto-rss/internal/service/subscription"
+	"github.com/WormW/auto-rss/internal/service/subscriptiondiscovery"
 	"github.com/WormW/auto-rss/internal/service/subscriptionfeed"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"gorm.io/gorm"
@@ -39,6 +40,7 @@ type Dependencies struct {
 	Scheduler           scheduler.Scheduler
 	QBClient            downloader.QBittorrentClient
 	SubscriptionCreator subscription.Creator
+	Discovery           *subscriptiondiscovery.Service
 }
 
 type Server struct {
@@ -56,6 +58,7 @@ type Server struct {
 	calendarService     *calendar.Calendar
 	mcpServer           *mcp.Server
 	subscriptionCreator subscription.Creator
+	discovery           *subscriptiondiscovery.Service
 	registeredTools     []registeredMCPTool
 }
 
@@ -74,6 +77,7 @@ func New(deps Dependencies) *Server {
 		bangumiService:      bangumi.NewBangumiService(),
 		calendarService:     calendar.NewCalendar(deps.SubscriptionRepo, deps.DownloadRepo),
 		subscriptionCreator: deps.SubscriptionCreator,
+		discovery:           deps.Discovery,
 	}
 	if s.subscriptionCreator == nil && deps.DB != nil {
 		feedService := subscriptionfeed.NewServiceWithConfig(deps.DB,
@@ -81,6 +85,17 @@ func New(deps Dependencies) *Server {
 		s.subscriptionCreator = subscription.NewCreator(deps.DB, feedService, repository.NewEpisodeRepository(deps.DB))
 	}
 
+	if s.discovery == nil && deps.DB != nil {
+		provider := subscriptiondiscovery.NewHTTPProvider(func() string {
+			if deps.ConfigRepo != nil {
+				if value, err := deps.ConfigRepo.Get("system_proxy"); err == nil && value != nil {
+					return value.Value
+				}
+			}
+			return ""
+		})
+		s.discovery = subscriptiondiscovery.New(deps.DB, provider)
+	}
 	s.mcpServer = mcp.NewServer(&mcp.Implementation{
 		Name:    "auto-rss",
 		Version: "v0.1.0",
@@ -118,6 +133,8 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) registerTools() {
+	addTool(s, "prepare_subscription", "Prepare a reviewable subscription from a title, season and optional quality requirements. Start without bangumi_id to inspect anime candidates, then call again with the selected ID to obtain verified Mikan/Nyaa/DMHY RSS choices, matching/excluded/unknown samples, and for DMHY group_candidates with team_id, coverage and examples. To narrow DMHY after review, pass dmhy_team_id from a returned group candidate; the next draft will contain a team_id keyword RSS. Omitted quality defaults to excluding 720p, preferring and waiting for 1080p; use quality_policy for preferences and resolution only for a hard requirement. Do not invent language or fansub constraints. This writes an expiring draft only; it never subscribes or downloads. Present the selected identity, feed, rules, warnings and future-only start policy to the user. Edits require a new draft or the current draft_id/revision. Use confirm_subscription only after the user approves that exact draft revision and feed.", false, s.prepareSubscription)
+	addTool(s, "confirm_subscription", "Create a subscription from the exact draft revision and feed reviewed and explicitly approved by the user. Do not call during search or as a way to preview. Only a feed with verified matching samples can be confirmed. Repeated confirmation returns the same subscription. Establishes a historical baseline and follows future releases; does not automatically backfill old episodes.", false, s.confirmSubscription)
 	addTool(s, "get_system_overview", "Get a compact operational overview of Auto-RSS: subscription counts, download status counts, and RSS source counts. Use this first when the user asks what needs attention or whether the system is healthy. This is read-only and avoids exposing secret configuration values.", true, s.getSystemOverview)
 	addTool(s, "list_subscriptions", "List Auto-RSS subscriptions with cursor pagination and optional filters. Use this to find subscription IDs before toggling or inspecting a subscription. Do not use it for raw download history; call list_downloads for that.", true, s.listSubscriptions)
 	addTool(s, "get_subscription", "Get one subscription plus its recent downloads. Use this when you need detailed status, episode progress, calendar fields, Bangumi metadata, or recent failures for a known subscription ID. This is read-only.", true, s.getSubscription)

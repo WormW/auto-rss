@@ -116,8 +116,8 @@ refresh token 采用轮换机制。已使用过的 refresh token 再次刷新会
 | `GET` | `/metrics` | Prometheus 指标 |
 | `GET` | `/covers/*filepath` | 本地封面访问；本地缺失时按 Bangumi 原图 fallback |
 | `GET` | `/ws/notifications` | 通知 WebSocket |
-| `GET` | `/` | Web UI 入口 |
-| `GET` | `/assets/*filepath` | Web UI 静态资源 |
+| `GET` | `/` | JSON 404，管理页面已移除 |
+| `GET` | `/assets/*filepath` | JSON 404，前端静态资源已移除 |
 
 WebSocket 连接：
 
@@ -131,6 +131,37 @@ ws://localhost:7892/ws/notifications?token=<access_token>
 ---
 
 ## 路由总览
+
+### 订阅发现与人工复核
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/subscriptions/prepare` | 查找动画候选，或按所选 Bangumi ID 生成资源预览和临时草稿 |
+| `POST` | `/subscriptions/confirm` | 确认已复核的草稿版本和 feed，创建正式订阅 |
+
+两者受 REST 业务认证保护，与 MCP 的同名工具共用实现。准备示例：
+
+```json
+{"query":"落第贤者的学院无双","season":1,"resolution":1080}
+```
+
+首次返回 `candidates`，不自动采用搜索第一名。选择候选后再次提交完整需求，并添加 `bangumi_id`。修改已有草稿还要带当前 `draft_id`、`revision`。可选字段：`year`、`language`（`any/chs/cht/en`）、`fansub`（必须匹配的字幕组）、`sources`（`mikan/nyaa/dmhy`，默认全部）、`nyaa_query`、`nyaa_uploader`、`dmhy_query`、`dmhy_team_id`、`trusted_only`、`episode_offset`、`required_keywords`（全部满足）、`exclude_keywords`（任一排除）。
+
+未传 `resolution` 和 `quality_policy` 时，默认排除 720p、优先 1080p，并等待目标画质。显式 `resolution` 表示硬性要求并覆盖默认画质策略。可传完整对象 `"quality_policy":{"excluded_resolutions":[720],"preferred_resolution":1080,"fallback":"allow"}`：同一 RSS 同次返回时优先 1080p，缺少时允许其他已识别且未排除的画质；`fallback="wait"` 则跳过其他画质等待新资源。不会自动替换已下载内容，不支持跨 feed 全局排名。默认策略只用于发现入口，已有订阅保持原行为。
+
+返回 `feeds` 中的 RSS URL、来源、匹配规则、保留/排除/待核验计数、真实样本和 `confirmable`。来源失败、空 RSS、无匹配分别显示不同状态；有匹配样本不代表整个站点的资源覆盖率。准备仅保存草稿，不创建订阅或下载。
+
+动漫花园可单独指定 `"sources":["dmhy"]`，自动使用已核验的中文名和原文名生成最多两个查询。宽搜的 `feeds[].group_candidates` 会按搜索页的字幕组 `team_id` 汇总资源数、覆盖集数、匹配集数和标题样例；它是本次番剧的候选证据，不会写成全局字幕组偏好。人工选择后，把候选中的 `id` 作为 `dmhy_team_id` 再准备一次，例如 `{"dmhy_team_id":657}`，生成的 RSS 查询会包含 `team_id:657`。`dmhy_query` 可覆盖为自行调整的搜索表达式，例如 `"落第贤者的学院无双 1080p"`；若同时设置 `dmhy_team_id`，服务会追加该团队条件。搜索页面是 `/topics/list?keyword=...`，RSS 是 `/topics/rss/rss.xml?keyword=...`。自动查询仅带作品名，画质由本地规则判断，避免该站把 `1080` 与 `1080p` 当作不同词而漏收。`nyaa_query`、`nyaa_uploader`、`trusted_only` 只作用于 Nyaa，不能给动漫花园提供作品或语言证据。
+
+人工复核后确认：
+
+```json
+{"draft_id":"来自预览的ID","revision":2,"feed_id":"来自该版本的feed ID"}
+```
+
+草稿 30 分钟过期，旧版本/不同确认选择返回 409。同一确认重复调用返回同一订阅。确认创建 feed 和剧集记录，首次同步只建立基线；需要补旧集时另用手动采集接口。已存在相同 Bangumi ID/媒体库季数的订阅时返回错误并指出现有 ID，避免误建重复订阅。
+
+匹配规则随订阅保存为 `discovery_rules`。旧订阅的关键词 OR 语义保持不变。新增或调整 feed 不能借用原 feed 的番剧范围证据；改变集号偏移后与已确认规则不一致的内容会被跳过，需要恢复一致的映射或重新处理规则。
 
 ### Mikan 与 Bangumi
 

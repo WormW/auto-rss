@@ -17,6 +17,7 @@ import (
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/episode"
 	"github.com/WormW/auto-rss/internal/service/rss"
+	"github.com/WormW/auto-rss/internal/service/subscriptionmatch"
 	"github.com/robfig/cron/v3"
 	"gorm.io/gorm"
 )
@@ -380,7 +381,7 @@ func (s *scheduler) processFetchedFeedItemsWithSummary(
 	}
 
 	var maxPubTime *time.Time
-	for _, item := range items {
+	for _, item := range subscriptionmatch.Prioritize(subscription.DiscoveryRules, items) {
 		if err := ctx.Err(); err != nil {
 			return nil, summary, err
 		}
@@ -426,6 +427,12 @@ func (s *scheduler) processFetchedFeedItemsWithSummary(
 			}
 		}
 
+		if decision := subscriptionmatch.EvaluateForFeed(subscription.DiscoveryRules, item, feed.RSSURL, feed.EpisodeOffset); decision.Action != "match" {
+			if err := s.feedRepo.MarkSeenItem(feed.ID, resourceKey, item.Episode, time.Now()); err != nil {
+				return nil, summary, err
+			}
+			continue
+		}
 		if relativeEpisode <= 0 || (subscription.TotalEpisodes > 0 && relativeEpisode > subscription.TotalEpisodes) {
 			if err := s.feedRepo.MarkSeenItem(feed.ID, resourceKey, item.Episode, time.Now()); err != nil {
 				return nil, summary, err

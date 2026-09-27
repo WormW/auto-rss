@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -120,6 +121,30 @@ func TestExtractHashFromURL(t *testing.T) {
 			result := ExtractHashFromURL(tt.url)
 			assert.Equal(t, tt.expected, result)
 		})
+	}
+}
+
+func TestMagnetBase32AndHexRepresentTheSameTorrent(t *testing.T) {
+	const want = "3ca0e670c7e085619cd91a6d07c5938490c767b6"
+	for _, address := range []string{
+		"magnet:?xt=urn:btih:HSQOM4GH4CCWDHGZDJWQPRMTQSIMOZ5W&tr=https://example.test",
+		"magnet:?xt=urn:btih:hsqom4gh4ccwdhgzdjwqprmtqsimoz5w",
+		"magnet:?xt=urn:btih:hsqom4gh4ccwdhgz djwqprmtqsimoz5w",
+		"MAGNET:?xt=urn%3Abtih%3AHSQOM4GH4CCWDHGZDJWQPRMTQSIMOZ5W",
+		"magnet:?xt=urn:other:ignored&xt=urn:btih:" + want,
+	} {
+		if strings.Contains(address, " ") {
+			assert.Empty(t, ExtractHashFromURL(address))
+		} else {
+			assert.Equal(t, want, ExtractHashFromURL(address))
+		}
+	}
+	for _, address := range []string{
+		"magnet:?dn=urn:btih:" + want,
+		"magnet:?xt=urn:btih:" + strings.Repeat("z", 40),
+		"magnet:?xt=urn:btih:" + strings.Repeat("0", 32),
+	} {
+		assert.Empty(t, ExtractHashFromURL(address))
 	}
 }
 

@@ -64,6 +64,8 @@ docker run -d --name auto-rss --restart unless-stopped \
 
 ### MCP
 
+支持从番剧名称和季数生成订阅草稿：`prepare_subscription` 自动查询 Bangumi 候选、提取别名并生成蜜柑/Nyaa/动漫花园 RSS 预览；动漫花园宽搜会按 `team_id` 分类字幕组，人工选择后可用 `dmhy_team_id` 生成窄 RSS；人工复核条目、来源、画质和匹配样本后，调用 `confirm_subscription` 创建订阅。默认排除 720p、优先并等待 1080p，可在草稿中调整备用画质策略；预览和调度共用规则。预览不会触发下载，重复确认同一草稿不会重复订阅。当前仅创建追新订阅，历史补集仍使用现有手动采集接口。详见 [订阅发现与复核](docs/SUBSCRIPTION_DISCOVERY.md)。
+
 ```env
 MCP_ENABLED=true
 MCP_TOKEN=replace-with-a-long-random-token

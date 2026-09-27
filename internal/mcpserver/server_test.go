@@ -86,6 +86,8 @@ func TestMCPToolRegistryAnnotationsMatchSafetyPolicy(t *testing.T) {
 		"list_logs",
 	}
 	writeTools := []string{
+		"prepare_subscription",
+		"confirm_subscription",
 		"create_subscription",
 		"toggle_subscription",
 		"retry_download",

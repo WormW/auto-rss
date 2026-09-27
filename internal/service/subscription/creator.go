@@ -57,6 +57,22 @@ func (c *creator) Create(
 		prepared = append(prepared, feed)
 	}
 
+	return c.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return persistPrepared(tx, sub, prepared, c.episodeRepo, c.feedService)
+	})
+}
+
+// CreatePreparedInTx lets a reviewed draft and its subscription commit atomically.
+// Callers must prepare/validate feeds before entering the transaction.
+func CreatePreparedInTx(ctx context.Context, tx *gorm.DB, sub *model.Subscription, prepared []subscriptionfeed.Prepared) error {
+	if sub == nil || len(prepared) == 0 {
+		return errors.New("subscription and prepared feeds are required")
+	}
+	feeds := subscriptionfeed.NewService(tx, repository.NewSubscriptionFeedRepository(tx), nil)
+	return persistPrepared(tx.WithContext(ctx), sub, prepared, repository.NewEpisodeRepository(tx), feeds)
+}
+
+func persistPrepared(tx *gorm.DB, sub *model.Subscription, prepared []subscriptionfeed.Prepared, episodeRepo repository.EpisodeRepository, feeds *subscriptionfeed.Service) error {
 	if len(prepared) > 0 {
 		first := prepared[0].Feed
 		sub.RssURL = first.RSSURL
@@ -69,18 +85,16 @@ func (c *creator) Create(
 		}
 	}
 
-	return c.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(sub).Error; err != nil {
+	if err := tx.Create(sub).Error; err != nil {
+		return err
+	}
+	for _, feed := range prepared {
+		if _, err := feeds.CreatePreparedInTx(tx, sub.ID, feed); err != nil {
 			return err
 		}
-		for _, feed := range prepared {
-			if _, err := c.feedService.CreatePreparedInTx(tx, sub.ID, feed); err != nil {
-				return err
-			}
-		}
-		if c.episodeRepo != nil && sub.TotalEpisodes > 0 {
-			return c.episodeRepo.EnsureRangeInTx(tx, sub.ID, sub.TotalEpisodes)
-		}
-		return nil
-	})
+	}
+	if episodeRepo != nil && sub.TotalEpisodes > 0 {
+		return episodeRepo.EnsureRangeInTx(tx, sub.ID, sub.TotalEpisodes)
+	}
+	return nil
 }

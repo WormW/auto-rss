@@ -34,17 +34,22 @@ type Parser interface {
 
 // RSSItem RSS 条目
 type RSSItem struct {
-	Title       string
-	RssURL      string
-	TorrentURL  string
-	TorrentHash string
-	SizeBytes   int64
-	PubDate     string
-	PubTime     time.Time // 解析后的发布时间
-	Fansub      string
-	Episode     int
-	Language    LanguageType // 语言类型
-	LangKeyword string       // 匹配到的语言关键词（用于日志）
+	Title           string
+	ItemURL         string // Source release page, when the feed provides one.
+	SourceGroupID   string // Optional source-specific publisher/group ID.
+	SourceGroupName string // Optional source-specific publisher/group name.
+	RssURL          string
+	TorrentURL      string
+	TorrentHash     string
+	SizeBytes       int64
+	PubDate         string
+	PubTime         time.Time // 解析后的发布时间
+	Fansub          string
+	Episode         int
+	Language        LanguageType // 语言类型
+	LangKeyword     string       // 匹配到的语言关键词（用于日志）
+	CategoryID      string       // Optional Nyaa category, not a language guarantee.
+	Trusted         bool         // Optional Nyaa uploader mark, not an identity guarantee.
 }
 
 type parser struct {
@@ -138,8 +143,17 @@ func (p *parser) FetchAndParseWithTimeout(rssURL string, timeout time.Duration) 
 func (p *parser) feedItemToRSSItem(item *gofeed.Item) RSSItem {
 	rssItem := RSSItem{
 		Title:   item.Title,
+		ItemURL: item.Link,
 		RssURL:  extractItemRSSURL(item),
 		PubDate: item.Published,
+	}
+	if extensions, ok := item.Extensions["nyaa"]; ok {
+		if values := extensions["categoryId"]; len(values) > 0 {
+			rssItem.CategoryID = strings.TrimSpace(values[0].Value)
+		}
+		if values := extensions["trusted"]; len(values) > 0 {
+			rssItem.Trusted = strings.EqualFold(strings.TrimSpace(values[0].Value), "yes")
+		}
 	}
 
 	// 解析发布时间
@@ -154,6 +168,13 @@ func (p *parser) feedItemToRSSItem(item *gofeed.Item) RSSItem {
 		if length, err := strconv.ParseInt(strings.TrimSpace(enclosure.Length), 10, 64); err == nil && length > 0 {
 			rssItem.SizeBytes = length
 		}
+		// DMHY publishes magnet enclosures with a sentinel length="1", not the
+		// payload size. Keep it unknown so the small-torrent guard does not reject it.
+		if rssItem.SizeBytes == 1 && strings.HasPrefix(strings.ToLower(enclosure.URL), "magnet:") {
+			if page, err := url.Parse(item.Link); err == nil && strings.EqualFold(page.Hostname(), "share.dmhy.org") {
+				rssItem.SizeBytes = 0
+			}
+		}
 	} else if item.Link != "" {
 		rssItem.TorrentURL = item.Link
 	}
@@ -161,6 +182,8 @@ func (p *parser) feedItemToRSSItem(item *gofeed.Item) RSSItem {
 	// 优先使用 RSS 扩展字段中的 info-hash（如 nyaa:infoHash），其次尝试从 URL 提取。
 	if extHash := utils.ExtractInfoHashFromExtensions(item.Extensions); extHash != "" {
 		rssItem.TorrentHash = extHash
+	} else if magnetHash := utils.ExtractHashFromURL(rssItem.TorrentURL); magnetHash != "" {
+		rssItem.TorrentHash = magnetHash
 	} else if rssItem.TorrentURL != "" {
 		rssItem.TorrentHash = utils.ExtractInfoHashFromTorrentURL(rssItem.TorrentURL)
 		if rssItem.TorrentHash == "" {

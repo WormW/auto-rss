@@ -32,6 +32,7 @@ import (
 	"github.com/WormW/auto-rss/internal/service/rss"
 	"github.com/WormW/auto-rss/internal/service/scheduler"
 	"github.com/WormW/auto-rss/internal/service/subscription"
+	"github.com/WormW/auto-rss/internal/service/subscriptiondiscovery"
 	"github.com/WormW/auto-rss/internal/service/subscriptionfeed"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -110,6 +111,14 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	episodeService := episode.NewService(episodeRepo)
 	feedService := subscriptionfeed.NewServiceWithConfig(db, feedRepo, rssParser, configRepo)
 	subscriptionCreator := subscription.NewCreator(db, feedService, episodeRepo)
+	discoveryProvider := subscriptiondiscovery.NewHTTPProvider(func() string {
+		if value, err := configRepo.Get("system_proxy"); err == nil && value != nil {
+			return value.Value
+		}
+		return ""
+	})
+	discoveryService := subscriptiondiscovery.New(db, discoveryProvider)
+	discoveryHandler := handler.NewSubscriptionDiscoveryHandler(discoveryService)
 	rssSourceRepo := repository.NewRSSSourceRepository(db)
 	logRepo := repository.NewLogRepository(db)
 	replacementDownloader := episode.NewQBReplacementDownloader(db, downloadRepo, configRepo, qbClient, renameTemplate, cfg.DownloadPath)
@@ -234,6 +243,8 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			subscriptions.POST("", subscriptionHandler.Create)
 			subscriptions.GET("", subscriptionHandler.List)
 			subscriptions.POST("/preview", subscriptionHandler.Preview)
+			subscriptions.POST("/prepare", discoveryHandler.Prepare)
+			subscriptions.POST("/confirm", discoveryHandler.Confirm)
 			subscriptions.GET("/smart-fetch/status", subscriptionHandler.ListSmartFetchStatus)
 			subscriptions.GET("/:id", subscriptionHandler.GetByID)
 			subscriptions.PUT("/:id", subscriptionHandler.Update)
@@ -411,6 +422,7 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 			Scheduler:           rssScheduler,
 			QBClient:            qbClient,
 			SubscriptionCreator: subscriptionCreator,
+			Discovery:           discoveryService,
 		})
 		mcpHandler := mcpSrv.Handler()
 		r.Any("/mcp", func(c *gin.Context) {

@@ -26,6 +26,7 @@ import (
 	"github.com/WormW/auto-rss/internal/service/scheduler"
 	"github.com/WormW/auto-rss/internal/service/subscription"
 	"github.com/WormW/auto-rss/internal/service/subscriptionfeed"
+	"github.com/WormW/auto-rss/internal/service/subscriptionmatch"
 	"github.com/WormW/auto-rss/internal/service/task"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -74,6 +75,7 @@ type SubscriptionPreviewRequest struct {
 	FilterKeywords     string `json:"filter_keywords"`
 	ExcludeKeywords    string `json:"exclude_keywords"`
 	FilterRules        string `json:"filter_rules"`
+	DiscoveryRules     string `json:"discovery_rules,omitempty"`
 	Limit              int    `json:"limit"`
 }
 
@@ -487,6 +489,15 @@ func (h *SubscriptionHandler) Preview(c *gin.Context) {
 		FilterKeywords:     req.FilterKeywords,
 		ExcludeKeywords:    req.ExcludeKeywords,
 		FilterRules:        req.FilterRules,
+		DiscoveryRules:     req.DiscoveryRules,
+	}
+	if sub.ID > 0 {
+		existing, err := h.repo.GetByID(sub.ID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "subscription not found"})
+			return
+		}
+		sub.DiscoveryRules = existing.DiscoveryRules
 	}
 	if sub.Name == "" {
 		sub.Name = "未命名订阅"
@@ -518,7 +529,7 @@ func (h *SubscriptionHandler) Preview(c *gin.Context) {
 	totalDuplicate := 0
 	latestEpisode := 0
 
-	for index, item := range items {
+	for index, item := range subscriptionmatch.Prioritize(sub.DiscoveryRules, items) {
 		if item.Episode > latestEpisode {
 			latestEpisode = item.Episode
 		}
@@ -539,6 +550,12 @@ func (h *SubscriptionHandler) Preview(c *gin.Context) {
 		if action == "download" && sub.TotalEpisodes > 0 && relativeEpisode > sub.TotalEpisodes {
 			action = "skip"
 			reason = "超过总集数"
+		}
+		if action == "download" {
+			if decision := subscriptionmatch.EvaluateForFeed(sub.DiscoveryRules, item, req.RssURL, sub.EpisodeOffset); decision.Action != "match" {
+				action = "skip"
+				reason = decision.Reason
+			}
 		}
 		if action == "download" {
 			if matched, filterReason := matchesSubscriptionFilters(sub, item.Title); !matched {

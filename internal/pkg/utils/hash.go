@@ -1,6 +1,9 @@
 package utils
 
 import (
+	"encoding/base32"
+	"encoding/hex"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -20,22 +23,27 @@ func ExtractInfoHashFromTorrentURL(torrentURL string) string {
 
 // ExtractHashFromURL 从 URL 中提取 hash
 // 支持 magnet link 的 btih (BitTorrent Info Hash)
-func ExtractHashFromURL(url string) string {
-	// 处理 magnet link
-	if strings.HasPrefix(strings.ToLower(url), "magnet:") {
-		// 查找 btih (BitTorrent Info Hash)
-		url = strings.ToLower(url)
-		if idx := strings.Index(url, "btih:"); idx != -1 {
-			hash := url[idx+5:]
-			// 截取到下一个 & 或字符串结束
-			if endIdx := strings.Index(hash, "&"); endIdx != -1 {
-				hash = hash[:endIdx]
-			}
-			// hash 应该是 40 个十六进制字符
-			if len(hash) == 40 {
-				return strings.ToLower(hash)
-			}
-			// 或者是 32 个 base32 字符（需要转换，暂时跳过）
+func ExtractHashFromURL(address string) string {
+	parsed, err := url.Parse(address)
+	if err != nil || !strings.EqualFold(parsed.Scheme, "magnet") {
+		return ""
+	}
+	for _, topic := range parsed.Query()["xt"] {
+		if !strings.HasPrefix(strings.ToLower(topic), "urn:btih:") {
+			continue
+		}
+		hash := topic[len("urn:btih:"):]
+		var decoded []byte
+		switch len(hash) {
+		case 40:
+			decoded, err = hex.DecodeString(hash)
+		case 32:
+			decoded, err = base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ToUpper(hash))
+		default:
+			continue
+		}
+		if err == nil && len(decoded) == 20 {
+			return hex.EncodeToString(decoded)
 		}
 	}
 	return ""

@@ -74,6 +74,8 @@ func newTestDB(t *testing.T) *gorm.DB {
 func TestSetupRegistersSubscriptionFeedRoutes(t *testing.T) {
 	router, _, _ := setupRouterForTestWithConfig(t, false, nil)
 	want := map[string]bool{
+		http.MethodPost + " /api/v1/subscriptions/prepare":                   false,
+		http.MethodPost + " /api/v1/subscriptions/confirm":                   false,
 		http.MethodGet + " /api/v1/subscriptions/:id/feeds":                  false,
 		http.MethodPost + " /api/v1/subscriptions/:id/feeds":                 false,
 		http.MethodPut + " /api/v1/subscriptions/:id/feeds/:feedId":          false,
@@ -545,6 +547,8 @@ func TestSetup_AuthEnabledProtectsPhase7Routes(t *testing.T) {
 		path   string
 	}{
 		{name: "tag list", method: http.MethodGet, path: "/api/v1/tags"},
+		{name: "prepare discovery", method: http.MethodPost, path: "/api/v1/subscriptions/prepare"},
+		{name: "confirm discovery", method: http.MethodPost, path: "/api/v1/subscriptions/confirm"},
 		{name: "tag create", method: http.MethodPost, path: "/api/v1/tags"},
 		{name: "download history", method: http.MethodGet, path: "/api/v1/downloads/history"},
 		{name: "download statistics", method: http.MethodGet, path: "/api/v1/downloads/statistics"},
