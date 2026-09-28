@@ -2,6 +2,7 @@ package dailystatus
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -150,4 +151,31 @@ func TestScheduleForDayConvertsMidnightAcrossTimezones(t *testing.T) {
 	sub.AirTime = ""
 	_, due = scheduleForDay(sub, sub.AirDay, sunday)
 	require.False(t, due, "without a time, keep the configured weekday")
+}
+
+func TestDailyStatusKeepsDuplicateNamesInStableOrder(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Subscription{}, &model.SubscriptionFeed{}, &model.Download{}, &model.SubscriptionEpisode{}, &model.EpisodeResourceCandidate{}))
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	stamp := time.Date(2026, 9, 28, 10, 0, 0, 0, time.UTC)
+	for id := uint(1); id <= 12; id++ {
+		require.NoError(t, db.Create(&model.Subscription{ID: id, Name: "Same title", AirDay: "1"}).Error)
+		require.NoError(t, db.Create(&model.SubscriptionFeed{SubscriptionID: id, Name: "Same feed", LastCheckTime: &stamp, LastSuccessAt: &stamp}).Error)
+		require.NoError(t, db.Create(&model.Download{SubscriptionID: id, Title: "Same title", TorrentHash: fmt.Sprint(id), Episode: 1, Status: model.DownloadStatusCompleted, CreatedAt: stamp, DownloadedAt: &stamp}).Error)
+	}
+	service := New(db, repository.NewSubscriptionRepository(db), repository.NewDownloadRepository(db))
+	for run := 0; run < 3; run++ {
+		status, err := service.Get(context.Background(), "2026-09-28", "UTC")
+		require.NoError(t, err)
+		require.Len(t, status.CheckedToday, 12)
+		require.Len(t, status.CollectedToday, 12)
+		for i := range status.CheckedToday {
+			require.Equal(t, uint(i+1), status.CheckedToday[i].SubscriptionID)
+			require.Equal(t, uint(i+1), status.CollectedToday[i].SubscriptionID)
+			require.Equal(t, uint(i+1), status.DownloadedToday[i].SubscriptionID)
+		}
+	}
 }

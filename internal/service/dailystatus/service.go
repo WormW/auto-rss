@@ -185,15 +185,33 @@ func (s *Service) Get(ctx context.Context, date, timezone string) (*Status, erro
 		return nil, err
 	}
 
-	sort.Slice(out.DueToday, func(i, j int) bool { return out.DueToday[i].AirTime < out.DueToday[j].AirTime })
-	sort.Slice(out.CheckedToday, func(i, j int) bool { return out.CheckedToday[i].Name < out.CheckedToday[j].Name })
-	sort.Slice(out.CollectedToday, func(i, j int) bool { return out.CollectedToday[i].Name < out.CollectedToday[j].Name })
+	sort.Slice(out.DueToday, func(i, j int) bool {
+		if out.DueToday[i].AirTime == out.DueToday[j].AirTime {
+			return out.DueToday[i].SubscriptionID < out.DueToday[j].SubscriptionID
+		}
+		return out.DueToday[i].AirTime < out.DueToday[j].AirTime
+	})
+	sort.Slice(out.CheckedToday, func(i, j int) bool {
+		if out.CheckedToday[i].Name == out.CheckedToday[j].Name {
+			return out.CheckedToday[i].SubscriptionID < out.CheckedToday[j].SubscriptionID
+		}
+		return out.CheckedToday[i].Name < out.CheckedToday[j].Name
+	})
+	sort.Slice(out.CollectedToday, func(i, j int) bool {
+		if out.CollectedToday[i].Name == out.CollectedToday[j].Name {
+			return out.CollectedToday[i].SubscriptionID < out.CollectedToday[j].SubscriptionID
+		}
+		return out.CollectedToday[i].Name < out.CollectedToday[j].Name
+	})
 	sort.Slice(out.DownloadedToday, func(i, j int) bool {
 		if out.DownloadedToday[i].DownloadedAt == nil {
 			return false
 		}
 		if out.DownloadedToday[j].DownloadedAt == nil {
 			return true
+		}
+		if out.DownloadedToday[i].DownloadedAt.Equal(*out.DownloadedToday[j].DownloadedAt) {
+			return out.DownloadedToday[i].ID < out.DownloadedToday[j].ID
 		}
 		return out.DownloadedToday[i].DownloadedAt.Before(*out.DownloadedToday[j].DownloadedAt)
 	})
@@ -265,7 +283,12 @@ func (s *Service) buildCheckedToday(ctx context.Context, start, end time.Time, s
 		item.Feeds = append(item.Feeds, FeedCheck{FeedID: feed.ID, Name: feed.Name, Fansub: feed.Fansub, CheckedAt: feed.LastCheckTime, SuccessAt: feed.LastSuccessAt, LastError: feed.LastError, BaselinePending: feed.BaselinePending})
 	}
 	for _, item := range bySubscription {
-		sort.Slice(item.Feeds, func(i, j int) bool { return item.Feeds[i].Name < item.Feeds[j].Name })
+		sort.Slice(item.Feeds, func(i, j int) bool {
+			if item.Feeds[i].Name == item.Feeds[j].Name {
+				return item.Feeds[i].FeedID < item.Feeds[j].FeedID
+			}
+			return item.Feeds[i].Name < item.Feeds[j].Name
+		})
 		out.CheckedToday = append(out.CheckedToday, *item)
 	}
 	return nil
