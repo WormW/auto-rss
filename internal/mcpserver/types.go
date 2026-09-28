@@ -217,6 +217,11 @@ type GetCalendarInput struct {
 	WeekOffset int  `json:"week_offset,omitempty" jsonschema:"Week offset for the full week view. 0 is the current week, 1 is next week."`
 }
 
+type GetDailyStatusInput struct {
+	Date     string `json:"date,omitempty" jsonschema:"Civil date in YYYY-MM-DD format. Omit for today in the requested or server timezone."`
+	Timezone string `json:"timezone,omitempty" jsonschema:"IANA timezone such as Asia/Shanghai. Omit to use the server local timezone."`
+}
+
 type ListLogsInput struct {
 	Cursor string `json:"cursor,omitempty" jsonschema:"Opaque cursor returned by a previous list_logs call. Leave empty for the first page."`
 	Limit  int    `json:"limit,omitempty" jsonschema:"Maximum records to return. Defaults to 20 and is capped at 100."`

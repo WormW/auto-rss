@@ -62,6 +62,7 @@ Authorization: Bearer replace-with-a-long-random-token
 | `search_bangumi` | 只读 | 搜索 Bangumi 元数据 |
 | `get_bangumi_subject` | 只读 | 获取 Bangumi 条目详情 |
 | `get_calendar` | 只读 | 查看今日或本周追番日历 |
+| `get_daily_status` | 只读 | 汇总某天应更新、RSS 检查、已采集、已完成下载和失败 |
 | `list_logs` | 只读 | 查询近期日志 |
 
 ## 新增订阅与管理范围
@@ -82,6 +83,18 @@ Authorization: Bearer replace-with-a-long-random-token
 第一版支持蜜柑、Nyaa、动漫花园，普通单集及 `any/chs/cht/en` 语言要求。复杂季数别名无法确定时保守跳过；不自动学习放宽规则，不支持在确认动作中补历史全集或修改已有订阅。筛选预览使用默认命名模板示意，实际整理沿用部署中的命名配置及文件扩展名。
 
 `create_subscription` 与 REST 共用订阅创建流程：校验 feed 可访问且能够映射集数后，事务性写入订阅、feed 和剧集台账。无效 feed 返回错误，不留下半成品订阅。首次自动同步只建立历史基线；历史补集通过 REST 手动采集。
+
+外接 Agent 查询某一天的运行状态时调用 `get_daily_status`。输入可选 `date`（`YYYY-MM-DD`）和 `timezone`（IANA 时区，例如 `Asia/Shanghai`），都省略时使用 Auto-RSS 进程所在机器的本地日期和时区。返回字段含义固定为：
+
+- `due_today`：按当前启用订阅的 `AirDay`（为空时取 `UpdateDay`）推算应更新、且尚未收齐的番剧；有有效 `AirTime/AirTimezone` 时换算到查询时区，缺少时间时按配置星期归类，集号是当前进度的下一集估计；
+- `checked_today`：最后一次检查落在查询日的 RSS feed，包含最后检查的成功/失败数和错误；即使之后停用也保留该查询结果；
+- `collected_today`：查询日创建了下载任务或待复核候选的番剧汇总，包含手动采集和首次基线产生的候选，不包含旧任务重试。它表示已进入采集台账，不等于文件已经完成；
+- `downloaded_today`：今天 `DownloadedAt` 落在该日期且状态为 `completed` 的下载记录；
+- `errors`：最后一次检查在查询日的 feed 当前错误，以及查询日创建的下载/候选当前错误；不是错误发生时间的历史记录。
+
+`notes` 说明当前数据的限制：排期不是实际播出记录，feed 仅保存最后检查而不是完整历史。过去日期的空结果不能证明从未采集或报错。完整调用示例见 [Agent 接入说明](AGENT_DAILY_STATUS.md)。
+
+这个工具只读，不会触发 RSS 检查。需要主动拉取时仍调用 `refresh_rss`，再用 `get_daily_status` 查询结果。
 
 完整编辑、多 feed 和批量管理接口仍在 REST；当前 MCP 工具尚未覆盖这些操作。`list_logs` 查询数据库记录，返回的 `persistence_enabled` 表示是否正在持久化新日志。默认关闭新的数据库日志写入，运行日志由 stderr 提供；空结果不能证明刚发起的操作成功，按需设置 `LOG_DB_ENABLED=true`。
 

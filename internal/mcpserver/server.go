@@ -18,6 +18,7 @@ import (
 	"github.com/WormW/auto-rss/internal/repository"
 	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/calendar"
+	"github.com/WormW/auto-rss/internal/service/dailystatus"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/mikan"
 	"github.com/WormW/auto-rss/internal/service/rss"
@@ -56,6 +57,7 @@ type Server struct {
 	mikanService        *mikan.MikanService
 	bangumiService      *bangumi.BangumiService
 	calendarService     *calendar.Calendar
+	dailyStatusService  *dailystatus.Service
 	mcpServer           *mcp.Server
 	subscriptionCreator subscription.Creator
 	discovery           *subscriptiondiscovery.Service
@@ -76,6 +78,7 @@ func New(deps Dependencies) *Server {
 		mikanService:        mikan.NewMikanService(""),
 		bangumiService:      bangumi.NewBangumiService(),
 		calendarService:     calendar.NewCalendar(deps.SubscriptionRepo, deps.DownloadRepo),
+		dailyStatusService:  dailystatus.New(deps.DB, deps.SubscriptionRepo, deps.DownloadRepo),
 		subscriptionCreator: deps.SubscriptionCreator,
 		discovery:           deps.Discovery,
 	}
@@ -150,6 +153,7 @@ func (s *Server) registerTools() {
 	addTool(s, "search_bangumi", "Search Bangumi anime metadata by title, or return the best match only. Use this to identify subject IDs, total episodes, air dates, scores, and names before creating or enriching subscriptions. This calls an external API.", true, s.searchBangumi)
 	addTool(s, "get_bangumi_subject", "Get detailed Bangumi metadata for a known subject ID. Use this when you need a subject's canonical names, summary, score, rank, air date, or episode count.", true, s.getBangumiSubject)
 	addTool(s, "get_calendar", "Get Auto-RSS airing calendar data. Use today_only for today's expected next episodes, or week_offset for a week view. This is read-only and based on subscription calendar fields.", true, s.getCalendar)
+	addTool(s, "get_daily_status", "Get one civil day's expected updates, RSS feed checks, collected resources, completed downloads, and errors. Use date as YYYY-MM-DD and timezone as an IANA name when needed; omitted values mean the server's local day. collected_today means a retained download task or replacement candidate was created that day, including manual collection. downloaded_today uses completion timestamps. Read notes: the schedule is a projection of current settings and feed checks retain only the last result, not a complete history. This is read-only and does not trigger an RSS check.", true, s.getDailyStatus)
 	addTool(s, "list_logs", "List stored Auto-RSS database logs with cursor pagination and optional level/module filters. Check persistence_enabled: when false, new runtime logs only go to stderr and these results are historical. Empty results do not prove a recent operation succeeded. This is read-only.", true, s.listLogs)
 }
 

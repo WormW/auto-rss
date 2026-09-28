@@ -25,6 +25,7 @@ import (
 	"github.com/WormW/auto-rss/internal/service/backup"
 	"github.com/WormW/auto-rss/internal/service/bangumi"
 	"github.com/WormW/auto-rss/internal/service/calendar"
+	"github.com/WormW/auto-rss/internal/service/dailystatus"
 	"github.com/WormW/auto-rss/internal/service/downloader"
 	"github.com/WormW/auto-rss/internal/service/episode"
 	"github.com/WormW/auto-rss/internal/service/medialibrary"
@@ -200,6 +201,8 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 	bangumiHandler := handler.NewBangumiHandler(configRepo)
 	logHandler := handler.NewLogHandler(logRepo)
 	calendarHandler := handler.NewCalendarHandler(subscriptionRepo, downloadRepo)
+	dailyStatusService := dailystatus.New(db, subscriptionRepo, downloadRepo)
+	dailyStatusHandler := handler.NewDailyStatusHandler(dailyStatusService)
 	tagHandler := handler.NewTagHandler(subscriptionRepo)
 	mediaLibraryHandler := handler.NewMediaLibraryHandler(mediaLibrarySvc, downloadRepo, subscriptionRepo)
 	authHandler := handler.NewAuthHandler(cfg, jwtService)
@@ -385,6 +388,11 @@ func setup(db *gorm.DB, cfg *config.Config, qbClient downloader.QBittorrentClien
 		{
 			calendars.GET("", calendarHandler.GetWeekSchedule)
 			calendars.GET("/today", calendarHandler.GetTodaySchedule)
+		}
+
+		daily := protected.Group("/daily")
+		{
+			daily.GET("/status", dailyStatusHandler.Get)
 		}
 
 		// 媒体库联动

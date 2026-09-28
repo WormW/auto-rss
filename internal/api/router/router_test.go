@@ -82,6 +82,7 @@ func TestSetupRegistersSubscriptionFeedRoutes(t *testing.T) {
 		http.MethodDelete + " /api/v1/subscriptions/:id/feeds/:feedId":       false,
 		http.MethodPost + " /api/v1/subscriptions/:id/feeds/preview":         false,
 		http.MethodPost + " /api/v1/subscriptions/:id/feeds/:feedId/preview": false,
+		http.MethodGet + " /api/v1/daily/status":                             false,
 	}
 	for _, route := range router.Routes() {
 		key := route.Method + " " + route.Path

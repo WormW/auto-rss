@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/WormW/auto-rss/internal/service/bangumi"
+	"github.com/WormW/auto-rss/internal/service/dailystatus"
 	"github.com/WormW/auto-rss/internal/service/mikan"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -94,6 +95,17 @@ func (s *Server) getCalendar(ctx context.Context, req *mcp.CallToolRequest, inpu
 		return nil, nil, fmt.Errorf("failed to get calendar: %w", err)
 	}
 	return resultWithText[any](schedule)
+}
+
+func (s *Server) getDailyStatus(ctx context.Context, req *mcp.CallToolRequest, input GetDailyStatusInput) (*mcp.CallToolResult, dailystatus.Status, error) {
+	if s.dailyStatusService == nil {
+		return nil, dailystatus.Status{}, fmt.Errorf("daily status service is unavailable")
+	}
+	status, err := s.dailyStatusService.Get(ctx, input.Date, input.Timezone)
+	if err != nil {
+		return nil, dailystatus.Status{}, fmt.Errorf("failed to get daily status: %w", err)
+	}
+	return resultWithText(*status)
 }
 
 func (s *Server) listLogs(ctx context.Context, req *mcp.CallToolRequest, input ListLogsInput) (*mcp.CallToolResult, ListLogsOutput, error) {

@@ -83,6 +83,7 @@ func TestMCPToolRegistryAnnotationsMatchSafetyPolicy(t *testing.T) {
 		"search_bangumi",
 		"get_bangumi_subject",
 		"get_calendar",
+		"get_daily_status",
 		"list_logs",
 	}
 	writeTools := []string{
